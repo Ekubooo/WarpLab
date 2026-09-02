@@ -38,7 +38,7 @@ class PlaybackScheduler:
     def __init__(
         self,
         playback_speed: float = 0.5,
-        max_substeps_per_frame: int = 8,
+        max_substeps_per_frame: int = 3,
         max_wall_delta: float = 0.1,
     ):
         if playback_speed <= 0.0:
@@ -210,7 +210,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--max-substeps-per-frame",
         type=positive_int,
-        default=8,
+        default=3,
         help="Maximum complete physics substeps computed for one rendered frame.",
     )
     parser.add_argument(

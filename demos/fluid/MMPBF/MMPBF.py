@@ -334,7 +334,7 @@ class MMPBFConfig:
         return cls(
             particle_radius=2.0 / 185.0,
             fluid_width=30,
-            fluid_height=35,
+            fluid_height=50,
             fluid_depth=30,
         )
 

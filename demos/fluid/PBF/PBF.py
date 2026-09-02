@@ -13,6 +13,7 @@ def apply_predict(
     pos: wp.array[wp.vec3],
     dt: float,
     prePos: wp.array[wp.vec3],
+    preNew: wp.array[wp.vec3],
     vel: wp.array[wp.vec3]
 ):
     tid = wp.tid()
@@ -23,13 +24,16 @@ def apply_predict(
     # if external force: gravity+ext_force
 
     vel[tid] = v_new
-    prePos[tid] = pos[tid] + dt * v_new
+    predicit = pos[tid] + dt * v_new
+    prePos[tid] = predicit
+    preNew[tid] = predicit
 
 @wp.kernel
 def calc_lambda(
     grid: wp.uint64,
     smoothing_length: float,
     pre_Pos: wp.array[wp.vec3],
+    pre_New: wp.array[wp.vec3],
     lambda_Opt: wp.array[float]
 ):
     density = float(0.0)
@@ -39,8 +43,9 @@ def calc_lambda(
     # id of particle that order by hash/bucket/gridIndex(not "grid id")
     tid = wp.tid()
     i = wp.hash_grid_point_id(grid, tid)
-    currPos = pre_Pos[i]
-    neighbors = wp.hash_grid_query(grid, currPos, smoothing_length)
+    qurryPos = pre_New[i]    # Snapshot
+    currPos = pre_Pos[i]   
+    neighbors = wp.hash_grid_query(grid, qurryPos, smoothing_length)
 
     for index in neighbors:
         NPos = pre_Pos[index]
@@ -71,13 +76,15 @@ def calc_deltaPos(
     grid: wp.uint64,
     smoothing_length: float,
     pre_Pos: wp.array[wp.vec3],
+    pre_New: wp.array[wp.vec3],
     lambda_Opt: wp.array[float],
     delta_Pos: wp.array[wp.vec3]
 ):
     tid = wp.tid()
     i = wp.hash_grid_point_id(grid, tid)
     currPos = pre_Pos[i]
-    neighbors = wp.hash_grid_query(grid, currPos, smoothing_length)
+    qurryPos = pre_New[i]    # Snapshot
+    neighbors = wp.hash_grid_query(grid, qurryPos, smoothing_length)
 
     # data
     delta_Q = 0.3 * smoothing_length
@@ -219,7 +226,9 @@ def calc_visvor(
         etaTotal += -1.0 * dir2N * currGrad * NCurl[3]
 
         # viscosity
-        vel_corr += Vel_ij * Pow3(dst2N, smoothing_length)
+        vel_corr += Vel_ij * Poly6(dst2N, smoothing_length)
+        # vel_corr += Vel_ij * Pow3(dst2N, smoothing_length) 
+
         # currDensity += Poly6(dst2N,smoothing_length)
 
 
@@ -349,9 +358,7 @@ def apply_bounds(
     particle_x: wp.array[wp.vec3],
     particle_v: wp.array[wp.vec3],
     damping_coef: float,
-    width: float,
-    height: float,
-    length: float,
+    width: float, height: float, length: float,
 ):
     tid = wp.tid()
 
@@ -405,7 +412,9 @@ def drift(particle_x: wp.array[wp.vec3], particle_v: wp.array[wp.vec3], dt: floa
 
 @wp.kernel
 def initialize_particles(
-    particle_x: wp.array[wp.vec3], smoothing_length: float, width: float, height: float, length: float
+    particle_x: wp.array[wp.vec3],
+    smoothing_length: float,
+    width: float, height: float, length: float
 ):
     tid = wp.tid()
 
@@ -433,7 +442,7 @@ class Example:
         self.verbose = verbose
 
         # render params
-        fps = 60
+        fps = 90
         self.frame_dt = 1.0 / fps
         self.sim_time = 0.0
 
@@ -446,7 +455,8 @@ class Example:
         self.isotropic_exp = 20
         self.base_density = 1.0
         self.particle_mass = 0.01 * self.smoothing_length**3  # reduce according to smoothing length
-        self.dt = 0.01 * self.smoothing_length  # decrease sim dt by smoothing length
+        # self.dt = 0.01 * self.smoothing_length  # decrease sim dt by smoothing length
+        self.dt = self.frame_dt / 3.0
         self.dynamic_visc = 0.025
         self.damping_coef = -0.95
         self.gravity = -0.1
@@ -467,15 +477,16 @@ class Example:
         )
 
         # allocate arrays
-        self.pos = wp.empty(self.n, dtype=wp.vec3)          # not init 
-        self.pre_Pos = wp.zeros(self.n, dtype=wp.vec3)      # not init 
-        self.delta_Pos = wp.zeros(self.n, dtype=wp.vec3)      # not init 
+        self.pos = wp.empty(self.n, dtype=wp.vec3)
+        self.pre_Pos = wp.zeros(self.n, dtype=wp.vec3)
+        self.pre_New = wp.zeros(self.n, dtype=wp.vec3)
+        self.delta_Pos = wp.zeros(self.n, dtype=wp.vec3)
         self.v = wp.zeros(self.n, dtype=wp.vec3)
 
         self.delta_Vel = wp.zeros(self.n, wp.vec3)
-        self.curl = wp.zeros(self.n, dtype=wp.vec4)      # not init 
+        self.curl = wp.zeros(self.n, dtype=wp.vec4)
 
-        self.lambda_Opt = wp.zeros(self.n, dtype=float)     # not init 
+        self.lambda_Opt = wp.zeros(self.n, dtype=float)
         self.rho = wp.zeros(self.n, dtype=float)
         self.a = wp.zeros(self.n, dtype=wp.vec3)
 
@@ -496,7 +507,7 @@ class Example:
             self.renderer = wp.render.UsdRenderer(stage_path)
 
     def step(self):
-        with wp.ScopedTimer("sub-step"):
+        with wp.ScopedTimer("sub-step", synchronize=True):
             # 3 substep: (or more)
             for _ in range(self.substep):
                 # Prologue
@@ -506,9 +517,9 @@ class Example:
                         kernel=apply_predict,
                         dim=self.n,
                         inputs=[self.pos, self.dt],
-                        outputs= [self.pre_Pos, self.v]
+                        outputs= [self.pre_Pos, self.pre_New, self.v]
                     )
-                    self.grid.build(self.pre_Pos, self.smoothing_length)
+                    self.grid.build(self.pre_New, self.smoothing_length)
 
                 # Solver
                 with wp.ScopedTimer("Core Iterations", active=self.verbose):
@@ -520,7 +531,8 @@ class Example:
                             inputs=[
                                 self.grid.id, 
                                 self.smoothing_length,
-                                self.pre_Pos
+                                self.pre_Pos,
+                                self.pre_New
                             ],
                             outputs=[self.lambda_Opt]
                         )
@@ -531,6 +543,7 @@ class Example:
                                 self.grid.id, 
                                 self.smoothing_length, 
                                 self.pre_Pos, 
+                                self.pre_New,
                                 self.lambda_Opt
                             ],
                             outputs=[self.delta_Pos]
@@ -547,7 +560,7 @@ class Example:
 
                 # Epilogue
                 with wp.ScopedTimer("Update with effect", active=self.verbose):
-                    # self.grid.build(self.pre_Pos, self.smoothing_length)
+                    self.grid.build(self.pre_Pos, self.smoothing_length)
                     wp.launch(
                         kernel=update_position,
                         dim=self.n,
@@ -587,6 +600,7 @@ class Example:
 
 
             self.sim_time += self.frame_dt
+            # self.sim_time += self.dt
 
     def render(self):
         if self.renderer is None:

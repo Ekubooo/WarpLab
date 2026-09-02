@@ -1,1 +1,85 @@
+# Project-local documentation and generated simulation output
 Doc/
+output/
+outputs/
+profiles/
+
+# Python bytecode and native extension artifacts
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# Python environments and local environment variables
+.env
+.envrc
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python packaging and build artifacts
+.Python
+build/
+dist/
+downloads/
+.eggs/
+eggs/
+wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Tests, coverage, linters, and type-checker caches
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# NVIDIA Warp build products and generated caches
+_build/
+_repo/
+_conan/
+_deps/
+.usd_cache/
+.warp_cache/
+*.o
+*.obj
+*.exp
+*.dll
+*.lib
+*.pdb
+*.log
+*.bak
+
+# NVIDIA Nsight Systems profiling artifacts
+*.nsys-rep
+*.qdstrm
+*.nsys-analysis
+profiles/**/*.sqlite
+profiles/**/*.csv
+
+# IDE and editor files
+.idea/
+.vscode/
+.vs/
+.history/
+tempCodeRunnerFile.py
+
+# Windows desktop metadata
+Thumbs.db
+Desktop.ini
