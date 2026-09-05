@@ -64,8 +64,8 @@ def calc_lambda(
         # do something.
     
     gradSum = grad_j + wp.dot(grad_i, grad_i)
-    constraint = wp.max(density*Inv_Rho0 - 1.0, 0.0)
-    # constraint = density*Inv_Rho0 - 1.0
+    # constraint = wp.max(density*Inv_Rho0 - 1.0, 0.0)
+    constraint = density*Inv_Rho0 - 1.0
     lambdaCurr = -constraint / (gradSum + Lamb_Eps)
 
     # Density[tid] = density # density only for lambda.
@@ -104,7 +104,13 @@ def calc_deltaPos(
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
         poly6 = Poly6(dst2N, smoothing_length)
-        S_corr = -S_corr_K * wp.pow(wp.abs(poly6/WDeltaQ), S_corr_N)
+
+        # S_corr = -S_corr_K * wp.pow(wp.abs(poly6/WDeltaQ), S_corr_N) 
+        x = poly6 * (1.0/WDeltaQ)
+        x2 = x * x
+        x4 = x2 * x2 
+        S_corr = -S_corr_K * x4
+
         lambda_j = lambda_Opt[index]
         lambda_Sum = lambda_i + lambda_j + S_corr
         currGrad = dir2N * DPow3(dst2N, smoothing_length)
@@ -442,7 +448,7 @@ class Example:
         self.verbose = verbose
 
         # render params
-        fps = 90
+        fps = 60
         self.frame_dt = 1.0 / fps
         self.sim_time = 0.0
 
@@ -455,17 +461,19 @@ class Example:
         self.isotropic_exp = 20
         self.base_density = 1.0
         self.particle_mass = 0.01 * self.smoothing_length**3  # reduce according to smoothing length
+
         # self.dt = 0.01 * self.smoothing_length  # decrease sim dt by smoothing length
         self.dt = self.frame_dt / 3.0
+
         self.dynamic_visc = 0.025
         self.damping_coef = -0.95
         self.gravity = -0.1
         self.n = int(
-            self.height * (self.width / 4.0) * (self.height / 4.0) / (self.smoothing_length**3)
+            self.height * (self.width / 2.0) * (self.height / 2.0) / (self.smoothing_length**3)
         )  # number particles (small box in corner)
         self.sim_step_to_frame_ratio = int(32 / self.smoothing_length)
         self.substep = 3
-        self.iterations = 3
+        self.iterations = 5
 
         # constants
         self.density_normalization = (315.0 * self.particle_mass) / (
@@ -499,7 +507,7 @@ class Example:
 
         # create hash array
         grid_size = int(self.height / (4.0 * self.smoothing_length))
-        self.grid = wp.HashGrid(grid_size, grid_size, grid_size)
+        self.grid = wp.HashGrid(128, 128, 128)
 
         # renderer
         self.renderer = None
@@ -599,8 +607,8 @@ class Example:
                     )
 
 
-            self.sim_time += self.frame_dt
-            # self.sim_time += self.dt
+            # self.sim_time += self.frame_dt
+            self.sim_time += self.dt
 
     def render(self):
         if self.renderer is None:

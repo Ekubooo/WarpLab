@@ -89,6 +89,7 @@ class MMPBFTest(unittest.TestCase):
         self.assertEqual(config.pressure_iterations, 5)
         self.assertEqual(config.velocity_update_method, 0)
         self.assertEqual(config.xsph_viscosity, 0.02)
+        self.assertEqual(config.max_particle_speed, 8.0)
         self.assertEqual(config.cfl_factor, 1.0)
         self.assertEqual(simulation.support_radius, 0.1)
         self.assertEqual(simulation.container_size, (4.0, 4.0, 0.8))
@@ -106,6 +107,11 @@ class MMPBFTest(unittest.TestCase):
         np.testing.assert_allclose(boundaries.max(axis=0), (2.0, 4.0, 0.4), atol=1.0e-7)
         # The official addWall calls intentionally duplicate edge and corner samples.
         self.assertGreater(len(boundaries), len(np.unique(boundaries, axis=0)))
+
+    def test_max_particle_speed_must_be_positive(self):
+        for value in (0.0, -1.0):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                MMPBFConfig(max_particle_speed=value)
 
     def test_example_has_three_methods_and_initialization_has_no_reverse_import(self):
         methods = {
@@ -421,6 +427,7 @@ class MMPBFTest(unittest.TestCase):
                 normalized_densities,
                 volume,
                 viscosity,
+                8.0,
                 1.0,
                 1,
                 counts,
@@ -434,6 +441,52 @@ class MMPBFTest(unittest.TestCase):
         expected[0] -= viscosity * volume * (velocities_np[0] - velocities_np[1]) * weight
         expected[1] -= viscosity * volume * (velocities_np[1] - velocities_np[0]) * weight
         np.testing.assert_allclose(output.numpy(), expected, rtol=2.0e-6, atol=2.0e-6)
+
+    def test_xsph_output_clamps_speed_magnitude_without_changing_direction(self):
+        velocities_np = np.array(
+            (
+                (0.0, 0.0, 0.0),
+                (3.0, 4.0, 0.0),
+                (8.0, 0.0, 0.0),
+                (9.0, 0.0, 0.0),
+                (-9.0, 12.0, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        particle_count = len(velocities_np)
+        positions = wp.zeros(particle_count, dtype=wp.vec3, device=self.device)
+        velocities = wp.array(velocities_np, dtype=wp.vec3, device=self.device)
+        normalized_densities = wp.ones(particle_count, dtype=float, device=self.device)
+        counts = wp.zeros(particle_count, dtype=int, device=self.device)
+        indices = wp.zeros(particle_count, dtype=int, device=self.device)
+        output = wp.zeros(particle_count, dtype=wp.vec3, device=self.device)
+
+        wp.launch(
+            solver.compute_xsph_viscosity,
+            dim=particle_count,
+            inputs=[
+                positions,
+                velocities,
+                normalized_densities,
+                0.4,
+                0.02,
+                8.0,
+                1.0,
+                1,
+                counts,
+                indices,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+        expected = velocities_np.copy()
+        expected[3] = (8.0, 0.0, 0.0)
+        expected[4] = (-4.8, 6.4, 0.0)
+        actual = output.numpy()
+        np.testing.assert_allclose(actual, expected, rtol=1.0e-6, atol=1.0e-6)
+        self.assertTrue(np.all(np.isfinite(actual)))
+        self.assertLessEqual(float(np.linalg.norm(actual, axis=1).max()), 8.0)
 
     def test_velocity_update_enum_matches_official(self):
         projected = wp.array(((3.0, 0.0, 0.0),), dtype=wp.vec3, device=self.device)

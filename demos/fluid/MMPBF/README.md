@@ -3,7 +3,8 @@
 This directory is a Warp DSL translation of the complete PBF path in
 PositionBasedDynamics' `Demos/FluidDemo`. The code layout is Pythonic, while
 the numerical model, scene, defaults, and step order follow the official C++
-demo at commit `beafc921e21553515b4f406258e5b16054a45268`.
+demo at commit `beafc921e21553515b4f406258e5b16054a45268`, except for the
+explicitly documented global particle-speed limit.
 
 The previous version mixed SPlisHSPlasH's newer `TimeStepPBF`, a custom box,
 custom boundary sampling, Standard viscosity, and Vorticity confinement. That
@@ -44,6 +45,7 @@ The default model therefore uses:
 - exactly five PBF projection iterations with `epsilon = 1e-6`;
 - first-order velocity reconstruction (`velocityUpdateMethod = 0`);
 - XSPH viscosity `0.02`, with the official boundary-viscosity code disabled;
+- a Warp-side global particle-speed limit of `8.0 m/s`, applied after XSPH;
 - initial time step `0.0025`, CFL factor `1`, limits `[0.0001, 0.005]`;
 - one complete adaptive physics step per `Example.step()` call.
 
@@ -51,12 +53,15 @@ The OpenGL frontend defaults to the `high-resolution` preset. It keeps the
 same exact `4.0 x 4.0 x 0.8` container while using radius `2/185`, support
 radius `8/185`, and a `36 x 46 x 36` block containing `59,616` visible fluid
 particles. Its `97,464` static boundary samples are simulation data and are
-not rendered. `MMPBFConfig()` remains the untouched 4,500-particle baseline;
+not rendered. `MMPBFConfig()` remains the 4,500-particle baseline;
 `MMPBFConfig.high_resolution()` selects the denser scene.
 
 There is no artificial pressure, vorticity confinement, Standard SPH
 viscosity, random wall offset, explicit restitution, friction, or position
 clamp because the official FluidDemo does not execute those operations.
+The global speed limit is an intentional stability extension relative to the
+official demo: velocities below the limit preserve the official update, while
+larger velocity vectors are scaled to the limit without changing direction.
 
 SPlisHSPlasH commit `eccce86155776f6ac52d5080b1f720a52bf29450` remains a
 useful second implementation for comparison, but its Poly6/Spiky kernels,

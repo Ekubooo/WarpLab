@@ -244,13 +244,14 @@ def compute_xsph_viscosity(
     normalized_densities: wp.array(dtype=float),
     fluid_volume: float,
     viscosity: float,
+    max_particle_speed: float,
     support_radius: float,
     max_fluid_neighbors: int,
     fluid_neighbor_counts: wp.array(dtype=int),
     fluid_neighbor_indices: wp.array(dtype=int),
     output_velocities: wp.array(dtype=wp.vec3),
 ):
-    """PBD FluidDemo XSPH update; boundary viscosity is intentionally absent."""
+    """Apply FluidDemo XSPH, then clamp the final particle-speed magnitude."""
     i = wp.tid()
     xi = positions[i]
     vi = velocities[i]
@@ -265,6 +266,11 @@ def compute_xsph_viscosity(
             * (vi - velocities[j])
             * functions.cubic_kernel(wp.length(xi - positions[j]), support_radius)
         )
+
+    speed_squared = wp.dot(result, result)
+    max_speed_squared = max_particle_speed * max_particle_speed
+    if speed_squared > max_speed_squared:
+        result *= max_particle_speed / wp.sqrt(speed_squared)
 
     output_velocities[i] = result
 
@@ -324,6 +330,7 @@ class MMPBFConfig:
     pressure_iterations: int = 5
     velocity_update_method: int = 0
     xsph_viscosity: float = 0.02
+    max_particle_speed: float = 4.0
 
     max_fluid_neighbors: int = 128
     max_boundary_neighbors: int = 128
@@ -334,7 +341,7 @@ class MMPBFConfig:
         return cls(
             particle_radius=2.0 / 185.0,
             fluid_width=30,
-            fluid_height=50,
+            fluid_height=75,
             fluid_depth=30,
         )
 
@@ -359,6 +366,8 @@ class MMPBFConfig:
             raise ValueError("velocity_update_method must be 0 (first order) or 1 (second order)")
         if self.xsph_viscosity < 0.0:
             raise ValueError("xsph_viscosity must be non-negative")
+        if self.max_particle_speed <= 0.0:
+            raise ValueError("max_particle_speed must be positive")
         if self.max_fluid_neighbors < 1 or self.max_boundary_neighbors < 1:
             raise ValueError("neighbor capacities must be positive")
 
@@ -532,6 +541,7 @@ class Example:
                         self.normalized_densities,
                         self.fluid_volume,
                         self.config.xsph_viscosity,
+                        self.config.max_particle_speed,
                         self.support_radius,
                         self.config.max_fluid_neighbors,
                         self.fluid_neighbor_counts,
