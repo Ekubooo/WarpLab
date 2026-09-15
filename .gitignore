@@ -59,6 +59,7 @@ _deps/
 .warp_cache/
 *.o
 *.obj
+!demos/fluid/PBF2WayCoupling/assets/*.obj
 *.exp
 *.dll
 *.lib
