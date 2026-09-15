@@ -3,6 +3,7 @@
 All simulation kernels and their launch order live here. Numerical reference:
 SPlisHSPlasH f3f677140761db7637b5443beb54f19f1f835ed4 (MIT).
 """
+
 from dataclasses import dataclass
 from pathlib import Path
 import warnings
@@ -18,8 +19,13 @@ except ImportError:
     import coupling_initialization as init
 
 
+# Device state: one row per rigid body, boundary sample, or fluid particle.
+
+
 @wp.struct
 class RigidState:
+    """World-space pose/velocity with inverse inertia stored in body space."""
+
     position: wp.array(dtype=wp.vec3)
     rotation: wp.array(dtype=wp.quat)
     velocity: wp.array(dtype=wp.vec3)
@@ -38,6 +44,8 @@ class RigidState:
 
 @wp.struct
 class BoundaryState:
+    """Body-local samples and their current world-space positions/velocities."""
+
     local: wp.array(dtype=wp.vec3)
     position: wp.array(dtype=wp.vec3)
     velocity: wp.array(dtype=wp.vec3)
@@ -47,6 +55,8 @@ class BoundaryState:
 
 @wp.struct
 class Neighbors:
+    """Fixed-capacity neighbor lists; overflow slots identify fluid/boundary lists."""
+
     fluid_count: wp.array(dtype=int)
     boundary_count: wp.array(dtype=int)
     fluid: wp.array2d(dtype=int)
@@ -56,6 +66,8 @@ class Neighbors:
 
 @wp.struct
 class Contacts:
+    """Contact body indices, geometry, target normal speed and accumulated impulses."""
+
     count: wp.array(dtype=int)
     a: wp.array(dtype=int)
     b: wp.array(dtype=int)
@@ -68,46 +80,68 @@ class Contacts:
     overflow: wp.array(dtype=int)
 
 
+# Boundary initialization and motion.
+
+
 @wp.kernel
 def update_boundary(rigid: RigidState, boundary: BoundaryState):
+    """Transform each sample and evaluate v + omega cross world_offset."""
     i = wp.tid()
-    b = boundary.body[i]
-    r = wp.quat_rotate(rigid.rotation[b], boundary.local[i])
-    boundary.position[i] = rigid.position[b] + r
-    boundary.velocity[i] = fn.point_velocity(rigid.velocity[b], rigid.omega[b], r)
+    body_index = boundary.body[i]
+    world_offset = wp.quat_rotate(rigid.rotation[body_index], boundary.local[i])
+    boundary.position[i] = rigid.position[body_index] + world_offset
+    boundary.velocity[i] = fn.point_velocity(
+        rigid.velocity[body_index], rigid.omega[body_index], world_offset
+    )
 
 
 @wp.kernel
 def boundary_volumes(grid: wp.uint64, h: float, rigid: RigidState, boundary: BoundaryState):
+    """Compute Akinci pseudo-volumes within each permitted boundary group."""
     i = wp.tid()
-    b = boundary.body[i]
-    total = float(0.0)
+    body_index = boundary.body[i]
+    kernel_sum = float(0.0)
     for j in wp.hash_grid_query(grid, boundary.position[i], h):
-        c = boundary.body[j]
-        if b == c or (rigid.inverse_mass[b] == 0.0 and rigid.inverse_mass[c] == 0.0):
-            total += fn.poly6(wp.length(boundary.position[i] - boundary.position[j]), h)
-    boundary.volume[i] = 1.0 / total
+        neighbor_body_index = boundary.body[j]
+        if body_index == neighbor_body_index or (
+            rigid.inverse_mass[body_index] == 0.0 and rigid.inverse_mass[neighbor_body_index] == 0.0
+        ):
+            kernel_sum += fn.poly6(wp.length(boundary.position[i] - boundary.position[j]), h)
+    boundary.volume[i] = 1.0 / kernel_sum
 
 
 @wp.kernel
-def exclude_solid_particles(x: wp.array(dtype=wp.vec3), rigid: RigidState, radius: float,
-                            keep: wp.array(dtype=int)):
+def exclude_solid_particles(
+    x: wp.array(dtype=wp.vec3), rigid: RigidState, radius: float, keep: wp.array(dtype=int)
+):
     i = wp.tid()
-    valid = int(1)
-    for b in range(rigid.position.shape[0]):
-        if rigid.wall[b] == 0:
-            local = wp.quat_rotate_inv(rigid.rotation[b], x[i] - rigid.position[b])
-            query = wp.mesh_query_point_sign_normal(rigid.mesh[b], local, 1000.0)
+    is_fluid = int(1)
+    for body_index in range(rigid.position.shape[0]):
+        if rigid.wall[body_index] == 0:
+            local_position = wp.quat_rotate_inv(
+                rigid.rotation[body_index], x[i] - rigid.position[body_index]
+            )
+            query = wp.mesh_query_point_sign_normal(rigid.mesh[body_index], local_position, 1000.0)
             if query.result:
-                closest = wp.mesh_eval_position(rigid.mesh[b], query.face, query.u, query.v)
-                if query.sign * wp.length(local - closest) < radius:
-                    valid = 0
-    keep[i] = valid
+                closest = wp.mesh_eval_position(
+                    rigid.mesh[body_index], query.face, query.u, query.v
+                )
+                if query.sign * wp.length(local_position - closest) < radius:
+                    is_fluid = 0
+    keep[i] = is_fluid
+
+
+# Fluid prediction, pressure projection and viscosity.
 
 
 @wp.kernel
-def predict(x: wp.array(dtype=wp.vec3), v: wp.array(dtype=wp.vec3), old: wp.array(dtype=wp.vec3),
-            gravity: wp.vec3, dt: float):
+def predict(
+    x: wp.array(dtype=wp.vec3),
+    v: wp.array(dtype=wp.vec3),
+    old: wp.array(dtype=wp.vec3),
+    gravity: wp.vec3,
+    dt: float,
+):
     i = wp.tid()
     old[i] = x[i]
     v[i] += dt * gravity
@@ -115,75 +149,106 @@ def predict(x: wp.array(dtype=wp.vec3), v: wp.array(dtype=wp.vec3), old: wp.arra
 
 
 @wp.kernel
-def cache_neighbors(fluid_grid: wp.uint64, boundary_grid: wp.uint64,
-                    x: wp.array(dtype=wp.vec3), boundary: BoundaryState, h: float, neighbors: Neighbors):
+def cache_neighbors(
+    fluid_grid: wp.uint64,
+    boundary_grid: wp.uint64,
+    x: wp.array(dtype=wp.vec3),
+    boundary: BoundaryState,
+    h: float,
+    neighbors: Neighbors,
+):
     i = wp.hash_grid_point_id(fluid_grid, wp.tid())
-    nf = int(0)
-    nb = int(0)
+    fluid_count = int(0)
+    boundary_count = int(0)
     for j in wp.hash_grid_query(fluid_grid, x[i], h):
-        if j != i and wp.length_sq(x[i] - x[j]) < h*h:
-            if nf < neighbors.fluid.shape[1]:
-                neighbors.fluid[i, nf] = j
+        if j != i and wp.length_sq(x[i] - x[j]) < h * h:
+            if fluid_count < neighbors.fluid.shape[1]:
+                neighbors.fluid[i, fluid_count] = j
             else:
                 wp.atomic_max(neighbors.overflow, 0, 1)
-            nf += 1
+            fluid_count += 1
     for j in wp.hash_grid_query(boundary_grid, x[i], h):
-        if wp.length_sq(x[i] - boundary.position[j]) < h*h:
-            if nb < neighbors.boundary.shape[1]:
-                neighbors.boundary[i, nb] = j
+        if wp.length_sq(x[i] - boundary.position[j]) < h * h:
+            if boundary_count < neighbors.boundary.shape[1]:
+                neighbors.boundary[i, boundary_count] = j
             else:
                 wp.atomic_max(neighbors.overflow, 1, 1)
-            nb += 1
-    neighbors.fluid_count[i] = wp.min(nf, neighbors.fluid.shape[1])
-    neighbors.boundary_count[i] = wp.min(nb, neighbors.boundary.shape[1])
+            boundary_count += 1
+    neighbors.fluid_count[i] = wp.min(fluid_count, neighbors.fluid.shape[1])
+    neighbors.boundary_count[i] = wp.min(boundary_count, neighbors.boundary.shape[1])
 
 
 @wp.kernel
-def density_lambda(x: wp.array(dtype=wp.vec3), boundary: BoundaryState, neighbors: Neighbors,
-                   volume: float, h: float, density: wp.array(dtype=float), lambdas: wp.array(dtype=float),
-                   error: wp.array(dtype=float)):
+def density_lambda(
+    x: wp.array(dtype=wp.vec3),
+    boundary: BoundaryState,
+    neighbors: Neighbors,
+    volume: float,
+    h: float,
+    density: wp.array(dtype=float),
+    lambdas: wp.array(dtype=float),
+    error: wp.array(dtype=float),
+):
+    """Evaluate normalized density and the PBF constraint multiplier."""
     i = wp.tid()
-    rho = volume * fn.poly6(0.0, h)
-    gi = wp.vec3(0.0)
-    norm = float(0.0)
+    normalized_density = volume * fn.poly6(0.0, h)
+    gradient_i = wp.vec3(0.0)
+    squared_gradient_sum = float(0.0)
     for k in range(neighbors.fluid_count[i]):
         j = neighbors.fluid[i, k]
-        delta = x[i] - x[j]
-        rho += volume * fn.poly6(wp.length(delta), h)
-        gj = -volume * fn.spiky_gradient(delta, h)
-        norm += wp.dot(gj, gj)
-        gi -= gj
+        displacement = x[i] - x[j]
+        normalized_density += volume * fn.poly6(wp.length(displacement), h)
+        gradient_j = -volume * fn.spiky_gradient(displacement, h)
+        squared_gradient_sum += wp.dot(gradient_j, gradient_j)
+        gradient_i -= gradient_j
     for k in range(neighbors.boundary_count[i]):
         j = neighbors.boundary[i, k]
-        delta = x[i] - boundary.position[j]
-        rho += boundary.volume[j] * fn.poly6(wp.length(delta), h)
+        displacement = x[i] - boundary.position[j]
+        normalized_density += boundary.volume[j] * fn.poly6(wp.length(displacement), h)
         # SPlisHSPlasH excludes individual boundary gradient squares.
-        gi += boundary.volume[j] * fn.spiky_gradient(delta, h)
-    constraint = wp.max(rho - 1.0, 0.0)
-    density[i] = rho
-    lambdas[i] = -constraint / (norm + wp.dot(gi, gi) + 1.0e-6)
+        gradient_i += boundary.volume[j] * fn.spiky_gradient(displacement, h)
+    constraint = wp.max(normalized_density - 1.0, 0.0)
+    density[i] = normalized_density
+    lambdas[i] = -constraint / (squared_gradient_sum + wp.dot(gradient_i, gradient_i) + 1.0e-6)
     wp.atomic_add(error, 0, constraint)
 
 
 @wp.kernel
-def pressure_correction(x: wp.array(dtype=wp.vec3), boundary: BoundaryState, rigid: RigidState,
-                        neighbors: Neighbors, volume: float, mass: float, h: float, dt: float,
-                        two_way: int, lambdas: wp.array(dtype=float), correction: wp.array(dtype=wp.vec3)):
+def pressure_correction(
+    x: wp.array(dtype=wp.vec3),
+    boundary: BoundaryState,
+    rigid: RigidState,
+    neighbors: Neighbors,
+    volume: float,
+    mass: float,
+    h: float,
+    dt: float,
+    two_way: int,
+    lambdas: wp.array(dtype=float),
+    correction: wp.array(dtype=wp.vec3),
+):
+    """Compute fluid displacement and accumulate its opposite rigid-body force."""
     i = wp.tid()
-    dx = wp.vec3(0.0)
+    position_delta = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
         j = neighbors.fluid[i, k]
-        dx += (lambdas[i] + lambdas[j]) * volume * fn.spiky_gradient(x[i] - x[j], h)
+        position_delta += (lambdas[i] + lambdas[j]) * volume * fn.spiky_gradient(x[i] - x[j], h)
     for k in range(neighbors.boundary_count[i]):
         j = neighbors.boundary[i, k]
-        delta = lambdas[i] * boundary.volume[j] * fn.spiky_gradient(x[i] - boundary.position[j], h)
-        dx += delta
-        b = boundary.body[j]
-        if two_way != 0 and rigid.inverse_mass[b] > 0.0:
-            force = -mass * delta / (dt * dt)
-            wp.atomic_add(rigid.force, b, force)
-            wp.atomic_add(rigid.torque, b, wp.cross(boundary.position[j] - rigid.position[b], force))
-    correction[i] = dx
+        boundary_delta = (
+            lambdas[i] * boundary.volume[j] * fn.spiky_gradient(x[i] - boundary.position[j], h)
+        )
+        position_delta += boundary_delta
+        body_index = boundary.body[j]
+        if two_way != 0 and rigid.inverse_mass[body_index] > 0.0:
+            force = -mass * boundary_delta / (dt * dt)
+            wp.atomic_add(rigid.force, body_index, force)
+            wp.atomic_add(
+                rigid.torque,
+                body_index,
+                wp.cross(boundary.position[j] - rigid.position[body_index], force),
+            )
+    correction[i] = position_delta
 
 
 @wp.kernel
@@ -193,37 +258,63 @@ def apply_correction(x: wp.array(dtype=wp.vec3), correction: wp.array(dtype=wp.v
 
 
 @wp.kernel
-def reconstruct_velocity(x: wp.array(dtype=wp.vec3), old: wp.array(dtype=wp.vec3),
-                         dt: float, v: wp.array(dtype=wp.vec3)):
+def reconstruct_velocity(
+    x: wp.array(dtype=wp.vec3), old: wp.array(dtype=wp.vec3), dt: float, v: wp.array(dtype=wp.vec3)
+):
     i = wp.tid()
     v[i] = (x[i] - old[i]) / dt
 
 
 @wp.kernel
-def viscosity(x: wp.array(dtype=wp.vec3), v: wp.array(dtype=wp.vec3), boundary: BoundaryState,
-              rigid: RigidState, neighbors: Neighbors, density: wp.array(dtype=float), volume: float,
-              mass: float, h: float, coefficient: float, boundary_coefficient: float, two_way: int,
-              acceleration: wp.array(dtype=wp.vec3)):
+def viscosity(
+    x: wp.array(dtype=wp.vec3),
+    v: wp.array(dtype=wp.vec3),
+    boundary: BoundaryState,
+    rigid: RigidState,
+    neighbors: Neighbors,
+    density: wp.array(dtype=float),
+    volume: float,
+    mass: float,
+    h: float,
+    coefficient: float,
+    boundary_coefficient: float,
+    two_way: int,
+    acceleration: wp.array(dtype=wp.vec3),
+):
     i = wp.tid()
-    acc = wp.vec3(0.0)
+    viscous_acceleration = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
         j = neighbors.fluid[i, k]
-        delta = x[i] - x[j]
-        factor = 10.0 * coefficient * volume / density[j]
-        acc += factor * wp.dot(v[i] - v[j], delta) / (wp.length_sq(delta) + .01*h*h) * fn.spiky_gradient(delta, h)
+        displacement = x[i] - x[j]
+        viscosity_weight = 10.0 * coefficient * volume / density[j]
+        viscous_acceleration += (
+            viscosity_weight
+            * wp.dot(v[i] - v[j], displacement)
+            / (wp.length_sq(displacement) + 0.01 * h * h)
+            * fn.spiky_gradient(displacement, h)
+        )
     if boundary_coefficient > 0.0:
         for k in range(neighbors.boundary_count[i]):
             j = neighbors.boundary[i, k]
-            delta = x[i] - boundary.position[j]
-            factor = 10.0 * boundary_coefficient * boundary.volume[j] / density[i]
-            a = factor * wp.dot(v[i] - boundary.velocity[j], delta) / (wp.length_sq(delta) + .01*h*h) * fn.spiky_gradient(delta, h)
-            acc += a
-            b = boundary.body[j]
-            if two_way != 0 and rigid.inverse_mass[b] > 0.0:
-                force = -mass * a
-                wp.atomic_add(rigid.force, b, force)
-                wp.atomic_add(rigid.torque, b, wp.cross(boundary.position[j] - rigid.position[b], force))
-    acceleration[i] = acc
+            displacement = x[i] - boundary.position[j]
+            viscosity_weight = 10.0 * boundary_coefficient * boundary.volume[j] / density[i]
+            boundary_acceleration = (
+                viscosity_weight
+                * wp.dot(v[i] - boundary.velocity[j], displacement)
+                / (wp.length_sq(displacement) + 0.01 * h * h)
+                * fn.spiky_gradient(displacement, h)
+            )
+            viscous_acceleration += boundary_acceleration
+            body_index = boundary.body[j]
+            if two_way != 0 and rigid.inverse_mass[body_index] > 0.0:
+                force = -mass * boundary_acceleration
+                wp.atomic_add(rigid.force, body_index, force)
+                wp.atomic_add(
+                    rigid.torque,
+                    body_index,
+                    wp.cross(boundary.position[j] - rigid.position[body_index], force),
+                )
+    acceleration[i] = viscous_acceleration
 
 
 @wp.kernel
@@ -232,132 +323,198 @@ def apply_viscosity(v: wp.array(dtype=wp.vec3), acceleration: wp.array(dtype=wp.
     v[i] += dt * acceleration[i]
 
 
+# Rigid-body integration and contact impulses.
+
+
 @wp.kernel
 def integrate_rigid(rigid: RigidState, gravity: wp.vec3, dt: float):
-    b = wp.tid()
-    if rigid.inverse_mass[b] > 0.0:
-        q = rigid.rotation[b]
-        iw = fn.world_inverse_inertia(q, rigid.inverse_inertia[b])
-        w = wp.vec3(rigid.omega[b])
+    body_index = wp.tid()
+    if rigid.inverse_mass[body_index] > 0.0:
+        rotation = rigid.rotation[body_index]
+        inverse_inertia_world = fn.world_inverse_inertia(
+            rotation, rigid.inverse_inertia[body_index]
+        )
+        angular_velocity = wp.vec3(rigid.omega[body_index])
         # Euler's rigid-body equation, including the gyroscopic term.
-        w += dt * (iw * (rigid.torque[b] - wp.cross(w, wp.inverse(iw) * w)))
-        v = rigid.velocity[b] + dt * (gravity + rigid.inverse_mass[b] * rigid.force[b])
-        rigid.position[b] += dt * v
-        rigid.rotation[b] = wp.normalize(q + .5 * dt * wp.quat(w[0], w[1], w[2], 0.0) * q)
-        rigid.velocity[b] = v
-        rigid.omega[b] = w
+        angular_velocity += dt * (
+            inverse_inertia_world
+            * (
+                rigid.torque[body_index]
+                - wp.cross(angular_velocity, wp.inverse(inverse_inertia_world) * angular_velocity)
+            )
+        )
+        linear_velocity = rigid.velocity[body_index] + dt * (
+            gravity + rigid.inverse_mass[body_index] * rigid.force[body_index]
+        )
+        rigid.position[body_index] += dt * linear_velocity
+        rigid.rotation[body_index] = wp.normalize(
+            rotation
+            + 0.5
+            * dt
+            * wp.quat(angular_velocity[0], angular_velocity[1], angular_velocity[2], 0.0)
+            * rotation
+        )
+        rigid.velocity[body_index] = linear_velocity
+        rigid.omega[body_index] = angular_velocity
 
 
 @wp.kernel
-def detect_contacts(rigid: RigidState, boundary: BoundaryState, contacts: Contacts,
-                    tolerance: float, dt: float):
-    i, b = wp.tid()
-    a = boundary.body[i]
-    if a == b or rigid.inverse_mass[a] == 0.0:
+def detect_contacts(
+    rigid: RigidState, boundary: BoundaryState, contacts: Contacts, tolerance: float, dt: float
+):
+    i, body_b = wp.tid()
+    body_a = boundary.body[i]
+    if body_a == body_b or rigid.inverse_mass[body_a] == 0.0:
         return
     point = boundary.position[i]
-    local = wp.quat_rotate_inv(rigid.rotation[b], point - rigid.position[b])
+    local_position = wp.quat_rotate_inv(rigid.rotation[body_b], point - rigid.position[body_b])
     gap = float(1.0e6)
-    n = wp.vec3(0.0)
-    if rigid.wall[b] != 0:
+    normal = wp.vec3(0.0)
+    if rigid.wall[body_b] != 0:
         # Interior of the box is free space. Choose the nearest interior face.
         for axis in range(3):
-            distance = local[axis] - rigid.lower[b][axis]
+            distance = local_position[axis] - rigid.lower[body_b][axis]
             if distance < gap:
                 gap = distance
-                n = wp.vec3(0.0)
-                n[axis] = 1.0
-            distance = rigid.upper[b][axis] - local[axis]
+                normal = wp.vec3(0.0)
+                normal[axis] = 1.0
+            distance = rigid.upper[body_b][axis] - local_position[axis]
             if distance < gap:
                 gap = distance
-                n = wp.vec3(0.0)
-                n[axis] = -1.0
+                normal = wp.vec3(0.0)
+                normal[axis] = -1.0
     else:
         # Conservative local AABB cull before the mesh BVH query.
-        lo = rigid.lower[b] - wp.vec3(tolerance)
-        hi = rigid.upper[b] + wp.vec3(tolerance)
-        if local[0] < lo[0] or local[1] < lo[1] or local[2] < lo[2] or local[0] > hi[0] or local[1] > hi[1] or local[2] > hi[2]:
+        bounds_min = rigid.lower[body_b] - wp.vec3(tolerance)
+        bounds_max = rigid.upper[body_b] + wp.vec3(tolerance)
+        if (
+            local_position[0] < bounds_min[0]
+            or local_position[1] < bounds_min[1]
+            or local_position[2] < bounds_min[2]
+            or local_position[0] > bounds_max[0]
+            or local_position[1] > bounds_max[1]
+            or local_position[2] > bounds_max[2]
+        ):
             return
-        query = wp.mesh_query_point_sign_normal(rigid.mesh[b], local, 1000.0)
+        query = wp.mesh_query_point_sign_normal(rigid.mesh[body_b], local_position, 1000.0)
         if query.result:
-            closest = wp.mesh_eval_position(rigid.mesh[b], query.face, query.u, query.v)
-            delta = local - closest
+            closest = wp.mesh_eval_position(rigid.mesh[body_b], query.face, query.u, query.v)
+            delta = local_position - closest
             distance = wp.length(delta)
             gap = query.sign * distance
             if distance > 1.0e-8:
-                n = query.sign * delta / distance
+                normal = query.sign * delta / distance
             else:
-                n = wp.mesh_eval_face_normal(rigid.mesh[b], query.face)
-            n = wp.quat_rotate(rigid.rotation[b], n)
+                normal = wp.mesh_eval_face_normal(rigid.mesh[body_b], query.face)
+            normal = wp.quat_rotate(rigid.rotation[body_b], normal)
     if gap < tolerance:
-        k = wp.atomic_add(contacts.count, 0, 1)
-        if k >= contacts.a.shape[0]:
+        contact_index = wp.atomic_add(contacts.count, 0, 1)
+        if contact_index >= contacts.a.shape[0]:
             wp.atomic_max(contacts.overflow, 0, 1)
             return
-        ra, rb = point - rigid.position[a], point - rigid.position[b]
-        rel = fn.point_velocity(rigid.velocity[a], rigid.omega[a], ra) - fn.point_velocity(rigid.velocity[b], rigid.omega[b], rb)
-        vn = wp.dot(rel, n)
-        target = -wp.max(gap, 0.0)/dt + .2 * wp.max(-gap, 0.0)/dt
-        if gap <= 0.0 and vn < -0.5:
-            target = wp.max(target, -wp.min(rigid.restitution[a], rigid.restitution[b]) * vn)
-        contacts.a[k] = a
-        contacts.b[k] = b
-        contacts.point[k] = point
-        contacts.normal[k] = n
-        contacts.gap[k] = gap
-        contacts.target[k] = target
-        contacts.normal_impulse[k] = 0.0
-        contacts.tangent_impulse[k] = wp.vec3(0.0)
+        offset_a, offset_b = point - rigid.position[body_a], point - rigid.position[body_b]
+        relative_velocity = fn.point_velocity(
+            rigid.velocity[body_a], rigid.omega[body_a], offset_a
+        ) - fn.point_velocity(rigid.velocity[body_b], rigid.omega[body_b], offset_b)
+        normal_velocity = wp.dot(relative_velocity, normal)
+        target = -wp.max(gap, 0.0) / dt + 0.2 * wp.max(-gap, 0.0) / dt
+        if gap <= 0.0 and normal_velocity < -0.5:
+            target = wp.max(
+                target,
+                -wp.min(rigid.restitution[body_a], rigid.restitution[body_b]) * normal_velocity,
+            )
+        contacts.a[contact_index] = body_a
+        contacts.b[contact_index] = body_b
+        contacts.point[contact_index] = point
+        contacts.normal[contact_index] = normal
+        contacts.gap[contact_index] = gap
+        contacts.target[contact_index] = target
+        contacts.normal_impulse[contact_index] = 0.0
+        contacts.tangent_impulse[contact_index] = wp.vec3(0.0)
 
 
 @wp.kernel
 def solve_contacts(rigid: RigidState, contacts: Contacts):
     # Sequential impulses: one device thread owns all body writes. The selected
     # scene has three dynamic bodies; this avoids racing Gauss-Seidel updates.
-    for k in range(wp.min(contacts.count[0], contacts.a.shape[0])):
-        a, b = contacts.a[k], contacts.b[k]
-        n = contacts.normal[k]
-        ra, rb = contacts.point[k] - rigid.position[a], contacts.point[k] - rigid.position[b]
-        ia = fn.world_inverse_inertia(rigid.rotation[a], rigid.inverse_inertia[a])
-        ib = fn.world_inverse_inertia(rigid.rotation[b], rigid.inverse_inertia[b])
-        va = wp.vec3(rigid.velocity[a])
-        vb = wp.vec3(rigid.velocity[b])
-        wa = wp.vec3(rigid.omega[a])
-        wb = wp.vec3(rigid.omega[b])
-        rel = fn.point_velocity(va, wa, ra) - fn.point_velocity(vb, wb, rb)
-        denominator = fn.effective_mass(rigid.inverse_mass[a], ia, ra, n) + fn.effective_mass(rigid.inverse_mass[b], ib, rb, n)
-        normal_impulse = wp.max(0.0, contacts.normal_impulse[k] + (contacts.target[k] - wp.dot(rel, n))/denominator)
-        impulse = (normal_impulse - contacts.normal_impulse[k]) * n
-        contacts.normal_impulse[k] = normal_impulse
-        va += rigid.inverse_mass[a] * impulse
-        vb -= rigid.inverse_mass[b] * impulse
-        wa += ia * wp.cross(ra, impulse)
-        wb -= ib * wp.cross(rb, impulse)
-        rel = fn.point_velocity(va, wa, ra) - fn.point_velocity(vb, wb, rb)
-        tangent = rel - wp.dot(rel, n)*n
-        speed = wp.length(tangent)
-        if speed > 1.0e-8:
-            tangent /= speed
-            denominator_t = fn.effective_mass(rigid.inverse_mass[a], ia, ra, tangent) + fn.effective_mass(rigid.inverse_mass[b], ib, rb, tangent)
-            jt = contacts.tangent_impulse[k] - speed / denominator_t * tangent
-            limit = wp.sqrt(rigid.friction[a] * rigid.friction[b]) * normal_impulse
-            if wp.length(jt) > limit:
-                jt = wp.normalize(jt) * limit
-            change = jt - contacts.tangent_impulse[k]
-            contacts.tangent_impulse[k] = jt
-            va += rigid.inverse_mass[a] * change
-            vb -= rigid.inverse_mass[b] * change
-            wa += ia * wp.cross(ra, change)
-            wb -= ib * wp.cross(rb, change)
-        rigid.velocity[a] = va
-        rigid.velocity[b] = vb
-        rigid.omega[a] = wa
-        rigid.omega[b] = wb
+    for contact_index in range(wp.min(contacts.count[0], contacts.a.shape[0])):
+        body_a, body_b = contacts.a[contact_index], contacts.b[contact_index]
+        normal = contacts.normal[contact_index]
+        offset_a, offset_b = (
+            contacts.point[contact_index] - rigid.position[body_a],
+            contacts.point[contact_index] - rigid.position[body_b],
+        )
+        inverse_inertia_a = fn.world_inverse_inertia(
+            rigid.rotation[body_a], rigid.inverse_inertia[body_a]
+        )
+        inverse_inertia_b = fn.world_inverse_inertia(
+            rigid.rotation[body_b], rigid.inverse_inertia[body_b]
+        )
+        velocity_a = wp.vec3(rigid.velocity[body_a])
+        velocity_b = wp.vec3(rigid.velocity[body_b])
+        angular_velocity_a = wp.vec3(rigid.omega[body_a])
+        angular_velocity_b = wp.vec3(rigid.omega[body_b])
+        # Normal impulse: meet the target separation speed without adhesion.
+        relative_velocity = fn.point_velocity(
+            velocity_a, angular_velocity_a, offset_a
+        ) - fn.point_velocity(velocity_b, angular_velocity_b, offset_b)
+        normal_inverse_effective_mass = fn.effective_mass(
+            rigid.inverse_mass[body_a], inverse_inertia_a, offset_a, normal
+        ) + fn.effective_mass(rigid.inverse_mass[body_b], inverse_inertia_b, offset_b, normal)
+        normal_impulse = wp.max(
+            0.0,
+            contacts.normal_impulse[contact_index]
+            + (contacts.target[contact_index] - wp.dot(relative_velocity, normal))
+            / normal_inverse_effective_mass,
+        )
+        normal_impulse_delta = (normal_impulse - contacts.normal_impulse[contact_index]) * normal
+        contacts.normal_impulse[contact_index] = normal_impulse
+        velocity_a += rigid.inverse_mass[body_a] * normal_impulse_delta
+        velocity_b -= rigid.inverse_mass[body_b] * normal_impulse_delta
+        angular_velocity_a += inverse_inertia_a * wp.cross(offset_a, normal_impulse_delta)
+        angular_velocity_b -= inverse_inertia_b * wp.cross(offset_b, normal_impulse_delta)
+        # Tangential impulse: apply Coulomb friction after the normal update.
+        relative_velocity = fn.point_velocity(
+            velocity_a, angular_velocity_a, offset_a
+        ) - fn.point_velocity(velocity_b, angular_velocity_b, offset_b)
+        tangent = relative_velocity - wp.dot(relative_velocity, normal) * normal
+        tangent_speed = wp.length(tangent)
+        if tangent_speed > 1.0e-8:
+            tangent /= tangent_speed
+            tangent_inverse_effective_mass = fn.effective_mass(
+                rigid.inverse_mass[body_a], inverse_inertia_a, offset_a, tangent
+            ) + fn.effective_mass(rigid.inverse_mass[body_b], inverse_inertia_b, offset_b, tangent)
+            tangent_impulse = (
+                contacts.tangent_impulse[contact_index]
+                - tangent_speed / tangent_inverse_effective_mass * tangent
+            )
+            friction_limit = (
+                wp.sqrt(rigid.friction[body_a] * rigid.friction[body_b]) * normal_impulse
+            )
+            if wp.length(tangent_impulse) > friction_limit:
+                tangent_impulse = wp.normalize(tangent_impulse) * friction_limit
+            tangent_impulse_delta = tangent_impulse - contacts.tangent_impulse[contact_index]
+            contacts.tangent_impulse[contact_index] = tangent_impulse
+            velocity_a += rigid.inverse_mass[body_a] * tangent_impulse_delta
+            velocity_b -= rigid.inverse_mass[body_b] * tangent_impulse_delta
+            angular_velocity_a += inverse_inertia_a * wp.cross(offset_a, tangent_impulse_delta)
+            angular_velocity_b -= inverse_inertia_b * wp.cross(offset_b, tangent_impulse_delta)
+        rigid.velocity[body_a] = velocity_a
+        rigid.velocity[body_b] = velocity_b
+        rigid.omega[body_a] = angular_velocity_a
+        rigid.omega[body_b] = angular_velocity_b
+
+
+# Time-step bounds and diagnostics (no position/velocity corrections).
 
 
 @wp.kernel
-def reduce_speed(v: wp.array(dtype=wp.vec3), acceleration: wp.array(dtype=wp.vec3),
-                 dt: float, speed: wp.array(dtype=float)):
+def reduce_speed(
+    v: wp.array(dtype=wp.vec3),
+    acceleration: wp.array(dtype=wp.vec3),
+    dt: float,
+    speed: wp.array(dtype=float),
+):
     i = wp.tid()
     wp.atomic_max(speed, 0, wp.length_sq(v[i] + dt * acceleration[i]))
 
@@ -369,58 +526,97 @@ def reduce_boundary_speed(boundary: BoundaryState, speed: wp.array(dtype=float))
 
 
 @wp.kernel
-def audit_fluid(x: wp.array(dtype=wp.vec3), v: wp.array(dtype=wp.vec3), lower: wp.vec3, upper: wp.vec3,
-                maxima: wp.array(dtype=float), invalid: wp.array(dtype=int)):
+def audit_fluid(
+    x: wp.array(dtype=wp.vec3),
+    v: wp.array(dtype=wp.vec3),
+    lower: wp.vec3,
+    upper: wp.vec3,
+    maxima: wp.array(dtype=float),
+    invalid: wp.array(dtype=int),
+):
     i = wp.tid()
     for axis in range(3):
         if not wp.isfinite(x[i][axis]) or not wp.isfinite(v[i][axis]):
             wp.atomic_max(invalid, 0, 1)
-        violation = wp.max(lower[axis]-x[i][axis], x[i][axis]-upper[axis])
+        violation = wp.max(lower[axis] - x[i][axis], x[i][axis] - upper[axis])
         wp.atomic_max(maxima, 0, wp.max(violation, 0.0))
 
 
 @wp.kernel
-def audit_rigid(rigid: RigidState, contacts: Contacts, maxima: wp.array(dtype=float), invalid: wp.array(dtype=int)):
+def audit_rigid(
+    rigid: RigidState,
+    contacts: Contacts,
+    maxima: wp.array(dtype=float),
+    invalid: wp.array(dtype=int),
+):
     i = wp.tid()
     if i < rigid.position.shape[0]:
         for axis in range(3):
-            if not wp.isfinite(rigid.position[i][axis]) or not wp.isfinite(rigid.velocity[i][axis]) or not wp.isfinite(rigid.omega[i][axis]):
+            if (
+                not wp.isfinite(rigid.position[i][axis])
+                or not wp.isfinite(rigid.velocity[i][axis])
+                or not wp.isfinite(rigid.omega[i][axis])
+            ):
                 wp.atomic_max(invalid, 0, 1)
-        norm = wp.length(rigid.rotation[i])
-        if not wp.isfinite(norm):
+        rotation_length = wp.length(rigid.rotation[i])
+        if not wp.isfinite(rotation_length):
             wp.atomic_max(invalid, 0, 1)
-        wp.atomic_max(maxima, 2, wp.abs(norm - 1.0))
+        wp.atomic_max(maxima, 2, wp.abs(rotation_length - 1.0))
     if i < wp.min(contacts.count[0], contacts.gap.shape[0]):
         wp.atomic_max(maxima, 1, wp.max(-contacts.gap[i], 0.0))
 
 
 @dataclass(frozen=True)
 class PBF2WayCouplingConfig:
+    """Scene selection and solver parameters in meters, kilograms and seconds."""
+
+    # Scene and fluid material.
     scene: str = "dam-break-objects"
-    particle_radius: float = .025
+    particle_radius: float = 0.025
     rest_density: float = 1000.0
     gravity: tuple = (0.0, -9.81, 0.0)
-    initial_time_step: float = .001
-    min_time_step: float = .0001
-    max_time_step: float = .005
-    cfl_factor: float = .5
+
+    # Adaptive time step and PBF convergence.
+    initial_time_step: float = 0.001
+    min_time_step: float = 0.0001
+    max_time_step: float = 0.005
+    cfl_factor: float = 0.5
     min_iterations: int = 2
     max_iterations: int = 100
-    max_density_error_percent: float = .01
-    viscosity: float = .01
+    max_density_error_percent: float = 0.01
+
+    # Non-pressure forces and rigid-body feedback.
+    viscosity: float = 0.01
     boundary_viscosity: float = 0.0
     two_way: bool = True
+
+    # Storage capacities and contact solver.
     max_fluid_neighbors: int = 256
     max_boundary_neighbors: int = 512
     max_contacts: int = 65536
-    contact_tolerance: float = .06
+    contact_tolerance: float = 0.06
     contact_iterations: int = 5
 
     def __post_init__(self):
-        for name in ("particle_radius", "rest_density", "initial_time_step", "min_time_step", "max_time_step", "cfl_factor", "contact_tolerance"):
+        for name in (
+            "particle_radius",
+            "rest_density",
+            "initial_time_step",
+            "min_time_step",
+            "max_time_step",
+            "cfl_factor",
+            "contact_tolerance",
+        ):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        for name in ("min_iterations", "max_iterations", "max_fluid_neighbors", "max_boundary_neighbors", "max_contacts", "contact_iterations"):
+        for name in (
+            "min_iterations",
+            "max_iterations",
+            "max_fluid_neighbors",
+            "max_boundary_neighbors",
+            "max_contacts",
+            "contact_iterations",
+        ):
             if not isinstance(getattr(self, name), int) or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("viscosity", "boundary_viscosity", "max_density_error_percent"):
@@ -435,13 +631,24 @@ class PBF2WayCouplingConfig:
 
 
 class Example:
+    """Own simulation state and expose construction, one substep, and rendering."""
+
     def __init__(self, config=None, device=None, verbose=False):
+        # Runtime and host-side scene data.
         self.config = config or PBF2WayCouplingConfig()
         self.verbose = verbose
         wp.config.kernel_cache_dir = str(Path(__file__).resolve().parents[3] / ".warp_cache")
         wp.init()
         self.device = wp.get_device(device or ("cuda:0" if wp.is_cuda_available() else "cpu"))
-        self.body_models, x, v, self.container_min, self.container_max = init.load_scene(self.config)
+        (
+            self.body_models,
+            initial_positions,
+            initial_velocities,
+            self.container_min,
+            self.container_max,
+        ) = init.load_scene(self.config)
+
+        # Time, diagnostics and fluid constants.
         self.renderer = None
         self.sim_time = 0.0
         self.current_dt = self.config.initial_time_step
@@ -451,124 +658,355 @@ class Example:
         self.iteration_limit_streak = 0
         self.total_steps = 0
         self.support_radius = 4 * self.config.particle_radius
-        self.fluid_volume = .8 * (2*self.config.particle_radius)**3
+        self.fluid_volume = 0.8 * (2 * self.config.particle_radius) ** 3
         self.fluid_mass = self.fluid_volume * self.config.rest_density
-        nbody = len(self.body_models)
-        array = lambda data, dtype: wp.array(np.asarray(data), dtype=dtype, device=self.device)
-        zeros = lambda count, dtype: wp.zeros(count, dtype=dtype, device=self.device)
+
+        def to_device_array(data, dtype):
+            return wp.array(np.asarray(data), dtype=dtype, device=self.device)
+
+        def device_zeros(count, dtype):
+            return wp.zeros(count, dtype=dtype, device=self.device)
+
+        # Rigid state. Static bodies receive zero inverse mass and inertia.
+        body_count = len(self.body_models)
         self.rigid = RigidState()
-        for field, data, dtype in (
-            ("position", [b.position for b in self.body_models], wp.vec3),
-            ("rotation", [b.rotation for b in self.body_models], wp.quat),
-            ("velocity", [b.velocity if b.mass else np.zeros(3) for b in self.body_models], wp.vec3),
-            ("omega", [b.angular_velocity if b.mass else np.zeros(3) for b in self.body_models], wp.vec3),
-            ("inverse_mass", [1/b.mass if b.mass else 0 for b in self.body_models], float),
-            ("inverse_inertia", [np.linalg.inv(b.inertia) if b.mass else np.zeros((3,3)) for b in self.body_models], wp.mat33),
-            ("lower", [b.vertices.min(axis=0) for b in self.body_models], wp.vec3),
-            ("upper", [b.vertices.max(axis=0) for b in self.body_models], wp.vec3),
-            ("restitution", [b.restitution for b in self.body_models], float),
-            ("friction", [b.friction for b in self.body_models], float),
-            ("wall", [int(b.wall) for b in self.body_models], int),
-        ):
-            setattr(self.rigid, field, array(data, dtype))
-        self.rigid.force, self.rigid.torque = zeros(nbody, wp.vec3), zeros(nbody, wp.vec3)
-        self.meshes = [wp.Mesh(array(b.vertices, wp.vec3), array(b.faces.flatten(), int)) for b in self.body_models]
-        self.rigid.mesh = array([m.id for m in self.meshes], wp.uint64)
+        self.rigid.position = to_device_array([body.position for body in self.body_models], wp.vec3)
+        self.rigid.rotation = to_device_array([body.rotation for body in self.body_models], wp.quat)
+        self.rigid.velocity = to_device_array(
+            [body.velocity if body.mass else np.zeros(3) for body in self.body_models], wp.vec3
+        )
+        self.rigid.omega = to_device_array(
+            [body.angular_velocity if body.mass else np.zeros(3) for body in self.body_models],
+            wp.vec3,
+        )
+        self.rigid.inverse_mass = to_device_array(
+            [1 / body.mass if body.mass else 0 for body in self.body_models], float
+        )
+        self.rigid.inverse_inertia = to_device_array(
+            [
+                np.linalg.inv(body.inertia) if body.mass else np.zeros((3, 3))
+                for body in self.body_models
+            ],
+            wp.mat33,
+        )
+        self.rigid.lower = to_device_array(
+            [body.vertices.min(axis=0) for body in self.body_models], wp.vec3
+        )
+        self.rigid.upper = to_device_array(
+            [body.vertices.max(axis=0) for body in self.body_models], wp.vec3
+        )
+        self.rigid.restitution = to_device_array(
+            [body.restitution for body in self.body_models], float
+        )
+        self.rigid.friction = to_device_array([body.friction for body in self.body_models], float)
+        self.rigid.wall = to_device_array([int(body.wall) for body in self.body_models], int)
+        self.rigid.force = device_zeros(body_count, wp.vec3)
+        self.rigid.torque = device_zeros(body_count, wp.vec3)
+        self.meshes = [
+            wp.Mesh(
+                to_device_array(body.vertices, wp.vec3), to_device_array(body.faces.flatten(), int)
+            )
+            for body in self.body_models
+        ]
+        self.rigid.mesh = to_device_array([mesh.id for mesh in self.meshes], wp.uint64)
+
+        # Boundary samples and their invariant pseudo-volumes.
         self.boundary = BoundaryState()
-        local = np.concatenate([b.samples for b in self.body_models])
-        self.boundary.local = array(local, wp.vec3)
-        self.boundary.body = array(np.repeat(np.arange(nbody), [len(b.samples) for b in self.body_models]), int)
-        self.boundary.position, self.boundary.velocity = zeros(len(local), wp.vec3), zeros(len(local), wp.vec3)
-        self.boundary.volume = zeros(len(local), float)
+        local_samples = np.concatenate([body.samples for body in self.body_models])
+        self.boundary.local = to_device_array(local_samples, wp.vec3)
+        self.boundary.body = to_device_array(
+            np.repeat(np.arange(body_count), [len(body.samples) for body in self.body_models]), int
+        )
+        self.boundary.position = device_zeros(len(local_samples), wp.vec3)
+        self.boundary.velocity = device_zeros(len(local_samples), wp.vec3)
+        self.boundary.volume = device_zeros(len(local_samples), float)
         self.boundary_grid = wp.HashGrid(64, 64, 64, device=self.device)
         self.fluid_grid = wp.HashGrid(64, 64, 64, device=self.device)
-        wp.launch(update_boundary, len(local), [self.rigid, self.boundary], device=self.device)
+        wp.launch(
+            update_boundary, len(local_samples), [self.rigid, self.boundary], device=self.device
+        )
         self.boundary_grid.build(self.boundary.position, self.support_radius)
-        wp.launch(boundary_volumes, len(local), [self.boundary_grid.id, self.support_radius, self.rigid, self.boundary], device=self.device)
-        keep = zeros(len(x), int)
-        wp.launch(exclude_solid_particles, len(x), [array(x, wp.vec3), self.rigid, self.config.particle_radius, keep], device=self.device)
+        wp.launch(
+            boundary_volumes,
+            len(local_samples),
+            [self.boundary_grid.id, self.support_radius, self.rigid, self.boundary],
+            device=self.device,
+        )
+        # Remove initial fluid samples inside solid geometry, once at startup.
+        keep = device_zeros(len(initial_positions), int)
+        wp.launch(
+            exclude_solid_particles,
+            len(initial_positions),
+            [
+                to_device_array(initial_positions, wp.vec3),
+                self.rigid,
+                self.config.particle_radius,
+                keep,
+            ],
+            device=self.device,
+        )
         mask = keep.numpy().astype(bool)
         self.initial_excluded_particles = int((~mask).sum())
-        self.positions, self.velocities = array(x[mask], wp.vec3), array(v[mask], wp.vec3)
+        self.positions = to_device_array(initial_positions[mask], wp.vec3)
+        self.velocities = to_device_array(initial_velocities[mask], wp.vec3)
         self.num_particles = int(mask.sum())
         if not self.num_particles:
             raise ValueError("Scene contains no fluid outside rigid bodies")
-        n = self.num_particles
-        self.old_positions, self.corrections, self.acceleration = (zeros(n, wp.vec3) for _ in range(3))
-        self.densities, self.lambdas = zeros(n, float), zeros(n, float)
-        self.error, self.max_speed = zeros(1, float), zeros(1, float)
-        self.audit_maxima, self.invalid_state = zeros(3, float), zeros(1, int)
+        # Fluid work buffers, reductions and neighbor cache.
+        particle_count = self.num_particles
+        self.old_positions = device_zeros(particle_count, wp.vec3)
+        self.corrections = device_zeros(particle_count, wp.vec3)
+        self.acceleration = device_zeros(particle_count, wp.vec3)
+        self.densities = device_zeros(particle_count, float)
+        self.lambdas = device_zeros(particle_count, float)
+        self.error = device_zeros(1, float)
+        self.max_speed = device_zeros(1, float)
+        self.audit_maxima = device_zeros(3, float)
+        self.invalid_state = device_zeros(1, int)
         self.neighbors = Neighbors()
-        self.neighbors.fluid_count, self.neighbors.boundary_count = zeros(n, int), zeros(n, int)
-        self.neighbors.fluid = zeros((n, self.config.max_fluid_neighbors), int)
-        self.neighbors.boundary = zeros((n, self.config.max_boundary_neighbors), int)
-        self.neighbors.overflow = zeros(2, int)
+        self.neighbors.fluid_count = device_zeros(particle_count, int)
+        self.neighbors.boundary_count = device_zeros(particle_count, int)
+        self.neighbors.fluid = device_zeros((particle_count, self.config.max_fluid_neighbors), int)
+        self.neighbors.boundary = device_zeros(
+            (particle_count, self.config.max_boundary_neighbors), int
+        )
+        self.neighbors.overflow = device_zeros(2, int)
+        # Contact geometry and per-contact accumulated impulses.
         self.contacts = Contacts()
-        for field in ("count", "overflow"):
-            setattr(self.contacts, field, zeros(1, int))
-        for field, dtype in (("a",int),("b",int),("point",wp.vec3),("normal",wp.vec3),("gap",float),("target",float),("normal_impulse",float),("tangent_impulse",wp.vec3)):
-            setattr(self.contacts, field, zeros(self.config.max_contacts, dtype))
+        self.contacts.count = device_zeros(1, int)
+        self.contacts.overflow = device_zeros(1, int)
+        self.contacts.a = device_zeros(self.config.max_contacts, int)
+        self.contacts.b = device_zeros(self.config.max_contacts, int)
+        self.contacts.point = device_zeros(self.config.max_contacts, wp.vec3)
+        self.contacts.normal = device_zeros(self.config.max_contacts, wp.vec3)
+        self.contacts.gap = device_zeros(self.config.max_contacts, float)
+        self.contacts.target = device_zeros(self.config.max_contacts, float)
+        self.contacts.normal_impulse = device_zeros(self.config.max_contacts, float)
+        self.contacts.tangent_impulse = device_zeros(self.config.max_contacts, wp.vec3)
 
     def step(self):
-        c, d = self.config, self.device
+        """Advance one complete substep; launch order mirrors the numerical pipeline."""
+        config, device = self.config, self.device
         dt = self.current_dt  # One immutable dt for fluid, forces and rigid bodies.
-        n, nb = self.num_particles, len(self.boundary.local)
+        particle_count, boundary_count = self.num_particles, len(self.boundary.local)
+
+        # 1. Reset force accumulators and predict fluid positions.
         self.rigid.force.zero_()
         self.rigid.torque.zero_()
         self.neighbors.overflow.zero_()
-        wp.launch(predict, n, [self.positions, self.velocities, self.old_positions, wp.vec3(*c.gravity), dt], device=d)
+        wp.launch(
+            predict,
+            particle_count,
+            [self.positions, self.velocities, self.old_positions, wp.vec3(*config.gravity), dt],
+            device=device,
+        )
+        # 2. Cache one neighborhood search for all pressure iterations.
         self.fluid_grid.build(self.positions, self.support_radius)
         self.boundary_grid.build(self.boundary.position, self.support_radius)
-        wp.launch(cache_neighbors, n, [self.fluid_grid.id, self.boundary_grid.id, self.positions, self.boundary, self.support_radius, self.neighbors], device=d)
+        wp.launch(
+            cache_neighbors,
+            particle_count,
+            [
+                self.fluid_grid.id,
+                self.boundary_grid.id,
+                self.positions,
+                self.boundary,
+                self.support_radius,
+                self.neighbors,
+            ],
+            device=device,
+        )
         if self.neighbors.overflow.numpy().any():
-            raise RuntimeError("Neighbor capacity exceeded; increase max_fluid_neighbors/max_boundary_neighbors")
-        for iteration in range(c.max_iterations):
+            raise RuntimeError(
+                "Neighbor capacity exceeded; increase max_fluid_neighbors/max_boundary_neighbors"
+            )
+        # 3. Project density constraints and accumulate rigid reaction forces.
+        for iteration in range(config.max_iterations):
             self.error.zero_()
-            wp.launch(density_lambda, n, [self.positions, self.boundary, self.neighbors, self.fluid_volume, self.support_radius, self.densities, self.lambdas, self.error], device=d)
-            wp.launch(pressure_correction, n, [self.positions, self.boundary, self.rigid, self.neighbors, self.fluid_volume, self.fluid_mass, self.support_radius, dt, int(c.two_way), self.lambdas, self.corrections], device=d)
-            wp.launch(apply_correction, n, [self.positions, self.corrections], device=d)
+            wp.launch(
+                density_lambda,
+                particle_count,
+                [
+                    self.positions,
+                    self.boundary,
+                    self.neighbors,
+                    self.fluid_volume,
+                    self.support_radius,
+                    self.densities,
+                    self.lambdas,
+                    self.error,
+                ],
+                device=device,
+            )
+            wp.launch(
+                pressure_correction,
+                particle_count,
+                [
+                    self.positions,
+                    self.boundary,
+                    self.rigid,
+                    self.neighbors,
+                    self.fluid_volume,
+                    self.fluid_mass,
+                    self.support_radius,
+                    dt,
+                    int(config.two_way),
+                    self.lambdas,
+                    self.corrections,
+                ],
+                device=device,
+            )
+            wp.launch(
+                apply_correction, particle_count, [self.positions, self.corrections], device=device
+            )
             self.iterations = iteration + 1
-            self.density_error_percent = float(self.error.numpy()[0]) / n * 100
-            if self.iterations >= c.min_iterations and self.density_error_percent <= c.max_density_error_percent:
+            self.density_error_percent = float(self.error.numpy()[0]) / particle_count * 100
+            if (
+                self.iterations >= config.min_iterations
+                and self.density_error_percent <= config.max_density_error_percent
+            ):
                 break
-        at_limit = self.iterations == c.max_iterations and self.density_error_percent > c.max_density_error_percent
+        at_limit = (
+            self.iterations == config.max_iterations
+            and self.density_error_percent > config.max_density_error_percent
+        )
         self.iteration_limit_streak = self.iteration_limit_streak + 1 if at_limit else 0
-        if self.iteration_limit_streak == 10 or (self.iteration_limit_streak > 10 and self.iteration_limit_streak % 100 == 0):
-            warnings.warn(f"PBF pressure limit reached for {self.iteration_limit_streak} steps; error={self.density_error_percent:.5f}%", RuntimeWarning)
-        wp.launch(reconstruct_velocity, n, [self.positions, self.old_positions, dt, self.velocities], device=d)
+        if self.iteration_limit_streak == 10 or (
+            self.iteration_limit_streak > 10 and self.iteration_limit_streak % 100 == 0
+        ):
+            warnings.warn(
+                f"PBF pressure limit reached for {self.iteration_limit_streak} steps; error={self.density_error_percent:.5f}%",
+                RuntimeWarning,
+            )
+        # 4. Reconstruct fluid velocities, refresh density and apply viscosity.
+        wp.launch(
+            reconstruct_velocity,
+            particle_count,
+            [self.positions, self.old_positions, dt, self.velocities],
+            device=device,
+        )
         self.error.zero_()
-        wp.launch(density_lambda, n, [self.positions, self.boundary, self.neighbors, self.fluid_volume, self.support_radius, self.densities, self.lambdas, self.error], device=d)
-        wp.launch(viscosity, n, [self.positions, self.velocities, self.boundary, self.rigid, self.neighbors, self.densities, self.fluid_volume, self.fluid_mass, self.support_radius, c.viscosity, c.boundary_viscosity, int(c.two_way), self.acceleration], device=d)
-        wp.launch(apply_viscosity, n, [self.velocities, self.acceleration, dt], device=d)
-        wp.launch(integrate_rigid, len(self.body_models), [self.rigid, wp.vec3(*c.gravity), dt], device=d)
-        wp.launch(update_boundary, nb, [self.rigid, self.boundary], device=d)
+        wp.launch(
+            density_lambda,
+            particle_count,
+            [
+                self.positions,
+                self.boundary,
+                self.neighbors,
+                self.fluid_volume,
+                self.support_radius,
+                self.densities,
+                self.lambdas,
+                self.error,
+            ],
+            device=device,
+        )
+        wp.launch(
+            viscosity,
+            particle_count,
+            [
+                self.positions,
+                self.velocities,
+                self.boundary,
+                self.rigid,
+                self.neighbors,
+                self.densities,
+                self.fluid_volume,
+                self.fluid_mass,
+                self.support_radius,
+                config.viscosity,
+                config.boundary_viscosity,
+                int(config.two_way),
+                self.acceleration,
+            ],
+            device=device,
+        )
+        wp.launch(
+            apply_viscosity, particle_count, [self.velocities, self.acceleration, dt], device=device
+        )
+        # 5. Integrate rigid bodies, then solve their contact velocities.
+        wp.launch(
+            integrate_rigid,
+            len(self.body_models),
+            [self.rigid, wp.vec3(*config.gravity), dt],
+            device=device,
+        )
+        wp.launch(update_boundary, boundary_count, [self.rigid, self.boundary], device=device)
         self.contacts.count.zero_()
         self.contacts.overflow.zero_()
-        wp.launch(detect_contacts, (nb, len(self.body_models)), [self.rigid, self.boundary, self.contacts, c.contact_tolerance, dt], device=d)
+        wp.launch(
+            detect_contacts,
+            (boundary_count, len(self.body_models)),
+            [self.rigid, self.boundary, self.contacts, config.contact_tolerance, dt],
+            device=device,
+        )
         if self.contacts.overflow.numpy()[0]:
             raise RuntimeError("Contact capacity exceeded; increase max_contacts")
-        for _ in range(c.contact_iterations):
-            wp.launch(solve_contacts, 1, [self.rigid, self.contacts], device=d)
-        wp.launch(update_boundary, nb, [self.rigid, self.boundary], device=d)
+        for _ in range(config.contact_iterations):
+            wp.launch(solve_contacts, 1, [self.rigid, self.contacts], device=device)
+        wp.launch(update_boundary, boundary_count, [self.rigid, self.boundary], device=device)
+        # 6. Reduce speed bounds and audit state without altering the solution.
         self.max_speed.zero_()
-        wp.launch(reduce_speed, n, [self.velocities, self.acceleration, dt, self.max_speed], device=d)
-        wp.launch(reduce_boundary_speed, nb, [self.boundary, self.max_speed], device=d)
-        wp.launch(audit_fluid, n, [self.positions, self.velocities, wp.vec3(*self.container_min), wp.vec3(*self.container_max), self.audit_maxima, self.invalid_state], device=d)
-        wp.launch(audit_rigid, max(c.max_contacts, len(self.body_models)), [self.rigid, self.contacts, self.audit_maxima, self.invalid_state], device=d)
+        wp.launch(
+            reduce_speed,
+            particle_count,
+            [self.velocities, self.acceleration, dt, self.max_speed],
+            device=device,
+        )
+        wp.launch(
+            reduce_boundary_speed, boundary_count, [self.boundary, self.max_speed], device=device
+        )
+        wp.launch(
+            audit_fluid,
+            particle_count,
+            [
+                self.positions,
+                self.velocities,
+                wp.vec3(*self.container_min),
+                wp.vec3(*self.container_max),
+                self.audit_maxima,
+                self.invalid_state,
+            ],
+            device=device,
+        )
+        wp.launch(
+            audit_rigid,
+            max(config.max_contacts, len(self.body_models)),
+            [self.rigid, self.contacts, self.audit_maxima, self.invalid_state],
+            device=device,
+        )
         speed_squared = float(self.max_speed.numpy()[0])
-        if self.invalid_state.numpy()[0] or not np.isfinite(speed_squared) or not np.isfinite(self.density_error_percent):
+        if (
+            self.invalid_state.numpy()[0]
+            or not np.isfinite(speed_squared)
+            or not np.isfinite(self.density_error_percent)
+        ):
             raise FloatingPointError("Non-finite simulation state")
-        self.current_dt = float(np.clip(c.cfl_factor * .4 * (2*c.particle_radius) / np.sqrt(max(speed_squared, 1e-9)), c.min_time_step, c.max_time_step))
+        # 7. Select the next step size; advance time with this step's fixed dt.
+        self.current_dt = float(
+            np.clip(
+                config.cfl_factor
+                * 0.4
+                * (2 * config.particle_radius)
+                / np.sqrt(max(speed_squared, 1e-9)),
+                config.min_time_step,
+                config.max_time_step,
+            )
+        )
         self.last_dt = dt
         self.sim_time += dt
         self.total_steps += 1
         if self.verbose and self.total_steps % 100 == 0:
-            print(f"t={self.sim_time:.4f} dt={dt:.6f} iterations={self.iterations} density_error={self.density_error_percent:.5f}%")
+            print(
+                f"t={self.sim_time:.4f} dt={dt:.6f} iterations={self.iterations} density_error={self.density_error_percent:.5f}%"
+            )
 
     def render(self):
         if self.renderer is None:
             raise RuntimeError("Attach a CouplingRenderer before calling render()")
         self.renderer.begin_frame(self.sim_time)
-        self.renderer.render_billboards("fluid", self.positions, self.velocities, self.config.particle_radius, 2.0, 6.0)
+        self.renderer.render_billboards(
+            "fluid", self.positions, self.velocities, self.config.particle_radius, 2.0, 6.0
+        )
         self.renderer.update_rigid_scene(self)
         self.renderer.end_frame()
