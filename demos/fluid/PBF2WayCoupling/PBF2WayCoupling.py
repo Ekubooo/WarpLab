@@ -299,13 +299,15 @@ def reconstruct_velocity(
     lower: wp.vec3,
     upper: wp.vec3,
     wall_damping: float,
+    max_speed: float,
     fault: wp.array(dtype=int),
 ):
     if fault[0] != 0:
         return
     i = wp.tid()
     velocity = (x[i] - old[i]) / dt
-    v[i] = fn.reflect_wall_velocity(x[i], velocity, lower, upper, wall_damping)
+    velocity = fn.reflect_wall_velocity(x[i], velocity, lower, upper, wall_damping)
+    v[i] = fn.limit_speed(velocity, max_speed)
 
 
 @wp.kernel
@@ -371,13 +373,15 @@ def apply_viscosity(
     lower: wp.vec3,
     upper: wp.vec3,
     wall_damping: float,
+    max_speed: float,
     fault: wp.array(dtype=int),
 ):
     if fault[0] != 0:
         return
     i = wp.tid()
     velocity = v[i] + dt * acceleration[i]
-    v[i] = fn.reflect_wall_velocity(x[i], velocity, lower, upper, wall_damping)
+    velocity = fn.reflect_wall_velocity(x[i], velocity, lower, upper, wall_damping)
+    v[i] = fn.limit_speed(velocity, max_speed)
 
 
 # Rigid-body integration and contact impulses.
@@ -675,6 +679,7 @@ class PBF2WayCouplingConfig:
     boundary_viscosity: float = 0.0
     two_way: bool = True
     wall_damping: float = 0.8
+    max_speed: float = 10.0  # Fluid speed limit in meters per second.
 
     # Storage capacities and contact solver.
     max_fluid_neighbors: int = 256
@@ -689,6 +694,7 @@ class PBF2WayCouplingConfig:
             "rest_density",
             "frame_dt",
             "contact_tolerance",
+            "max_speed",
         ):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -983,6 +989,7 @@ class Example:
                     lower,
                     upper,
                     config.wall_damping,
+                    config.max_speed,
                     fault,
                 ],
                 device=device,
@@ -1032,6 +1039,7 @@ class Example:
                     lower,
                     upper,
                     config.wall_damping,
+                    config.max_speed,
                     fault,
                 ],
                 device=device,

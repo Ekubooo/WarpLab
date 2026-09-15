@@ -106,7 +106,7 @@ class WallClampTest(unittest.TestCase):
                     wp.launch(
                         solver.reconstruct_velocity,
                         len(x),
-                        [x, old_x, dt, v, self.lower, self.upper, damping, fault],
+                        [x, old_x, dt, v, self.lower, self.upper, damping, 1.0e6, fault],
                         device=device,
                     )
                     expected = self.reflected(positions, (positions - old) / dt, damping)
@@ -115,7 +115,7 @@ class WallClampTest(unittest.TestCase):
                     wp.launch(
                         solver.apply_viscosity,
                         len(x),
-                        [v, acceleration, dt, x, self.lower, self.upper, damping, fault],
+                        [v, acceleration, dt, x, self.lower, self.upper, damping, 1.0e6, fault],
                         device=device,
                     )
                     np.testing.assert_allclose(v.numpy(), expected, atol=2e-6)
@@ -125,7 +125,7 @@ class WallClampTest(unittest.TestCase):
                     wp.launch(
                         solver.apply_viscosity,
                         len(x),
-                        [v, acceleration, dt, x, self.lower, self.upper, damping, fault],
+                        [v, acceleration, dt, x, self.lower, self.upper, damping, 1.0e6, fault],
                         device=device,
                     )
                     expected = self.reflected(positions, expected + dt * acceleration_host, damping)
@@ -148,7 +148,7 @@ class WallClampTest(unittest.TestCase):
                 wp.launch(
                     solver.apply_viscosity,
                     3,
-                    [v, zeros, 0.25, x, self.lower, self.upper, 0.8, fault],
+                    [v, zeros, 0.25, x, self.lower, self.upper, 0.8, 10.0, fault],
                     device=device,
                 )
                 np.testing.assert_array_equal(v.numpy(), invalid)
@@ -179,13 +179,13 @@ class WallClampTest(unittest.TestCase):
                 wp.launch(
                     solver.reconstruct_velocity,
                     1,
-                    [x, old, 0.25, v, self.lower, self.upper, 0.8, fault],
+                    [x, old, 0.25, v, self.lower, self.upper, 0.8, 10.0, fault],
                     device=device,
                 )
                 wp.launch(
                     solver.apply_viscosity,
                     1,
-                    [v, delta, 0.25, x, self.lower, self.upper, 0.8, fault],
+                    [v, delta, 0.25, x, self.lower, self.upper, 0.8, 10.0, fault],
                     device=device,
                 )
                 np.testing.assert_array_equal(x.numpy(), initial)
@@ -196,6 +196,55 @@ class WallClampTest(unittest.TestCase):
         for value in (-0.1, 1.1, np.nan, np.inf):
             with self.assertRaisesRegex(ValueError, "wall_damping"):
                 solver.PBF2WayCouplingConfig(wall_damping=value)
+
+    def test_speed_limit_after_reconstruction_and_viscosity(self):
+        velocities = np.array(
+            [
+                [0, 0, 0],
+                [3, 4, 0],
+                [6, 8, 0],
+                [30, 40, 0],
+                [-30, 0, -40],
+                [1.0e30, -1.0e30, 1.0e30],
+            ],
+            dtype=np.float32,
+        )
+        reference = velocities.astype(np.float64)
+        reference *= np.minimum(1.0, 10.0 / np.maximum(np.linalg.norm(reference, axis=1), 1e-30))[
+            :, None
+        ]
+        for device in self.devices:
+            with self.subTest(device=device):
+                x = wp.zeros(len(velocities), dtype=wp.vec3, device=device)
+                old = self.array(-velocities, device)
+                v = wp.zeros_like(x)
+                fault = wp.zeros(2, dtype=int, device=device)
+                with patch.object(wp.array, "numpy", side_effect=AssertionError("Readback")):
+                    wp.launch(
+                        solver.reconstruct_velocity,
+                        len(x),
+                        [x, old, 1.0, v, self.lower, self.upper, 0.8, 10.0, fault],
+                        device=device,
+                    )
+                np.testing.assert_allclose(v.numpy(), reference, atol=1e-6)
+                np.testing.assert_array_equal(v.numpy()[:3], velocities[:3])
+                v.zero_()
+                acceleration = self.array(velocities, device)
+                wp.launch(
+                    solver.apply_viscosity,
+                    len(x),
+                    [v, acceleration, 1.0, x, self.lower, self.upper, 0.8, 10.0, fault],
+                    device=device,
+                )
+                np.testing.assert_allclose(v.numpy(), reference, atol=1e-6)
+                self.assertLessEqual(np.linalg.norm(v.numpy(), axis=1).max(), 10.0 + 1e-6)
+
+    def test_speed_limit_configuration(self):
+        self.assertEqual(solver.PBF2WayCouplingConfig().max_speed, 10.0)
+        self.assertEqual(solver.PBF2WayCouplingConfig(max_speed=5.0).max_speed, 5.0)
+        for value in (0, -1, np.nan, np.inf):
+            with self.assertRaisesRegex(ValueError, "max_speed"):
+                solver.PBF2WayCouplingConfig(max_speed=value)
 
 
 if __name__ == "__main__":

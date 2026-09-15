@@ -34,6 +34,22 @@ def reflect_wall_velocity(
 
 
 @wp.func
+def limit_speed(velocity: wp.vec3, max_speed: float):
+    # Keep invalid input visible to the device audit. Scale before taking the
+    # length so even very large finite velocities do not overflow the norm.
+    for axis in range(3):
+        if not wp.isfinite(velocity[axis]):
+            return velocity
+    scale = wp.max(wp.abs(velocity[0]), wp.max(wp.abs(velocity[1]), wp.abs(velocity[2])))
+    if scale > 0.0:
+        direction = velocity / scale
+        allowed_scale = max_speed / wp.length(direction)
+        if scale > allowed_scale:
+            return direction * allowed_scale
+    return velocity
+
+
+@wp.func
 def poly6(r: float, h: float):
     result = float(0.0)
     if r < h:
