@@ -17,12 +17,10 @@ from demos.fluid.common.billboard_renderer import (
     configure_nvidia_prime_render_offload,
 )
 from demos.fluid.MMPBF.render_opengl import (
-    PlaybackScheduler,
     register_keyboard_controls,
     reverse_gravity,
     rotate_gravity,
 )
-from demos.fluid.PBF2WayCoupling.coupling_initialization import rotation_matrix
 from demos.fluid.PBF2WayCoupling.simulation import (
     add_simulation_arguments,
     config_from_args,
@@ -34,10 +32,15 @@ from demos.fluid.PBF2WayCoupling.simulation import (
 MESH_VERTEX = """#version 330 core
 layout(location=0) in vec3 position;
 layout(location=1) in vec3 normal;
-uniform mat4 pose, view, projection, light_space;
+layout(location=2) in vec4 pose0;
+layout(location=3) in vec4 pose1;
+layout(location=4) in vec4 pose2;
+layout(location=5) in vec4 pose3;
+uniform mat4 view, projection, light_space;
 out vec3 world_normal;
 out vec4 light_position;
 void main() {
+    mat4 pose = mat4(pose0, pose1, pose2, pose3);
     vec4 world = pose * vec4(position, 1.0);
     world_normal = mat3(pose) * normal;
     light_position = light_space * world;
@@ -70,12 +73,54 @@ void main() {
 """
 DEPTH_VERTEX = """#version 330 core
 layout(location=0) in vec3 position;
-uniform mat4 pose, light_space;
-void main() { gl_Position = light_space * pose * vec4(position, 1.0); }
+layout(location=2) in vec4 pose0;
+layout(location=3) in vec4 pose1;
+layout(location=4) in vec4 pose2;
+layout(location=5) in vec4 pose3;
+uniform mat4 light_space;
+void main() {
+    mat4 pose = mat4(pose0, pose1, pose2, pose3);
+    gl_Position = light_space * pose * vec4(position, 1.0);
+}
 """
 DEPTH_FRAGMENT = """#version 330 core
 void main() {}
 """
+
+
+@wp.kernel
+def write_rigid_matrices(
+    positions: wp.array(dtype=wp.vec3),
+    rotations: wp.array(dtype=wp.quat),
+    body_ids: wp.array(dtype=int),
+    columns: wp.array(dtype=wp.vec4),
+):
+    """Write column-major model matrices directly into a registered GL buffer."""
+    i = wp.tid()
+    body = body_ids[i]
+    position = wp.vec3(0.0)
+    rotation = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    if body >= 0:
+        position = positions[body]
+        rotation = wp.quat_to_matrix(rotations[body])
+    columns[4 * i] = wp.vec4(rotation[0, 0], rotation[1, 0], rotation[2, 0], 0.0)
+    columns[4 * i + 1] = wp.vec4(rotation[0, 1], rotation[1, 1], rotation[2, 1], 0.0)
+    columns[4 * i + 2] = wp.vec4(rotation[0, 2], rotation[1, 2], rotation[2, 2], 0.0)
+    columns[4 * i + 3] = wp.vec4(position[0], position[1], position[2], 1.0)
+
+
+def advance_and_render(simulation, renderer):
+    """Exactly one complete simulation step per unpaused rendered frame."""
+    if not renderer.paused:
+        simulation.step()
+    simulation.render()
+
+
+def pace_frame(started, frame_dt, playback_speed):
+    """Limit playback frequency without accumulating work or skipping states."""
+    remaining = frame_dt / playback_speed - (time.perf_counter() - started)
+    if remaining > 0:
+        time.sleep(remaining)
 
 
 def light_matrix(center):
@@ -94,7 +139,7 @@ def light_matrix(center):
 
 
 class CouplingRenderer(BillboardRenderer):
-    """Own GL mesh buffers; the shared billboard renderer stays unchanged."""
+    """Own CUDA/GL mesh buffers and render exactly once per frontend iteration."""
 
     def __init__(self, device=None, hidden=False):
         if device is not None and not wp.get_device(device).is_cuda:
@@ -116,7 +161,7 @@ class CouplingRenderer(BillboardRenderer):
             draw_grid=False,
             draw_sky=False,
             draw_axis=False,
-            vsync=True,
+            vsync=False,
             device=device,
             headless=hidden,
         )
@@ -129,13 +174,33 @@ class CouplingRenderer(BillboardRenderer):
             Shader(DEPTH_VERTEX, "vertex"), Shader(DEPTH_FRAGMENT, "fragment")
         )
         self.mesh_buffers = []
-        self.poses = []
+        self.pose_resource = None
+        self.pose_buffer = None
         self.colors = []
         self.light_space = light_matrix([0.0, 2.0, 0.0])
         self.shadows = True
         self.shadow_size = 2048
         self._create_shadow_map()
         self.render_3d_callbacks.append(self._draw_rigids)
+        # Warp's default Tab shortcut skips rendering; this frontend always draws.
+        import pyglet
+
+        self.register_key_press_callback(
+            lambda symbol, modifiers: (
+                pyglet.event.EVENT_HANDLED if symbol == pyglet.window.key.TAB else None
+            )
+        )
+
+    def end_frame(self):
+        """Return after one draw, including while paused; the frontend owns pacing."""
+        # Warp's base end_frame contains a nested pause loop. Keep its preparation
+        # but leave pause handling to advance_and_render so reset remains responsive.
+        self._last_end_frame_time = time.time()
+        if self._add_shape_instances:
+            self.allocate_shape_instances()
+        if self._update_shape_instances:
+            self.update_shape_instances()
+        self.update()
 
     def _create_shadow_map(self):
         gl = self.gl
@@ -167,6 +232,46 @@ class CouplingRenderer(BillboardRenderer):
         if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
             raise RuntimeError("Shadow framebuffer is incomplete")
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+    def _allocate_billboard_instances(self, instancer, points, color):
+        # No initial transforms need copying: the billboard kernel fills every matrix.
+        gl = self.gl
+        instancer.num_instances = len(points)
+        instancer._instance_transform_cuda_buffer = None
+        if instancer.instance_transform_gl_buffer is None:
+            instancer.instance_transform_gl_buffer = gl.GLuint()
+            gl.glGenBuffers(1, instancer.instance_transform_gl_buffer)
+        gl.glBindVertexArray(instancer.vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, instancer.instance_transform_gl_buffer)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, len(points) * 64, None, gl.GL_DYNAMIC_DRAW)
+        instancer._instance_transform_cuda_buffer = wp.RegisteredGLBuffer(
+            int(instancer.instance_transform_gl_buffer.value),
+            self._device,
+            flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+            fallback_to_copy=False,
+        )
+        instancer.update_colors(color, color)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, instancer.instance_transform_gl_buffer)
+        for column in range(4):
+            gl.glVertexAttribPointer(
+                3 + column, 4, gl.GL_FLOAT, gl.GL_FALSE, 64, ctypes.c_void_p(column * 16)
+            )
+            gl.glEnableVertexAttribArray(3 + column)
+            gl.glVertexAttribDivisor(3 + column, 1)
+        gl.glBindVertexArray(0)
+
+    def _register_billboard_color_resources(self, name, instancer):
+        if instancer._instance_transform_cuda_buffer.resource is None:
+            raise RuntimeError("PBF rendering requires CUDA/OpenGL interop without CPU fallback")
+        self._billboard_color_resources[name] = tuple(
+            wp.RegisteredGLBuffer(
+                int(buffer.value),
+                self._device,
+                flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+                fallback_to_copy=False,
+            )
+            for buffer in (instancer.instance_color1_buffer, instancer.instance_color2_buffer)
+        )
 
     def _mesh(self, vertices, faces):
         gl = self.gl
@@ -211,14 +316,49 @@ class CouplingRenderer(BillboardRenderer):
             ]
             self.mesh_buffers.append(self._mesh(floor, np.array([[0, 2, 1], [0, 3, 2]])))
             self.colors.append((0.25, 0.30, 0.36))
-        positions, rotations = simulation.rigid.position.numpy(), simulation.rigid.rotation.numpy()
-        self.poses = []
-        for i in self.visible_bodies:
-            pose = np.eye(4, dtype=np.float32)
-            pose[:3, :3] = rotation_matrix(rotations[i])
-            pose[:3, 3] = positions[i]
-            self.poses.append(pose)
-        self.poses.append(np.eye(4, dtype=np.float32))
+            # Each mesh draws one instance using its own matrix in this shared VBO.
+            gl = self.gl
+            self.pose_buffer = gl.GLuint()
+            gl.glGenBuffers(1, self.pose_buffer)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.pose_buffer)
+            gl.glBufferData(
+                gl.GL_ARRAY_BUFFER, 64 * len(self.mesh_buffers), None, gl.GL_DYNAMIC_DRAW
+            )
+            for index, (vao, _vbo, _count) in enumerate(self.mesh_buffers):
+                gl.glBindVertexArray(vao)
+                for column in range(4):
+                    location = 2 + column
+                    gl.glEnableVertexAttribArray(location)
+                    gl.glVertexAttribPointer(
+                        location,
+                        4,
+                        gl.GL_FLOAT,
+                        gl.GL_FALSE,
+                        64,
+                        ctypes.c_void_p(index * 64 + column * 16),
+                    )
+                    gl.glVertexAttribDivisor(location, 1)
+            gl.glBindVertexArray(0)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+            self.pose_resource = wp.RegisteredGLBuffer(
+                int(self.pose_buffer.value),
+                simulation.device,
+                flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+                fallback_to_copy=False,
+            )
+            self.pose_body_ids = wp.array(
+                self.visible_bodies + [-1], dtype=int, device=simulation.device
+            )
+        columns = self.pose_resource.map(dtype=wp.vec4, shape=(4 * len(self.mesh_buffers),))
+        try:
+            wp.launch(
+                write_rigid_matrices,
+                len(self.mesh_buffers),
+                [simulation.rigid.position, simulation.rigid.rotation, self.pose_body_ids, columns],
+                device=simulation.device,
+            )
+        finally:
+            self.pose_resource.unmap()
 
     def _matrix(self, program, name, matrix, column_major=False):
         gl = self.gl
@@ -240,10 +380,9 @@ class CouplingRenderer(BillboardRenderer):
             gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
             gl.glUseProgram(self.depth_program.id)
             self._matrix(self.depth_program, "light_space", self.light_space)
-            for (vao, _vbo, count), pose in zip(self.mesh_buffers[:-1], self.poses[:-1]):
-                self._matrix(self.depth_program, "pose", pose)
+            for vao, _vbo, count in self.mesh_buffers[:-1]:
                 gl.glBindVertexArray(vao)
-                gl.glDrawArrays(gl.GL_TRIANGLES, 0, count)
+                gl.glDrawArraysInstanced(gl.GL_TRIANGLES, 0, count, 1)
             gl.glBindVertexArray(0)
             gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
             gl.glViewport(0, 0, self.screen_width, self.screen_height)
@@ -260,11 +399,10 @@ class CouplingRenderer(BillboardRenderer):
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.shadow_texture)
         gl.glUniform1i(gl.glGetUniformLocation(program.id, b"shadow_map"), 0)
         gl.glUniform1i(gl.glGetUniformLocation(program.id, b"shadows"), int(self.shadows))
-        for (vao, _vbo, count), pose, color in zip(self.mesh_buffers, self.poses, self.colors):
-            self._matrix(program, "pose", pose)
+        for (vao, _vbo, count), color in zip(self.mesh_buffers, self.colors):
             gl.glUniform3f(gl.glGetUniformLocation(program.id, b"color"), *color)
             gl.glBindVertexArray(vao)
-            gl.glDrawArrays(gl.GL_TRIANGLES, 0, count)
+            gl.glDrawArraysInstanced(gl.GL_TRIANGLES, 0, count, 1)
         gl.glBindVertexArray(0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
 
@@ -297,6 +435,11 @@ class CouplingRenderer(BillboardRenderer):
                 gl.glDeleteVertexArrays(1, vao)
                 gl.glDeleteBuffers(1, vbo)
             self.mesh_buffers.clear()
+            # Release CUDA registration before deleting its OpenGL storage.
+            self.pose_resource = None
+            if self.pose_buffer is not None:
+                gl.glDeleteBuffers(1, self.pose_buffer)
+                self.pose_buffer = None
             gl.glDeleteTextures(1, self.shadow_texture)
             gl.glDeleteFramebuffers(1, self.shadow_fbo)
             self.mesh_program.delete()
@@ -349,7 +492,6 @@ def main():
         simulation.step()
     renderer = CouplingRenderer(device=simulation.device, hidden=args.hidden)
     simulation.renderer = renderer
-    scheduler = PlaybackScheduler(args.playback_speed, max_substeps_per_frame=16)
     reset_requested = False
 
     def request_reset():
@@ -362,7 +504,6 @@ def main():
         on_reverse_gravity=lambda: reverse_gravity(simulation),
         on_rotate_gravity=lambda angle: rotate_gravity(simulation, angle),
     )
-    previous = time.perf_counter()
     frame = 0
     try:
         while renderer.is_running() and (not args.num_frames or frame < args.num_frames):
@@ -371,15 +512,12 @@ def main():
                     config=config, device=args.device, verbose=args.verbose
                 )
                 simulation.renderer = renderer
-                scheduler = PlaybackScheduler(args.playback_speed, max_substeps_per_frame=16)
                 reset_requested = False
                 renderer.paused = True
-            now = time.perf_counter()
-            if not renderer.paused:
-                scheduler.advance(simulation, now - previous)
-            previous = now
-            simulation.render()
+            started = time.perf_counter()
+            advance_and_render(simulation, renderer)
             frame += 1
+            pace_frame(started, simulation.frame_dt, args.playback_speed)
         if args.screenshot:
             renderer.screenshot(args.screenshot)
     finally:

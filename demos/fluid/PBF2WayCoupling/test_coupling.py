@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -12,6 +13,7 @@ import warp as wp
 from . import PBF2WayCoupling as solver
 from . import coupling_initialization as init
 from . import coupling_functions as fn
+from .simulation import diagnostics
 
 
 @wp.kernel
@@ -97,6 +99,54 @@ class CouplingTest(unittest.TestCase):
             device=s.device,
         )
 
+    def solve_contacts(self, s):
+        wp.launch(solver.prepare_rigid_contacts, len(s.body_models), [s.rigid], device=s.device)
+        wp.launch(
+            solver.prepare_contacts, s.config.max_contacts, [s.rigid, s.contacts], device=s.device
+        )
+        wp.launch(solver.solve_contacts, 1, [s.rigid, s.contacts, 5], device=s.device)
+
+    def test_fixed_step_counts_and_no_readback(self):
+        s = self.make()
+        with patch.object(wp.array, "numpy", side_effect=AssertionError("Unexpected GPU readback")):
+            with patch.object(wp, "launch", wraps=wp.launch) as launches:
+                s.step()
+            self.assertEqual(
+                sum(call.args[0] is solver.predict for call in launches.call_args_list), 3
+            )
+            self.assertEqual(
+                sum(call.args[0] is solver.pressure_correction for call in launches.call_args_list),
+                15,
+            )
+            self.assertEqual(
+                sum(call.args[0] is solver.solve_contacts for call in launches.call_args_list), 3
+            )
+            for _ in range(59):
+                s.step()
+        self.assertEqual(s.sim_time, 1.0)
+        self.assertEqual(s.total_steps, 60)
+        self.assertEqual(s.total_substeps, 180)
+        self.assertEqual(s.current_dt, 1 / 60)
+        self.assertEqual(s.substep_dt, 1 / 180)
+
+    def test_latched_nonfinite_fault(self):
+        s = self.make()
+        velocity = s.rigid.velocity.numpy()
+        velocity[1, 0] = np.nan
+        s.rigid.velocity.assign(velocity)
+        # Actual device audit must discover the invalid velocity before mesh queries.
+        with patch.object(wp.array, "numpy", side_effect=AssertionError("Unexpected readback")):
+            s.step()
+        self.assertEqual(s.invalid_state.numpy()[0], 1)
+        positions, rotations = s.positions.numpy().copy(), s.rigid.rotation.numpy().copy()
+        with patch.object(wp.array, "numpy", side_effect=AssertionError("Unexpected readback")):
+            s.step()
+        with self.assertRaises(FloatingPointError):
+            diagnostics(s)
+        np.testing.assert_array_equal(s.positions.numpy(), positions)
+        np.testing.assert_array_equal(s.rigid.rotation.numpy(), rotations)
+        self.assertEqual(s.rigid.fault.numpy()[1], 1)
+
     def test_obj_mass_inertia_and_sampling(self):
         v, f = init.load_obj(init.ROOT / "assets/UnitBox.obj")
         v = v * [2, 3, 4] + [5, -2, 7]
@@ -168,7 +218,6 @@ class CouplingTest(unittest.TestCase):
                 s.support_radius,
                 s.densities,
                 s.lambdas,
-                s.error,
             ],
             device="cpu",
         )
@@ -249,7 +298,6 @@ class CouplingTest(unittest.TestCase):
                 s.support_radius,
                 s.densities,
                 s.lambdas,
-                s.error,
             ],
             device=s.device,
         )
@@ -291,7 +339,7 @@ class CouplingTest(unittest.TestCase):
                 correction[i] += dx
                 b = bodies[j]
                 if b == 1:
-                    force = -mass * dx / s.current_dt**2
+                    force = -mass * dx / s.substep_dt**2
                     forces[b] += force
                     torques[b] += np.cross(bx[j] - centers[b], force)
         wp.launch(
@@ -305,7 +353,7 @@ class CouplingTest(unittest.TestCase):
                 volume,
                 mass,
                 h,
-                s.current_dt,
+                s.substep_dt,
                 1,
                 s.lambdas,
                 s.corrections,
@@ -396,8 +444,15 @@ class CouplingTest(unittest.TestCase):
 
     def test_neighbor_overflow_is_reported(self):
         s = self.make(max_fluid_neighbors=1, max_boundary_neighbors=1)
+        s.step()
         with self.assertRaisesRegex(RuntimeError, "Neighbor capacity"):
-            s.step()
+            diagnostics(s)
+        positions = s.positions.numpy().copy()
+        velocities = s.velocities.numpy().copy()
+        s.step()
+        np.testing.assert_array_equal(s.positions.numpy(), positions)
+        np.testing.assert_array_equal(s.velocities.numpy(), velocities)
+        self.assertEqual(s.rigid.fault.numpy()[1], 1)
 
     def test_contact_floor_restitution_and_friction(self):
         s = self.make()
@@ -414,8 +469,7 @@ class CouplingTest(unittest.TestCase):
         s.contacts.normal.assign(normal)
         s.rigid.friction.assign(np.array([0.5, 0.5], dtype=np.float32))
         s.rigid.velocity.assign(np.array([[0, 0, 0], [1, -1, 0]], dtype=np.float32))
-        for _ in range(5):
-            wp.launch(solver.solve_contacts, 1, [s.rigid, s.contacts], device=s.device)
+        self.solve_contacts(s)
         self.assertAlmostEqual(s.rigid.velocity.numpy()[1, 1], 0.6, places=5)
         self.assertLess(s.rigid.velocity.numpy()[1, 0], 1)
         np.testing.assert_array_equal(s.rigid.velocity.numpy()[0], [0, 0, 0])
@@ -423,6 +477,59 @@ class CouplingTest(unittest.TestCase):
             np.linalg.norm(s.contacts.tangent_impulse.numpy()[0]),
             0.5 * s.contacts.normal_impulse.numpy()[0] + 1e-6,
         )
+
+    def test_precomputed_fused_contacts_match_original_sweeps(self):
+        from .test_contact_reference import reference_contact_sweep
+
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                s = solver.Example(self.config, device=device)
+                count = 6
+                s.contacts.count.assign(np.array([count], dtype=np.int32))
+                center = s.rigid.position.numpy()[1]
+                normals = np.array(
+                    [[0, 1, 0], [1, 0, 0], [0, 0, 1], [0, 1, 0], [-1, 0, 0], [0, 0, -1]],
+                    dtype=np.float32,
+                )
+                offsets = np.array(
+                    [
+                        [0.03, -0.12, 0],
+                        [-0.1, 0.02, 0],
+                        [0.02, 0, -0.11],
+                        [-0.02, -0.12, 0.03],
+                        [0.1, 0, 0.02],
+                        [0, 0.02, 0.1],
+                    ],
+                    dtype=np.float32,
+                )
+                for name, values in (
+                    ("a", np.ones(count)),
+                    ("b", np.zeros(count)),
+                    ("point", center + offsets),
+                    ("normal", normals),
+                    ("target", np.linspace(0, 0.2, count)),
+                ):
+                    data = getattr(s.contacts, name).numpy()
+                    data[:count] = values
+                    getattr(s.contacts, name).assign(data)
+                s.rigid.velocity.assign(np.array([[0, 0, 0], [0.8, -1, 0.3]], dtype=np.float32))
+                s.rigid.omega.assign(np.array([[0, 0, 0], [0.2, 0.3, -0.4]], dtype=np.float32))
+                fields = (
+                    s.rigid.velocity,
+                    s.rigid.omega,
+                    s.contacts.normal_impulse,
+                    s.contacts.tangent_impulse,
+                )
+                before = [a.numpy().copy() for a in fields]
+                for _ in range(5):
+                    wp.launch(reference_contact_sweep, 1, [s.rigid, s.contacts], device=device)
+                expected = [a.numpy().copy() for a in fields]
+                for a, data in zip(fields, before):
+                    a.assign(data)
+                self.solve_contacts(s)
+                for a, data in zip(fields, expected):
+                    np.testing.assert_allclose(a.numpy(), data, rtol=2e-5, atol=2e-6)
 
     def test_mesh_contacts_and_overflow(self):
         s = self.make(max_contacts=1)
@@ -440,6 +547,11 @@ class CouplingTest(unittest.TestCase):
         )
         self.assertEqual(s.contacts.overflow.numpy()[0], 1)
         self.assertGreater(s.contacts.count.numpy()[0], 1)
+        wp.launch(
+            solver.check_faults, 1, [s.neighbors, s.contacts, s.invalid_state], device=s.device
+        )
+        with self.assertRaisesRegex(RuntimeError, "Contact capacity"):
+            diagnostics(s)
 
     def test_mutual_mesh_contact_transfers_momentum(self):
         data = json.loads(self.scene.read_text())
@@ -463,8 +575,7 @@ class CouplingTest(unittest.TestCase):
         self.assertGreater(s.contacts.count.numpy()[0], 0)
         count = int(s.contacts.count.numpy()[0])
         self.assertTrue(np.any(s.contacts.gap.numpy()[:count] < 0))
-        for _ in range(5):
-            wp.launch(solver.solve_contacts, 1, [s.rigid, s.contacts], device="cpu")
+        self.solve_contacts(s)
         v = s.rigid.velocity.numpy()
         masses = np.array([b.mass for b in s.body_models])
         np.testing.assert_allclose((masses[:, None] * v).sum(axis=0), [0, 0, 0], atol=2e-5)
@@ -486,15 +597,20 @@ class CouplingTest(unittest.TestCase):
             cpu.rigid.position.numpy(), gpu.rigid.position.numpy(), atol=5e-5
         )
         self.assertEqual(cpu.iterations, gpu.iterations)
-        self.assertLessEqual(cpu.density_error_percent, cpu.config.max_density_error_percent)
+        self.assertEqual(cpu.iterations, 5)
+        self.assertTrue(np.isfinite(diagnostics(cpu)["density_error_percent"]))
 
     def test_invalid_configuration(self):
         for overrides in (
             {"particle_radius": 0},
             {"gravity": (0, float("nan"), 0)},
             {"viscosity": -1},
-            {"initial_time_step": 0.02},
-            {"min_iterations": 101},
+            {"frame_dt": 0},
+            {"substeps": 0},
+            {"substeps": 4},
+            {"frame_dt": 1 / 30},
+            {"pressure_iterations": 6},
+            {"contact_iterations": 4},
             {"max_contacts": 0},
         ):
             with self.assertRaises(ValueError):

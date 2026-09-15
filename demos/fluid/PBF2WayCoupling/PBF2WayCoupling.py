@@ -6,7 +6,6 @@ SPlisHSPlasH f3f677140761db7637b5443beb54f19f1f835ed4 (MIT).
 
 from dataclasses import dataclass
 from pathlib import Path
-import warnings
 
 import numpy as np
 import warp as wp
@@ -35,6 +34,8 @@ class RigidState:
     force: wp.array(dtype=wp.vec3)
     torque: wp.array(dtype=wp.vec3)
     mesh: wp.array(dtype=wp.uint64)
+    inverse_inertia_world: wp.array(dtype=wp.mat33)
+    fault: wp.array(dtype=int)
     lower: wp.array(dtype=wp.vec3)
     upper: wp.array(dtype=wp.vec3)
     restitution: wp.array(dtype=float)
@@ -57,6 +58,7 @@ class BoundaryState:
 class Neighbors:
     """Fixed-capacity neighbor lists; overflow slots identify fluid/boundary lists."""
 
+    fault: wp.array(dtype=int)
     fluid_count: wp.array(dtype=int)
     boundary_count: wp.array(dtype=int)
     fluid: wp.array2d(dtype=int)
@@ -77,6 +79,9 @@ class Contacts:
     target: wp.array(dtype=float)
     normal_impulse: wp.array(dtype=float)
     tangent_impulse: wp.array(dtype=wp.vec3)
+    offset_a: wp.array(dtype=wp.vec3)
+    offset_b: wp.array(dtype=wp.vec3)
+    normal_mass: wp.array(dtype=float)
     overflow: wp.array(dtype=int)
 
 
@@ -86,6 +91,8 @@ class Contacts:
 @wp.kernel
 def update_boundary(rigid: RigidState, boundary: BoundaryState):
     """Transform each sample and evaluate v + omega cross world_offset."""
+    if rigid.fault[0] != 0:
+        return
     i = wp.tid()
     body_index = boundary.body[i]
     world_offset = wp.quat_rotate(rigid.rotation[body_index], boundary.local[i])
@@ -135,13 +142,27 @@ def exclude_solid_particles(
 
 
 @wp.kernel
+def begin_substep(rigid: RigidState, contacts: Contacts):
+    if rigid.fault[0] != 0:
+        return
+    body = wp.tid()
+    rigid.force[body] = wp.vec3(0.0)
+    rigid.torque[body] = wp.vec3(0.0)
+    if body == 0:
+        contacts.count[0] = 0
+
+
+@wp.kernel
 def predict(
     x: wp.array(dtype=wp.vec3),
     v: wp.array(dtype=wp.vec3),
     old: wp.array(dtype=wp.vec3),
     gravity: wp.vec3,
     dt: float,
+    fault: wp.array(dtype=int),
 ):
+    if fault[0] != 0:
+        return
     i = wp.tid()
     old[i] = x[i]
     v[i] += dt * gravity
@@ -157,6 +178,8 @@ def cache_neighbors(
     h: float,
     neighbors: Neighbors,
 ):
+    if neighbors.fault[0] != 0:
+        return
     i = wp.hash_grid_point_id(fluid_grid, wp.tid())
     fluid_count = int(0)
     boundary_count = int(0)
@@ -187,9 +210,10 @@ def density_lambda(
     h: float,
     density: wp.array(dtype=float),
     lambdas: wp.array(dtype=float),
-    error: wp.array(dtype=float),
 ):
     """Evaluate normalized density and the PBF constraint multiplier."""
+    if neighbors.fault[0] != 0:
+        return
     i = wp.tid()
     normalized_density = volume * fn.poly6(0.0, h)
     gradient_i = wp.vec3(0.0)
@@ -210,7 +234,6 @@ def density_lambda(
     constraint = wp.max(normalized_density - 1.0, 0.0)
     density[i] = normalized_density
     lambdas[i] = -constraint / (squared_gradient_sum + wp.dot(gradient_i, gradient_i) + 1.0e-6)
-    wp.atomic_add(error, 0, constraint)
 
 
 @wp.kernel
@@ -228,6 +251,8 @@ def pressure_correction(
     correction: wp.array(dtype=wp.vec3),
 ):
     """Compute fluid displacement and accumulate its opposite rigid-body force."""
+    if rigid.fault[0] != 0:
+        return
     i = wp.tid()
     position_delta = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
@@ -252,15 +277,25 @@ def pressure_correction(
 
 
 @wp.kernel
-def apply_correction(x: wp.array(dtype=wp.vec3), correction: wp.array(dtype=wp.vec3)):
+def apply_correction(
+    x: wp.array(dtype=wp.vec3), correction: wp.array(dtype=wp.vec3), fault: wp.array(dtype=int)
+):
+    if fault[0] != 0:
+        return
     i = wp.tid()
     x[i] += correction[i]
 
 
 @wp.kernel
 def reconstruct_velocity(
-    x: wp.array(dtype=wp.vec3), old: wp.array(dtype=wp.vec3), dt: float, v: wp.array(dtype=wp.vec3)
+    x: wp.array(dtype=wp.vec3),
+    old: wp.array(dtype=wp.vec3),
+    dt: float,
+    v: wp.array(dtype=wp.vec3),
+    fault: wp.array(dtype=int),
 ):
+    if fault[0] != 0:
+        return
     i = wp.tid()
     v[i] = (x[i] - old[i]) / dt
 
@@ -281,6 +316,8 @@ def viscosity(
     two_way: int,
     acceleration: wp.array(dtype=wp.vec3),
 ):
+    if rigid.fault[0] != 0:
+        return
     i = wp.tid()
     viscous_acceleration = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
@@ -318,7 +355,14 @@ def viscosity(
 
 
 @wp.kernel
-def apply_viscosity(v: wp.array(dtype=wp.vec3), acceleration: wp.array(dtype=wp.vec3), dt: float):
+def apply_viscosity(
+    v: wp.array(dtype=wp.vec3),
+    acceleration: wp.array(dtype=wp.vec3),
+    dt: float,
+    fault: wp.array(dtype=int),
+):
+    if fault[0] != 0:
+        return
     i = wp.tid()
     v[i] += dt * acceleration[i]
 
@@ -328,6 +372,8 @@ def apply_viscosity(v: wp.array(dtype=wp.vec3), acceleration: wp.array(dtype=wp.
 
 @wp.kernel
 def integrate_rigid(rigid: RigidState, gravity: wp.vec3, dt: float):
+    if rigid.fault[0] != 0:
+        return
     body_index = wp.tid()
     if rigid.inverse_mass[body_index] > 0.0:
         rotation = rigid.rotation[body_index]
@@ -362,6 +408,8 @@ def integrate_rigid(rigid: RigidState, gravity: wp.vec3, dt: float):
 def detect_contacts(
     rigid: RigidState, boundary: BoundaryState, contacts: Contacts, tolerance: float, dt: float
 ):
+    if rigid.fault[0] != 0:
+        return
     i, body_b = wp.tid()
     body_a = boundary.body[i]
     if body_a == body_b or rigid.inverse_mass[body_a] == 0.0:
@@ -434,95 +482,123 @@ def detect_contacts(
 
 
 @wp.kernel
-def solve_contacts(rigid: RigidState, contacts: Contacts):
+def prepare_rigid_contacts(rigid: RigidState):
+    if rigid.fault[0] != 0:
+        return
+    body = wp.tid()
+    rigid.inverse_inertia_world[body] = fn.world_inverse_inertia(
+        rigid.rotation[body], rigid.inverse_inertia[body]
+    )
+
+
+@wp.kernel
+def prepare_contacts(rigid: RigidState, contacts: Contacts):
+    if rigid.fault[0] != 0:
+        return
+    i = wp.tid()
+    if i >= wp.min(contacts.count[0], contacts.a.shape[0]):
+        return
+    a, b = contacts.a[i], contacts.b[i]
+    offset_a = contacts.point[i] - rigid.position[a]
+    offset_b = contacts.point[i] - rigid.position[b]
+    normal = contacts.normal[i]
+    contacts.offset_a[i] = offset_a
+    contacts.offset_b[i] = offset_b
+    contacts.normal_mass[i] = fn.effective_mass(
+        rigid.inverse_mass[a], rigid.inverse_inertia_world[a], offset_a, normal
+    ) + fn.effective_mass(rigid.inverse_mass[b], rigid.inverse_inertia_world[b], offset_b, normal)
+
+
+@wp.kernel
+def solve_contacts(rigid: RigidState, contacts: Contacts, iterations: int):
     # Sequential impulses: one device thread owns all body writes. The selected
     # scene has three dynamic bodies; this avoids racing Gauss-Seidel updates.
-    for contact_index in range(wp.min(contacts.count[0], contacts.a.shape[0])):
-        body_a, body_b = contacts.a[contact_index], contacts.b[contact_index]
-        normal = contacts.normal[contact_index]
-        offset_a, offset_b = (
-            contacts.point[contact_index] - rigid.position[body_a],
-            contacts.point[contact_index] - rigid.position[body_b],
-        )
-        inverse_inertia_a = fn.world_inverse_inertia(
-            rigid.rotation[body_a], rigid.inverse_inertia[body_a]
-        )
-        inverse_inertia_b = fn.world_inverse_inertia(
-            rigid.rotation[body_b], rigid.inverse_inertia[body_b]
-        )
-        velocity_a = wp.vec3(rigid.velocity[body_a])
-        velocity_b = wp.vec3(rigid.velocity[body_b])
-        angular_velocity_a = wp.vec3(rigid.omega[body_a])
-        angular_velocity_b = wp.vec3(rigid.omega[body_b])
-        # Normal impulse: meet the target separation speed without adhesion.
-        relative_velocity = fn.point_velocity(
-            velocity_a, angular_velocity_a, offset_a
-        ) - fn.point_velocity(velocity_b, angular_velocity_b, offset_b)
-        normal_inverse_effective_mass = fn.effective_mass(
-            rigid.inverse_mass[body_a], inverse_inertia_a, offset_a, normal
-        ) + fn.effective_mass(rigid.inverse_mass[body_b], inverse_inertia_b, offset_b, normal)
-        normal_impulse = wp.max(
-            0.0,
-            contacts.normal_impulse[contact_index]
-            + (contacts.target[contact_index] - wp.dot(relative_velocity, normal))
-            / normal_inverse_effective_mass,
-        )
-        normal_impulse_delta = (normal_impulse - contacts.normal_impulse[contact_index]) * normal
-        contacts.normal_impulse[contact_index] = normal_impulse
-        velocity_a += rigid.inverse_mass[body_a] * normal_impulse_delta
-        velocity_b -= rigid.inverse_mass[body_b] * normal_impulse_delta
-        angular_velocity_a += inverse_inertia_a * wp.cross(offset_a, normal_impulse_delta)
-        angular_velocity_b -= inverse_inertia_b * wp.cross(offset_b, normal_impulse_delta)
-        # Tangential impulse: apply Coulomb friction after the normal update.
-        relative_velocity = fn.point_velocity(
-            velocity_a, angular_velocity_a, offset_a
-        ) - fn.point_velocity(velocity_b, angular_velocity_b, offset_b)
-        tangent = relative_velocity - wp.dot(relative_velocity, normal) * normal
-        tangent_speed = wp.length(tangent)
-        if tangent_speed > 1.0e-8:
-            tangent /= tangent_speed
-            tangent_inverse_effective_mass = fn.effective_mass(
-                rigid.inverse_mass[body_a], inverse_inertia_a, offset_a, tangent
-            ) + fn.effective_mass(rigid.inverse_mass[body_b], inverse_inertia_b, offset_b, tangent)
-            tangent_impulse = (
-                contacts.tangent_impulse[contact_index]
-                - tangent_speed / tangent_inverse_effective_mass * tangent
+    if rigid.fault[0] != 0:
+        return
+    for iteration in range(iterations):
+        for contact_index in range(wp.min(contacts.count[0], contacts.a.shape[0])):
+            body_a, body_b = contacts.a[contact_index], contacts.b[contact_index]
+            normal = contacts.normal[contact_index]
+            offset_a = contacts.offset_a[contact_index]
+            offset_b = contacts.offset_b[contact_index]
+            inverse_inertia_a = rigid.inverse_inertia_world[body_a]
+            inverse_inertia_b = rigid.inverse_inertia_world[body_b]
+            velocity_a = wp.vec3(rigid.velocity[body_a])
+            velocity_b = wp.vec3(rigid.velocity[body_b])
+            angular_velocity_a = wp.vec3(rigid.omega[body_a])
+            angular_velocity_b = wp.vec3(rigid.omega[body_b])
+            # Normal impulse: meet the target separation speed without adhesion.
+            relative_velocity = fn.point_velocity(
+                velocity_a, angular_velocity_a, offset_a
+            ) - fn.point_velocity(velocity_b, angular_velocity_b, offset_b)
+            normal_inverse_effective_mass = contacts.normal_mass[contact_index]
+            normal_impulse = wp.max(
+                0.0,
+                contacts.normal_impulse[contact_index]
+                + (contacts.target[contact_index] - wp.dot(relative_velocity, normal))
+                / normal_inverse_effective_mass,
             )
-            friction_limit = (
-                wp.sqrt(rigid.friction[body_a] * rigid.friction[body_b]) * normal_impulse
-            )
-            if wp.length(tangent_impulse) > friction_limit:
-                tangent_impulse = wp.normalize(tangent_impulse) * friction_limit
-            tangent_impulse_delta = tangent_impulse - contacts.tangent_impulse[contact_index]
-            contacts.tangent_impulse[contact_index] = tangent_impulse
-            velocity_a += rigid.inverse_mass[body_a] * tangent_impulse_delta
-            velocity_b -= rigid.inverse_mass[body_b] * tangent_impulse_delta
-            angular_velocity_a += inverse_inertia_a * wp.cross(offset_a, tangent_impulse_delta)
-            angular_velocity_b -= inverse_inertia_b * wp.cross(offset_b, tangent_impulse_delta)
-        rigid.velocity[body_a] = velocity_a
-        rigid.velocity[body_b] = velocity_b
-        rigid.omega[body_a] = angular_velocity_a
-        rigid.omega[body_b] = angular_velocity_b
+            normal_impulse_delta = (
+                normal_impulse - contacts.normal_impulse[contact_index]
+            ) * normal
+            contacts.normal_impulse[contact_index] = normal_impulse
+            velocity_a += rigid.inverse_mass[body_a] * normal_impulse_delta
+            velocity_b -= rigid.inverse_mass[body_b] * normal_impulse_delta
+            angular_velocity_a += inverse_inertia_a * wp.cross(offset_a, normal_impulse_delta)
+            angular_velocity_b -= inverse_inertia_b * wp.cross(offset_b, normal_impulse_delta)
+            # Tangential impulse: apply Coulomb friction after the normal update.
+            relative_velocity = fn.point_velocity(
+                velocity_a, angular_velocity_a, offset_a
+            ) - fn.point_velocity(velocity_b, angular_velocity_b, offset_b)
+            tangent = relative_velocity - wp.dot(relative_velocity, normal) * normal
+            tangent_speed = wp.length(tangent)
+            if tangent_speed > 1.0e-8:
+                tangent /= tangent_speed
+                tangent_inverse_effective_mass = fn.effective_mass(
+                    rigid.inverse_mass[body_a], inverse_inertia_a, offset_a, tangent
+                ) + fn.effective_mass(
+                    rigid.inverse_mass[body_b], inverse_inertia_b, offset_b, tangent
+                )
+                tangent_impulse = (
+                    contacts.tangent_impulse[contact_index]
+                    - tangent_speed / tangent_inverse_effective_mass * tangent
+                )
+                friction_limit = (
+                    wp.sqrt(rigid.friction[body_a] * rigid.friction[body_b]) * normal_impulse
+                )
+                if wp.length(tangent_impulse) > friction_limit:
+                    tangent_impulse = wp.normalize(tangent_impulse) * friction_limit
+                tangent_impulse_delta = tangent_impulse - contacts.tangent_impulse[contact_index]
+                contacts.tangent_impulse[contact_index] = tangent_impulse
+                velocity_a += rigid.inverse_mass[body_a] * tangent_impulse_delta
+                velocity_b -= rigid.inverse_mass[body_b] * tangent_impulse_delta
+                angular_velocity_a += inverse_inertia_a * wp.cross(offset_a, tangent_impulse_delta)
+                angular_velocity_b -= inverse_inertia_b * wp.cross(offset_b, tangent_impulse_delta)
+            rigid.velocity[body_a] = velocity_a
+            rigid.velocity[body_b] = velocity_b
+            rigid.omega[body_a] = angular_velocity_a
+            rigid.omega[body_b] = angular_velocity_b
 
 
-# Time-step bounds and diagnostics (no position/velocity corrections).
+# Device diagnostics. Only explicit host diagnostics read these arrays.
 
 
 @wp.kernel
-def reduce_speed(
-    v: wp.array(dtype=wp.vec3),
-    acceleration: wp.array(dtype=wp.vec3),
-    dt: float,
-    speed: wp.array(dtype=float),
-):
-    i = wp.tid()
-    wp.atomic_max(speed, 0, wp.length_sq(v[i] + dt * acceleration[i]))
-
-
-@wp.kernel
-def reduce_boundary_speed(boundary: BoundaryState, speed: wp.array(dtype=float)):
-    i = wp.tid()
-    wp.atomic_max(speed, 0, wp.length_sq(boundary.velocity[i]))
+def check_faults(neighbors: Neighbors, contacts: Contacts, invalid: wp.array(dtype=int)):
+    code = neighbors.fault[0]
+    if neighbors.overflow[0] != 0 or neighbors.overflow[1] != 0:
+        code = code | 1
+    if contacts.overflow[0] != 0:
+        code = code | 2
+    if invalid[0] != 0:
+        code = code | 4
+    neighbors.fault[0] = code
+    if code != 0 and neighbors.fault[1] == 0:
+        wp.printf(
+            "PBF device fault %d: 1=neighbor overflow, 2=contact overflow, 4=non-finite state. Physics stopped; reset required.\n",
+            code,
+        )
+        neighbors.fault[1] = 1
 
 
 @wp.kernel
@@ -576,14 +652,10 @@ class PBF2WayCouplingConfig:
     rest_density: float = 1000.0
     gravity: tuple = (0.0, -9.81, 0.0)
 
-    # Adaptive time step and PBF convergence.
-    initial_time_step: float = 0.001
-    min_time_step: float = 0.0001
-    max_time_step: float = 0.005
-    cfl_factor: float = 0.5
-    min_iterations: int = 2
-    max_iterations: int = 100
-    max_density_error_percent: float = 0.01
+    # One public step contains three fixed physical substeps.
+    frame_dt: float = 1.0 / 60.0
+    substeps: int = 3
+    pressure_iterations: int = 5
 
     # Non-pressure forces and rigid-body feedback.
     viscosity: float = 0.01
@@ -601,17 +673,14 @@ class PBF2WayCouplingConfig:
         for name in (
             "particle_radius",
             "rest_density",
-            "initial_time_step",
-            "min_time_step",
-            "max_time_step",
-            "cfl_factor",
+            "frame_dt",
             "contact_tolerance",
         ):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         for name in (
-            "min_iterations",
-            "max_iterations",
+            "substeps",
+            "pressure_iterations",
             "max_fluid_neighbors",
             "max_boundary_neighbors",
             "max_contacts",
@@ -619,19 +688,23 @@ class PBF2WayCouplingConfig:
         ):
             if not isinstance(getattr(self, name), int) or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("viscosity", "boundary_viscosity", "max_density_error_percent"):
+        for name in ("viscosity", "boundary_viscosity"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
-        if not self.min_time_step <= self.initial_time_step <= self.max_time_step:
-            raise ValueError("Require min_time_step <= initial_time_step <= max_time_step")
-        if self.min_iterations > self.max_iterations:
-            raise ValueError("min_iterations must not exceed max_iterations")
         if len(self.gravity) != 3 or not np.isfinite(self.gravity).all():
             raise ValueError("gravity must contain three finite components")
+        for name, fixed_value in (
+            ("frame_dt", 1 / 60),
+            ("substeps", 3),
+            ("pressure_iterations", 5),
+            ("contact_iterations", 5),
+        ):
+            if getattr(self, name) != fixed_value:
+                raise ValueError(f"{name} is fixed at {fixed_value} in this demo")
 
 
 class Example:
-    """Own simulation state and expose construction, one substep, and rendering."""
+    """Own simulation state and expose construction, one fixed frame step, and rendering."""
 
     def __init__(self, config=None, device=None, verbose=False):
         # Runtime and host-side scene data.
@@ -651,12 +724,13 @@ class Example:
         # Time, diagnostics and fluid constants.
         self.renderer = None
         self.sim_time = 0.0
-        self.current_dt = self.config.initial_time_step
-        self.last_dt = self.current_dt
-        self.iterations = 0
-        self.density_error_percent = 0.0
-        self.iteration_limit_streak = 0
+        self.frame_dt = self.config.frame_dt
+        self.substep_dt = self.frame_dt / self.config.substeps
+        self.current_dt = self.frame_dt
+        self.last_dt = self.frame_dt
+        self.iterations = self.config.pressure_iterations
         self.total_steps = 0
+        self.total_substeps = 0
         self.support_radius = 4 * self.config.particle_radius
         self.fluid_volume = 0.8 * (2 * self.config.particle_radius) ** 3
         self.fluid_mass = self.fluid_volume * self.config.rest_density
@@ -670,6 +744,8 @@ class Example:
         # Rigid state. Static bodies receive zero inverse mass and inertia.
         body_count = len(self.body_models)
         self.rigid = RigidState()
+        self.rigid.fault = device_zeros(2, int)
+        self.rigid.inverse_inertia_world = device_zeros(body_count, wp.mat33)
         self.rigid.position = to_device_array([body.position for body in self.body_models], wp.vec3)
         self.rigid.rotation = to_device_array([body.rotation for body in self.body_models], wp.quat)
         self.rigid.velocity = to_device_array(
@@ -752,18 +828,17 @@ class Example:
         self.num_particles = int(mask.sum())
         if not self.num_particles:
             raise ValueError("Scene contains no fluid outside rigid bodies")
-        # Fluid work buffers, reductions and neighbor cache.
+        # Fluid work buffers, device audits and neighbor cache.
         particle_count = self.num_particles
         self.old_positions = device_zeros(particle_count, wp.vec3)
         self.corrections = device_zeros(particle_count, wp.vec3)
         self.acceleration = device_zeros(particle_count, wp.vec3)
         self.densities = device_zeros(particle_count, float)
         self.lambdas = device_zeros(particle_count, float)
-        self.error = device_zeros(1, float)
-        self.max_speed = device_zeros(1, float)
         self.audit_maxima = device_zeros(3, float)
         self.invalid_state = device_zeros(1, int)
         self.neighbors = Neighbors()
+        self.neighbors.fault = self.rigid.fault
         self.neighbors.fluid_count = device_zeros(particle_count, int)
         self.neighbors.boundary_count = device_zeros(particle_count, int)
         self.neighbors.fluid = device_zeros((particle_count, self.config.max_fluid_neighbors), int)
@@ -783,46 +858,104 @@ class Example:
         self.contacts.target = device_zeros(self.config.max_contacts, float)
         self.contacts.normal_impulse = device_zeros(self.config.max_contacts, float)
         self.contacts.tangent_impulse = device_zeros(self.config.max_contacts, wp.vec3)
+        self.contacts.offset_a = device_zeros(self.config.max_contacts, wp.vec3)
+        self.contacts.offset_b = device_zeros(self.config.max_contacts, wp.vec3)
+        self.contacts.normal_mass = device_zeros(self.config.max_contacts, float)
 
     def step(self):
-        """Advance one complete substep; launch order mirrors the numerical pipeline."""
+        """Advance one fixed frame interval without reading device state on the CPU."""
         config, device = self.config, self.device
-        dt = self.current_dt  # One immutable dt for fluid, forces and rigid bodies.
+        dt = self.substep_dt
         particle_count, boundary_count = self.num_particles, len(self.boundary.local)
+        fault = self.rigid.fault
 
-        # 1. Reset force accumulators and predict fluid positions.
-        self.rigid.force.zero_()
-        self.rigid.torque.zero_()
-        self.neighbors.overflow.zero_()
-        wp.launch(
-            predict,
-            particle_count,
-            [self.positions, self.velocities, self.old_positions, wp.vec3(*config.gravity), dt],
-            device=device,
-        )
-        # 2. Cache one neighborhood search for all pressure iterations.
-        self.fluid_grid.build(self.positions, self.support_radius)
-        self.boundary_grid.build(self.boundary.position, self.support_radius)
-        wp.launch(
-            cache_neighbors,
-            particle_count,
-            [
-                self.fluid_grid.id,
-                self.boundary_grid.id,
-                self.positions,
-                self.boundary,
-                self.support_radius,
-                self.neighbors,
-            ],
-            device=device,
-        )
-        if self.neighbors.overflow.numpy().any():
-            raise RuntimeError(
-                "Neighbor capacity exceeded; increase max_fluid_neighbors/max_boundary_neighbors"
+        for _ in range(config.substeps):
+            # 1. Predict fluid motion. Fault flags are latched until a new Example is created.
+            wp.launch(
+                begin_substep, len(self.body_models), [self.rigid, self.contacts], device=device
             )
-        # 3. Project density constraints and accumulate rigid reaction forces.
-        for iteration in range(config.max_iterations):
-            self.error.zero_()
+            wp.launch(
+                predict,
+                particle_count,
+                [
+                    self.positions,
+                    self.velocities,
+                    self.old_positions,
+                    wp.vec3(*config.gravity),
+                    dt,
+                    fault,
+                ],
+                device=device,
+            )
+
+            # 2. Cache neighbors once; reject overflow before consuming any truncated lists.
+            self.fluid_grid.build(self.positions, self.support_radius)
+            self.boundary_grid.build(self.boundary.position, self.support_radius)
+            wp.launch(
+                cache_neighbors,
+                particle_count,
+                [
+                    self.fluid_grid.id,
+                    self.boundary_grid.id,
+                    self.positions,
+                    self.boundary,
+                    self.support_radius,
+                    self.neighbors,
+                ],
+                device=device,
+            )
+            wp.launch(
+                check_faults, 1, [self.neighbors, self.contacts, self.invalid_state], device=device
+            )
+
+            # 3. Exactly five pressure projections; every reaction is retained.
+            for _ in range(config.pressure_iterations):
+                wp.launch(
+                    density_lambda,
+                    particle_count,
+                    [
+                        self.positions,
+                        self.boundary,
+                        self.neighbors,
+                        self.fluid_volume,
+                        self.support_radius,
+                        self.densities,
+                        self.lambdas,
+                    ],
+                    device=device,
+                )
+                wp.launch(
+                    pressure_correction,
+                    particle_count,
+                    [
+                        self.positions,
+                        self.boundary,
+                        self.rigid,
+                        self.neighbors,
+                        self.fluid_volume,
+                        self.fluid_mass,
+                        self.support_radius,
+                        dt,
+                        int(config.two_way),
+                        self.lambdas,
+                        self.corrections,
+                    ],
+                    device=device,
+                )
+                wp.launch(
+                    apply_correction,
+                    particle_count,
+                    [self.positions, self.corrections, fault],
+                    device=device,
+                )
+
+            # 4. Reconstruct velocity and evaluate viscosity using the corrected density.
+            wp.launch(
+                reconstruct_velocity,
+                particle_count,
+                [self.positions, self.old_positions, dt, self.velocities, fault],
+                device=device,
+            )
             wp.launch(
                 density_lambda,
                 particle_count,
@@ -834,171 +967,104 @@ class Example:
                     self.support_radius,
                     self.densities,
                     self.lambdas,
-                    self.error,
                 ],
                 device=device,
             )
             wp.launch(
-                pressure_correction,
+                viscosity,
                 particle_count,
                 [
                     self.positions,
+                    self.velocities,
                     self.boundary,
                     self.rigid,
                     self.neighbors,
+                    self.densities,
                     self.fluid_volume,
                     self.fluid_mass,
                     self.support_radius,
-                    dt,
+                    config.viscosity,
+                    config.boundary_viscosity,
                     int(config.two_way),
-                    self.lambdas,
-                    self.corrections,
+                    self.acceleration,
                 ],
                 device=device,
             )
             wp.launch(
-                apply_correction, particle_count, [self.positions, self.corrections], device=device
+                apply_viscosity,
+                particle_count,
+                [self.velocities, self.acceleration, dt, fault],
+                device=device,
             )
-            self.iterations = iteration + 1
-            self.density_error_percent = float(self.error.numpy()[0]) / particle_count * 100
-            if (
-                self.iterations >= config.min_iterations
-                and self.density_error_percent <= config.max_density_error_percent
-            ):
-                break
-        at_limit = (
-            self.iterations == config.max_iterations
-            and self.density_error_percent > config.max_density_error_percent
-        )
-        self.iteration_limit_streak = self.iteration_limit_streak + 1 if at_limit else 0
-        if self.iteration_limit_streak == 10 or (
-            self.iteration_limit_streak > 10 and self.iteration_limit_streak % 100 == 0
-        ):
-            warnings.warn(
-                f"PBF pressure limit reached for {self.iteration_limit_streak} steps; error={self.density_error_percent:.5f}%",
-                RuntimeWarning,
+
+            # 5. Integrate rigid bodies, detect contacts, and prepare invariant contact data.
+            wp.launch(
+                integrate_rigid,
+                len(self.body_models),
+                [self.rigid, wp.vec3(*config.gravity), dt],
+                device=device,
             )
-        # 4. Reconstruct fluid velocities, refresh density and apply viscosity.
-        wp.launch(
-            reconstruct_velocity,
-            particle_count,
-            [self.positions, self.old_positions, dt, self.velocities],
-            device=device,
-        )
-        self.error.zero_()
-        wp.launch(
-            density_lambda,
-            particle_count,
-            [
-                self.positions,
-                self.boundary,
-                self.neighbors,
-                self.fluid_volume,
-                self.support_radius,
-                self.densities,
-                self.lambdas,
-                self.error,
-            ],
-            device=device,
-        )
-        wp.launch(
-            viscosity,
-            particle_count,
-            [
-                self.positions,
-                self.velocities,
-                self.boundary,
-                self.rigid,
-                self.neighbors,
-                self.densities,
-                self.fluid_volume,
-                self.fluid_mass,
-                self.support_radius,
-                config.viscosity,
-                config.boundary_viscosity,
-                int(config.two_way),
-                self.acceleration,
-            ],
-            device=device,
-        )
-        wp.launch(
-            apply_viscosity, particle_count, [self.velocities, self.acceleration, dt], device=device
-        )
-        # 5. Integrate rigid bodies, then solve their contact velocities.
-        wp.launch(
-            integrate_rigid,
-            len(self.body_models),
-            [self.rigid, wp.vec3(*config.gravity), dt],
-            device=device,
-        )
-        wp.launch(update_boundary, boundary_count, [self.rigid, self.boundary], device=device)
-        self.contacts.count.zero_()
-        self.contacts.overflow.zero_()
-        wp.launch(
-            detect_contacts,
-            (boundary_count, len(self.body_models)),
-            [self.rigid, self.boundary, self.contacts, config.contact_tolerance, dt],
-            device=device,
-        )
-        if self.contacts.overflow.numpy()[0]:
-            raise RuntimeError("Contact capacity exceeded; increase max_contacts")
-        for _ in range(config.contact_iterations):
-            wp.launch(solve_contacts, 1, [self.rigid, self.contacts], device=device)
-        wp.launch(update_boundary, boundary_count, [self.rigid, self.boundary], device=device)
-        # 6. Reduce speed bounds and audit state without altering the solution.
-        self.max_speed.zero_()
-        wp.launch(
-            reduce_speed,
-            particle_count,
-            [self.velocities, self.acceleration, dt, self.max_speed],
-            device=device,
-        )
-        wp.launch(
-            reduce_boundary_speed, boundary_count, [self.boundary, self.max_speed], device=device
-        )
-        wp.launch(
-            audit_fluid,
-            particle_count,
-            [
-                self.positions,
-                self.velocities,
-                wp.vec3(*self.container_min),
-                wp.vec3(*self.container_max),
-                self.audit_maxima,
-                self.invalid_state,
-            ],
-            device=device,
-        )
-        wp.launch(
-            audit_rigid,
-            max(config.max_contacts, len(self.body_models)),
-            [self.rigid, self.contacts, self.audit_maxima, self.invalid_state],
-            device=device,
-        )
-        speed_squared = float(self.max_speed.numpy()[0])
-        if (
-            self.invalid_state.numpy()[0]
-            or not np.isfinite(speed_squared)
-            or not np.isfinite(self.density_error_percent)
-        ):
-            raise FloatingPointError("Non-finite simulation state")
-        # 7. Select the next step size; advance time with this step's fixed dt.
-        self.current_dt = float(
-            np.clip(
-                config.cfl_factor
-                * 0.4
-                * (2 * config.particle_radius)
-                / np.sqrt(max(speed_squared, 1e-9)),
-                config.min_time_step,
-                config.max_time_step,
+            wp.launch(
+                audit_fluid,
+                particle_count,
+                [
+                    self.positions,
+                    self.velocities,
+                    wp.vec3(*self.container_min),
+                    wp.vec3(*self.container_max),
+                    self.audit_maxima,
+                    self.invalid_state,
+                ],
+                device=device,
             )
-        )
-        self.last_dt = dt
-        self.sim_time += dt
+            wp.launch(
+                audit_rigid,
+                len(self.body_models),
+                [self.rigid, self.contacts, self.audit_maxima, self.invalid_state],
+                device=device,
+            )
+            wp.launch(
+                check_faults, 1, [self.neighbors, self.contacts, self.invalid_state], device=device
+            )
+            wp.launch(update_boundary, boundary_count, [self.rigid, self.boundary], device=device)
+            wp.launch(
+                detect_contacts,
+                (boundary_count, len(self.body_models)),
+                [self.rigid, self.boundary, self.contacts, config.contact_tolerance, dt],
+                device=device,
+            )
+            wp.launch(
+                check_faults, 1, [self.neighbors, self.contacts, self.invalid_state], device=device
+            )
+            wp.launch(prepare_rigid_contacts, len(self.body_models), [self.rigid], device=device)
+            wp.launch(
+                prepare_contacts, config.max_contacts, [self.rigid, self.contacts], device=device
+            )
+            wp.launch(
+                solve_contacts,
+                1,
+                [self.rigid, self.contacts, config.contact_iterations],
+                device=device,
+            )
+            wp.launch(update_boundary, boundary_count, [self.rigid, self.boundary], device=device)
+
+            # 6. Device audits never synchronize the host or correct physical state.
+            wp.launch(
+                audit_rigid,
+                max(config.max_contacts, len(self.body_models)),
+                [self.rigid, self.contacts, self.audit_maxima, self.invalid_state],
+                device=device,
+            )
+            wp.launch(
+                check_faults, 1, [self.neighbors, self.contacts, self.invalid_state], device=device
+            )
+
         self.total_steps += 1
+        self.total_substeps += config.substeps
+        self.sim_time = self.total_steps * self.frame_dt
         if self.verbose and self.total_steps % 100 == 0:
             print(
-                f"t={self.sim_time:.4f} dt={dt:.6f} iterations={self.iterations} density_error={self.density_error_percent:.5f}%"
+                f"submitted t={self.sim_time:.4f} steps={self.total_steps} substeps={self.total_substeps}"
             )
 
     def render(self):

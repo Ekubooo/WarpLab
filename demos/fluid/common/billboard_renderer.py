@@ -185,6 +185,10 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
         normal = -front
         return right, up, normal
 
+    def _allocate_billboard_instances(self, instancer, points, color):
+        """Initialize instance storage; subclasses may allocate it without host positions."""
+        instancer.allocate_instances(points.numpy(), colors1=color, colors2=color)
+
     def _register_billboard_color_resources(self, name, instancer):
         self._billboard_color_resources[name] = (
             wp.RegisteredGLBuffer(
@@ -249,7 +253,7 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
 
             instancer = ShapeInstancer(self._billboard_shader, self._device)
             instancer.register_shape(vertices, indices, color1=low_color, color2=low_color)
-            instancer.allocate_instances(points.numpy(), colors1=low_color, colors2=low_color)
+            self._allocate_billboard_instances(instancer, points, low_color)
             self._shape_instancers[name] = instancer
             self._register_billboard_color_resources(name, instancer)
         else:
@@ -258,7 +262,7 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
                 # Registered resources must be released before glBufferData()
                 # potentially replaces their underlying color storage.
                 self._billboard_color_resources.pop(name, None)
-                instancer.allocate_instances(points.numpy(), colors1=low_color, colors2=low_color)
+                self._allocate_billboard_instances(instancer, points, low_color)
                 self._register_billboard_color_resources(name, instancer)
 
         right, up, normal = self._camera_basis(self.camera_front, self.camera_up)
