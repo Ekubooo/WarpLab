@@ -22,7 +22,7 @@ def main():
     )
     args = parser.parse_args()
     simulation = Example(device="cuda:0")
-    for _ in range(180):
+    for _ in range(round(3 / simulation.frame_dt)):
         simulation.step()
     rigid, contacts = simulation.rigid, simulation.contacts
     arrays = [rigid.velocity, rigid.omega, contacts.normal_impulse, contacts.tangent_impulse]

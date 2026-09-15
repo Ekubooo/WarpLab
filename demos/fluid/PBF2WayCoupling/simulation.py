@@ -64,6 +64,13 @@ def diagnostics(sim):
         density_error_percent=float(np.maximum(densities - 1.0, 0).mean() * 100),
         max_speed=float(np.linalg.norm(velocities, axis=1).max()),
         fluid_container_violation=fluid_violation,
+        fluid_boundary_violation=float(
+            max(
+                0,
+                (np.asarray(sim.fluid_lower, dtype=np.float32) - positions).max(),
+                (positions - np.asarray(sim.fluid_upper, dtype=np.float32)).max(),
+            )
+        ),
         contacts=contact_count,
         max_contact_penetration=float(max(0, -gaps.min())) if contact_count else 0.0,
         max_fluid_violation_ever=float(maxima[0]),

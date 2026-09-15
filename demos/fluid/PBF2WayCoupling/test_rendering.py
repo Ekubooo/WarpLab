@@ -61,13 +61,13 @@ class RenderingTest(unittest.TestCase):
             "demos.fluid.PBF2WayCoupling.render_opengl.time.perf_counter", return_value=10.01
         ):
             with patch("demos.fluid.PBF2WayCoupling.render_opengl.time.sleep") as sleep:
-                pace_frame(10.0, 1 / 60, 0.5)
-                self.assertAlmostEqual(sleep.call_args.args[0], 1 / 30 - 0.01)
+                pace_frame(10.0, 1 / 90, 0.5)
+                self.assertAlmostEqual(sleep.call_args.args[0], 1 / 45 - 0.01)
         with patch(
             "demos.fluid.PBF2WayCoupling.render_opengl.time.perf_counter", return_value=10.1
         ):
             with patch("demos.fluid.PBF2WayCoupling.render_opengl.time.sleep") as sleep:
-                pace_frame(10.0, 1 / 60, 1.0)
+                pace_frame(10.0, 1 / 90, 1.0)
                 sleep.assert_not_called()
 
     def test_shadow_map_billboards_depth_and_controls(self):

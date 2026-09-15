@@ -278,12 +278,16 @@ def pressure_correction(
 
 @wp.kernel
 def apply_correction(
-    x: wp.array(dtype=wp.vec3), correction: wp.array(dtype=wp.vec3), fault: wp.array(dtype=int)
+    x: wp.array(dtype=wp.vec3),
+    correction: wp.array(dtype=wp.vec3),
+    lower: wp.vec3,
+    upper: wp.vec3,
+    fault: wp.array(dtype=int),
 ):
     if fault[0] != 0:
         return
     i = wp.tid()
-    x[i] += correction[i]
+    x[i] = fn.clamp_to_container(x[i] + correction[i], lower, upper)
 
 
 @wp.kernel
@@ -292,12 +296,16 @@ def reconstruct_velocity(
     old: wp.array(dtype=wp.vec3),
     dt: float,
     v: wp.array(dtype=wp.vec3),
+    lower: wp.vec3,
+    upper: wp.vec3,
+    wall_damping: float,
     fault: wp.array(dtype=int),
 ):
     if fault[0] != 0:
         return
     i = wp.tid()
-    v[i] = (x[i] - old[i]) / dt
+    velocity = (x[i] - old[i]) / dt
+    v[i] = fn.reflect_wall_velocity(x[i], velocity, lower, upper, wall_damping)
 
 
 @wp.kernel
@@ -359,12 +367,17 @@ def apply_viscosity(
     v: wp.array(dtype=wp.vec3),
     acceleration: wp.array(dtype=wp.vec3),
     dt: float,
+    x: wp.array(dtype=wp.vec3),
+    lower: wp.vec3,
+    upper: wp.vec3,
+    wall_damping: float,
     fault: wp.array(dtype=int),
 ):
     if fault[0] != 0:
         return
     i = wp.tid()
-    v[i] += dt * acceleration[i]
+    velocity = v[i] + dt * acceleration[i]
+    v[i] = fn.reflect_wall_velocity(x[i], velocity, lower, upper, wall_damping)
 
 
 # Rigid-body integration and contact impulses.
@@ -653,14 +666,15 @@ class PBF2WayCouplingConfig:
     gravity: tuple = (0.0, -9.81, 0.0)
 
     # One public step contains three fixed physical substeps.
-    frame_dt: float = 1.0 / 60.0
+    frame_dt: float = 1.0 / 90.0
     substeps: int = 3
-    pressure_iterations: int = 5
+    pressure_iterations: int = 3
 
     # Non-pressure forces and rigid-body feedback.
     viscosity: float = 0.01
     boundary_viscosity: float = 0.0
     two_way: bool = True
+    wall_damping: float = 0.8
 
     # Storage capacities and contact solver.
     max_fluid_neighbors: int = 256
@@ -693,10 +707,11 @@ class PBF2WayCouplingConfig:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if len(self.gravity) != 3 or not np.isfinite(self.gravity).all():
             raise ValueError("gravity must contain three finite components")
+        if not np.isfinite(self.wall_damping) or not 0 <= self.wall_damping <= 1:
+            raise ValueError("wall_damping must be finite and in [0, 1]")
         for name, fixed_value in (
-            ("frame_dt", 1 / 60),
+            ("frame_dt", PBF2WayCouplingConfig.frame_dt),
             ("substeps", 3),
-            ("pressure_iterations", 5),
             ("contact_iterations", 5),
         ):
             if getattr(self, name) != fixed_value:
@@ -720,6 +735,11 @@ class Example:
             self.container_min,
             self.container_max,
         ) = init.load_scene(self.config)
+        # Bounds apply to particle centers, keeping the full radius inside the box.
+        self.fluid_lower = self.container_min + self.config.particle_radius
+        self.fluid_upper = self.container_max - self.config.particle_radius
+        if np.any(self.fluid_lower >= self.fluid_upper):
+            raise ValueError("Container dimensions must exceed the particle diameter")
 
         # Time, diagnostics and fluid constants.
         self.renderer = None
@@ -865,7 +885,9 @@ class Example:
     def step(self):
         """Advance one fixed frame interval without reading device state on the CPU."""
         config, device = self.config, self.device
+        self.iterations = config.pressure_iterations
         dt = self.substep_dt
+        lower, upper = wp.vec3(*self.fluid_lower), wp.vec3(*self.fluid_upper)
         particle_count, boundary_count = self.num_particles, len(self.boundary.local)
         fault = self.rigid.fault
 
@@ -908,7 +930,7 @@ class Example:
                 check_faults, 1, [self.neighbors, self.contacts, self.invalid_state], device=device
             )
 
-            # 3. Exactly five pressure projections; every reaction is retained.
+            # 3. Fixed configured pressure count; every reaction is retained.
             for _ in range(config.pressure_iterations):
                 wp.launch(
                     density_lambda,
@@ -945,7 +967,7 @@ class Example:
                 wp.launch(
                     apply_correction,
                     particle_count,
-                    [self.positions, self.corrections, fault],
+                    [self.positions, self.corrections, lower, upper, fault],
                     device=device,
                 )
 
@@ -953,7 +975,16 @@ class Example:
             wp.launch(
                 reconstruct_velocity,
                 particle_count,
-                [self.positions, self.old_positions, dt, self.velocities, fault],
+                [
+                    self.positions,
+                    self.old_positions,
+                    dt,
+                    self.velocities,
+                    lower,
+                    upper,
+                    config.wall_damping,
+                    fault,
+                ],
                 device=device,
             )
             wp.launch(
@@ -993,7 +1024,16 @@ class Example:
             wp.launch(
                 apply_viscosity,
                 particle_count,
-                [self.velocities, self.acceleration, dt, fault],
+                [
+                    self.velocities,
+                    self.acceleration,
+                    dt,
+                    self.positions,
+                    lower,
+                    upper,
+                    config.wall_damping,
+                    fault,
+                ],
                 device=device,
             )
 
@@ -1010,8 +1050,8 @@ class Example:
                 [
                     self.positions,
                     self.velocities,
-                    wp.vec3(*self.container_min),
-                    wp.vec3(*self.container_max),
+                    lower,
+                    upper,
                     self.audit_maxima,
                     self.invalid_state,
                 ],

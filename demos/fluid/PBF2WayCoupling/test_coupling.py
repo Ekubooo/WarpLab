@@ -116,18 +116,30 @@ class CouplingTest(unittest.TestCase):
             )
             self.assertEqual(
                 sum(call.args[0] is solver.pressure_correction for call in launches.call_args_list),
-                15,
+                9,
             )
             self.assertEqual(
                 sum(call.args[0] is solver.solve_contacts for call in launches.call_args_list), 3
             )
-            for _ in range(59):
+            for _ in range(89):
                 s.step()
         self.assertEqual(s.sim_time, 1.0)
-        self.assertEqual(s.total_steps, 60)
-        self.assertEqual(s.total_substeps, 180)
-        self.assertEqual(s.current_dt, 1 / 60)
-        self.assertEqual(s.substep_dt, 1 / 180)
+        self.assertEqual(s.total_steps, 90)
+        self.assertEqual(s.total_substeps, 270)
+        self.assertEqual(s.current_dt, 1 / 90)
+        self.assertEqual(s.substep_dt, 1 / 270)
+
+    def test_configurable_fixed_pressure_iterations(self):
+        s = self.make(pressure_iterations=4)
+        for iterations in (4, 2):
+            s.config = replace(s.config, pressure_iterations=iterations)
+            with patch.object(wp, "launch", wraps=wp.launch) as launches:
+                s.step()
+            self.assertEqual(s.iterations, iterations)
+            self.assertEqual(
+                sum(call.args[0] is solver.pressure_correction for call in launches.call_args_list),
+                s.config.substeps * iterations,
+            )
 
     def test_latched_nonfinite_fault(self):
         s = self.make()
@@ -597,7 +609,7 @@ class CouplingTest(unittest.TestCase):
             cpu.rigid.position.numpy(), gpu.rigid.position.numpy(), atol=5e-5
         )
         self.assertEqual(cpu.iterations, gpu.iterations)
-        self.assertEqual(cpu.iterations, 5)
+        self.assertEqual(cpu.iterations, 3)
         self.assertTrue(np.isfinite(diagnostics(cpu)["density_error_percent"]))
 
     def test_invalid_configuration(self):
@@ -609,7 +621,9 @@ class CouplingTest(unittest.TestCase):
             {"substeps": 0},
             {"substeps": 4},
             {"frame_dt": 1 / 30},
-            {"pressure_iterations": 6},
+            {"pressure_iterations": 0},
+            {"pressure_iterations": -1},
+            {"pressure_iterations": 1.5},
             {"contact_iterations": 4},
             {"max_contacts": 0},
         ):

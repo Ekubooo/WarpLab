@@ -1,6 +1,51 @@
 # PBF 双向耦合性能分析
 
-## 当前实现：固定步、零回读与接触优化
+**当前配置（2026-09-16）：** 完整 step 已改为 `1/90 s`，三个子步各为 `1/270 s`；默认压力迭代为 3 次/子步，接触迭代仍为 5 次。26 项数值/GL/调度测试通过，包括每步 9 次压力修正和 90 步推进一秒。下方保留的是调整前 `1/60 s`、5 轮压力配置的性能与行为数据，不能直接作为新配置的实测结果。验证下方旧 nsys 数据时，给 `verify_profile` 命令添加 `--pressure-iterations 5`。
+
+## 约十万流体粒子试运行（2026-09-16）
+
+保持默认溃坝几何，将运行参数改为 `--particle-radius 0.015625`；实际流体数 **103,823**（47³），边界样本数 **163,732**。仅通过现有参数提高分辨率，默认配置仍为半径 0.025；求解器保持三个子步、每子步五轮压力/接触迭代。
+
+RTX 5070、Warp 1.15.0，十秒仿真共 600 step / 1800 子步，耗时 **13.64 s**、平均 **22.74 ms/step**，包括主动逐秒诊断，排除初始化、编译、渲染和最终 NPZ 导出。这不是纯 GPU kernel 时间，也不是实际渲染帧率。相比此前 24,389 粒子试跑约 5.69 ms/step，约为四倍，但场景轨迹和接触数量不同，不能当成严格的规模扩展基准。
+
+无非有限状态、粒子数变化、缓存溢出或流体内缩边界越界；全程最大刚体接触穿透 **0.01347 m**。最终平均压缩误差 **0.4858%**；圆柱沉至约 **0.092 m**，球和环面高度为 **0.620/0.656 m**。此结果说明十万级配置可以运行，但并未保持较粗分辨率下的浮沉行为，不能宣称更高分辨率提高了本次固定五轮求解的物理精度。未增加子步、迭代或限速。
+
+另外完成三秒预热后的隐藏窗口绘制与截图。运行命令见 README 的“调整流体粒子数量”；原始诊断和截图在 `outputs/pbf2way/100k/dam-break.json`、`dam-break.npz`、`frame.png`。
+
+## 最新变更：容器位置钳制与法向速度反弹
+
+2026-09-15，在固定步版本 `f51fe2b` 上添加保底。每轮应用压力位移时将粒子中心限制在容器向内缩一个半径的范围；速度重建和粘度更新后，只将向外的法向速度乘以 `−0.8`。切向/向内速度、动态刚体压力受力公式和固定求解轮数保持原样。NaN/Inf 保留给设备异常检测。此措施会引入容器碰撞约束和耗散。
+
+### 验证结果
+
+- 25 项 CPU/CUDA 数值、调度及隐藏窗口测试通过。新增测试覆盖六面、棱角、多轮位置钳制、大幅越界、0/0.8/1 衰减、重复速度检查、粘度重新产生向外速度，以及非有限值和故障冻结。
+- 溃坝、静水双向和静水单向各运行十秒：600 step / 1800 子步，粒子数及有限数值保持正常，无设备故障，内缩范围的逐子步累计越界为零。平均 step 为 5.69 / 6.25 / 7.96 ms，包含主动逐秒诊断，不含初始化和渲染。
+- 静水轻球最终高度 0.85494 m，重球 0.19772 m；关闭反馈后轻球 0.19793 m。默认两场景最终密度误差 0.1821% / 0.2328%。
+- 额外对两个场景各执行十秒重力交互：2 秒反转，4 秒绕 Z 轴旋转 90°，6 秒反转，8 秒旋转 45°。流体内缩范围累计越界仍为零，无缓存溢出或非有限数值，未设置全局限速。结束时最大粒子速率分别为 48.66 / 20.72 m/s。
+- **限制：** 上述强交互中的刚体最大接触穿透为 0.1383 / 0.0446 m，超过普通场景的粒子半径验收界限；静水交互结束时密度误差为 1.2632%。因此交互测试确认的是流体保底有效及状态有限，不代表刚体高速碰撞或整体物理精度达标。本次未改变刚体接触方案。
+
+### 零回读与性能
+
+在初始化和预热之后，分别采集 60 次无窗口 step，以及 60 次 step 后各渲染一帧：两次 nsys SQLite 导出均为 **0 次 GPU→CPU 复制**。调用数均为 180 次预测、900 次压力修正、900 次位置更新、180 次速度重建、180 次粘度速度更新和 180 次接触求解；渲染组另有 60 次刚体模型矩阵更新。没有增加独立 kernel 调用，仍保留必要的 CUDA/OpenGL 同步。
+
+无 profiler、相同默认溃坝、预热一个 step 后测量 600 step：改动前为 **5.455 ms/step**，改动后为 **4.795 ms/step**。这是两次独立运行，最终接触数分别为 119 和 0；钳制与原子顺序会改变轨迹，不能把这个时间下降归因为钳制带来的加速，也不能用差值估算新增分支的成本。
+
+新无窗口 trace 中，三个含钳制的更新 kernel 平均分别为 **0.942 / 1.173 / 1.108 μs/次**（位置更新 / 速度重建 / 粘度更新）。按每 step 的 15/3/3 次调用折算，合计约 **0.021 ms/step**，包含原有更新算术，并非钳制的净增量。其总 GPU 成本在本次场景中很小；整程序仍主要消耗在压力、邻域及接触计算。
+
+复现：
+
+```powershell
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_wall_clamp demos.fluid.PBF2WayCoupling.test_coupling demos.fluid.PBF2WayCoupling.test_rendering -q
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --interactions --output outputs/pbf2way/wall-clamp/acceptance
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 0 --steps 600 --output outputs/pbf2way/wall-clamp/after.json
+
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/wall-clamp/rendered --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 60 --render --capture --output outputs/pbf2way/wall-clamp/rendered_profile.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/wall-clamp/rendered.sqlite --steps 60 --render
+```
+
+无窗口 trace 去掉两个命令中的 `--render`，并将输出名改为 `headless`。原始日志、JSON、nsys 和 SQLite 保存在忽略目录 `outputs/pbf2way/wall-clamp/`。下方保留钳制加入前的测量作为历史对照。
+
+## 固定步版本：零回读与接触优化（钳制加入前）
 
 2026-09-15，Windows / RTX 5070 12 GiB / Warp 1.15.0。当前 `step()` 固定推进 `1/60 s`，含三个 `1/180 s` 子步，每子步五轮压力和五轮接触迭代。每次未暂停的 `step()` 后只绘制一帧；播放速度只控制帧间等待。以下为本次实现和实测，下方“历史分析”保留旧自适应版本的瓶颈证据。
 

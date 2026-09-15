@@ -8,6 +8,32 @@ import warp as wp
 
 
 @wp.func
+def clamp_to_container(position: wp.vec3, lower: wp.vec3, upper: wp.vec3):
+    # Preserve invalid values so the device audit can report them instead of
+    # silently converting an unstable state into a finite wall coordinate.
+    result = position
+    for axis in range(3):
+        if wp.isfinite(position[axis]):
+            result[axis] = wp.clamp(position[axis], lower[axis], upper[axis])
+    return result
+
+
+@wp.func
+def reflect_wall_velocity(
+    position: wp.vec3, velocity: wp.vec3, lower: wp.vec3, upper: wp.vec3, damping: float
+):
+    result = velocity
+    for axis in range(3):
+        if wp.isfinite(position[axis]) and wp.isfinite(velocity[axis]):
+            outward = (position[axis] <= lower[axis] and velocity[axis] < 0.0) or (
+                position[axis] >= upper[axis] and velocity[axis] > 0.0
+            )
+            if outward:
+                result[axis] = -damping * velocity[axis]
+    return result
+
+
+@wp.func
 def poly6(r: float, h: float):
     result = float(0.0)
     if r < h:
