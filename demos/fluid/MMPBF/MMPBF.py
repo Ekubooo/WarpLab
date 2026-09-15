@@ -77,7 +77,8 @@ def cache_neighbors(
     overflow: wp.array(dtype=int),
 ):
     """Cache the single neighbor search reused by all five PBF iterations."""
-    i = wp.tid()
+    # Process nearby particles together while retaining original array indices.
+    i = wp.hash_grid_point_id(fluid_grid, wp.tid())
     xi = positions[i]
     support_radius_squared = support_radius * support_radius
 
@@ -318,7 +319,7 @@ class MMPBFConfig:
     fluid_width: int = 15
     fluid_height: int = 20
     fluid_depth: int = 15
-    container_height: float = 4.0
+    container_height: float = 5.0
 
     rest_density: float = 1000.0
     gravity: tuple[float, float, float] = (0.0, -9.81, 0.0)
@@ -341,7 +342,7 @@ class MMPBFConfig:
         return cls(
             particle_radius=2.0 / 185.0,
             fluid_width=30,
-            fluid_height=75,
+            fluid_height=100,
             fluid_depth=30,
         )
 
