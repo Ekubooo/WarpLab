@@ -82,6 +82,14 @@ class CouplingTest(unittest.TestCase):
     def make(self, **overrides):
         return solver.Example(replace(self.config, **overrides), device="cpu")
 
+    @staticmethod
+    def initial_order(simulation, array):
+        values = array.numpy()
+        particle_ids = simulation.particle_ids.numpy()
+        restored = np.empty_like(values)
+        restored[particle_ids] = values
+        return restored
+
     def search(self, s):
         s.fluid_grid.build(s.positions, s.support_radius)
         s.boundary_grid.build(s.boundary.position, s.support_radius)
@@ -92,6 +100,7 @@ class CouplingTest(unittest.TestCase):
                 s.fluid_grid.id,
                 s.boundary_grid.id,
                 s.positions,
+                s.old_to_sorted,
                 s.boundary,
                 s.support_radius,
                 s.neighbors,
@@ -115,6 +124,9 @@ class CouplingTest(unittest.TestCase):
                 sum(call.args[0] is solver.predict for call in launches.call_args_list), 3
             )
             self.assertEqual(
+                sum(call.args[0] is solver.reorder_fluid for call in launches.call_args_list), 3
+            )
+            self.assertEqual(
                 sum(call.args[0] is solver.pressure_correction for call in launches.call_args_list),
                 9,
             )
@@ -128,6 +140,92 @@ class CouplingTest(unittest.TestCase):
         self.assertEqual(s.total_substeps, 270)
         self.assertEqual(s.current_dt, 1 / 90)
         self.assertEqual(s.substep_dt, 1 / 270)
+
+    def test_hash_order_reorders_persistent_state_and_inverse_map(self):
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                s = solver.Example(self.config, device=device)
+                count = s.num_particles
+                positions = s.positions.numpy().copy()
+                velocities = np.arange(count * 3, dtype=np.float32).reshape(count, 3)
+                old_positions = -positions
+                s.velocities.assign(velocities)
+                s.old_positions.assign(old_positions)
+                s.fluid_grid.build(s.positions, s.support_radius)
+                s._reorder_fluid()
+
+                particle_ids = s.particle_ids.numpy()
+                np.testing.assert_array_equal(np.sort(particle_ids), np.arange(count))
+                np.testing.assert_array_equal(s.positions.numpy(), positions[particle_ids])
+                np.testing.assert_array_equal(s.velocities.numpy(), velocities[particle_ids])
+                np.testing.assert_array_equal(s.old_positions.numpy(), old_positions[particle_ids])
+                inverse = s.old_to_sorted.numpy()
+                np.testing.assert_array_equal(particle_ids[inverse], np.arange(count))
+
+    def test_hash_grid_dimensions_cover_container_query_span(self):
+        s = self.make()
+        query_min = np.floor((s.container_min - s.support_radius) / s.support_radius)
+        query_max = np.floor((s.container_max + s.support_radius) / s.support_radius)
+        span = (query_max - query_min + 1).astype(int)
+        self.assertEqual(solver.HASH_GRID_DIMS, (128, 160, 128))
+        self.assertTrue(
+            np.all(span < np.asarray(solver.HASH_GRID_DIMS)),
+            (span, solver.HASH_GRID_DIMS),
+        )
+
+    def test_hash_grid_rejects_periodic_aliasing_span(self):
+        with patch.object(solver, "HASH_GRID_DIMS", (1, 160, 128)):
+            with self.assertRaisesRegex(ValueError, "must exceed the container query span"):
+                self.make()
+
+    def test_reordered_neighbor_cache_matches_geometry(self):
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                s = solver.Example(self.config, device=device)
+                s.fluid_grid.build(s.positions, s.support_radius)
+                s.boundary_grid.build(s.boundary.position, s.support_radius)
+                s._reorder_fluid()
+                wp.launch(
+                    solver.cache_neighbors,
+                    s.num_particles,
+                    [
+                        s.fluid_grid.id,
+                        s.boundary_grid.id,
+                        s.positions,
+                        s.old_to_sorted,
+                        s.boundary,
+                        s.support_radius,
+                        s.neighbors,
+                    ],
+                    device=s.device,
+                )
+                positions = s.positions.numpy()
+                boundary = s.boundary.position.numpy()
+                particle_ids = s.particle_ids.numpy()
+                fluid_neighbors = s.neighbors.fluid.numpy()
+                fluid_counts = s.neighbors.fluid_count.numpy()
+                boundary_neighbors = s.neighbors.boundary.numpy()
+                boundary_counts = s.neighbors.boundary_count.numpy()
+                for i, position in enumerate(positions):
+                    expected = set(
+                        particle_ids[
+                            np.flatnonzero(
+                                (np.linalg.norm(positions - position, axis=1) < s.support_radius)
+                                & (np.arange(s.num_particles) != i)
+                            )
+                        ]
+                    )
+                    actual = set(particle_ids[fluid_neighbors[i, : fluid_counts[i]]])
+                    self.assertEqual(actual, expected)
+                    expected_boundary = set(
+                        np.flatnonzero(
+                            np.linalg.norm(boundary - position, axis=1) < s.support_radius
+                        )
+                    )
+                    actual_boundary = set(boundary_neighbors[i, : boundary_counts[i]])
+                    self.assertEqual(actual_boundary, expected_boundary)
 
     def test_configurable_fixed_pressure_iterations(self):
         s = self.make(pressure_iterations=4)
@@ -150,12 +248,15 @@ class CouplingTest(unittest.TestCase):
         with patch.object(wp.array, "numpy", side_effect=AssertionError("Unexpected readback")):
             s.step()
         self.assertEqual(s.invalid_state.numpy()[0], 1)
-        positions, rotations = s.positions.numpy().copy(), s.rigid.rotation.numpy().copy()
+        positions = s.positions.numpy().copy()
+        particle_ids = s.particle_ids.numpy().copy()
+        rotations = s.rigid.rotation.numpy().copy()
         with patch.object(wp.array, "numpy", side_effect=AssertionError("Unexpected readback")):
             s.step()
         with self.assertRaises(FloatingPointError):
             diagnostics(s)
         np.testing.assert_array_equal(s.positions.numpy(), positions)
+        np.testing.assert_array_equal(s.particle_ids.numpy(), particle_ids)
         np.testing.assert_array_equal(s.rigid.rotation.numpy(), rotations)
         self.assertEqual(s.rigid.fault.numpy()[1], 1)
 
@@ -603,7 +704,10 @@ class CouplingTest(unittest.TestCase):
             cpu.step()
             gpu.step()
         np.testing.assert_allclose(
-            cpu.positions.numpy(), gpu.positions.numpy(), rtol=2e-4, atol=5e-5
+            self.initial_order(cpu, cpu.positions),
+            self.initial_order(gpu, gpu.positions),
+            rtol=2e-4,
+            atol=5e-5,
         )
         np.testing.assert_allclose(
             cpu.rigid.position.numpy(), gpu.rigid.position.numpy(), atol=5e-5

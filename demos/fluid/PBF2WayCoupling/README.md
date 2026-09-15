@@ -84,7 +84,7 @@
 - 每个 `step()` 固定包含 3 个 `dt=1/270 s` 子步，默认每子步 3 轮压力迭代和 5 轮接触迭代。压力轮数可设为任意正整数，运行时按配置固定执行；没有 CFL、误差提前退出或自适应迭代。`densities` 是修正后的归一化密度，显式诊断按其计算平均压缩误差，不要求达到旧的 `0.01%`。
 - 边界引起的流体位移为 `Δx`，刚体反作用力为 `−mΔx/dt²`，力矩使用该边界样本相对质心的力臂。每一轮压力修正都累积贡献。开启边界粘度时，同样累积 `−m a_boundary`。
 - 边界点世界坐标为 `COM+R x_local`，速度为 `v+ω×(R x_local)`。静态边界共同计算伪体积；运动刚体各自在自身样本内计算，之后不随位姿改变。
-- 子步次序：清空受力 → 流体重力预测 → 缓存一次邻域 → PBF 迭代/反作用力 → 一阶速度重建 → 重算密度及 Standard viscosity → 刚体积分 → 接触检测与速度约束 → 更新边界。阶段之间保留设备端溢出和非有限数值检查。
+- 子步次序：清空受力 → 流体重力预测 → 构建空间哈希并按哈希顺序重排持久粒子属性 → 缓存一次邻域 → PBF 迭代/反作用力 → 一阶速度重建 → 重算密度及 Standard viscosity → 刚体积分 → 接触检测与速度约束 → 更新边界。阶段之间保留设备端溢出和非有限数值检查。
 - 流体、反作用力及刚体积分统一使用 `substep_dt=1/270`，不能使用完整步的 `current_dt` 计算子步冲量。Standard viscosity 默认 `0.01`，边界粘度默认 `0`。
 - 容器保底：每轮应用 `Δp` 时执行 `x = clamp(x + Δp, container_min + r, container_max - r)`，将粒子中心限制在向内缩一个半径的盒体内。动态刚体仍走原有粒子边界耦合；额外位置修正视为静态容器约束，不修改压力反作用力公式。
 - 速度重建和粘度速度更新后均检查墙面：仅将贴墙且向外的速度分量改为 `−wall_damping × v`，默认 `wall_damping=0.8`，配置范围 `[0,1]`。保留切向及向内速度，棱角逐轴处理，已反向的速度不会重复衰减。这里使用当前更新后的速度，并非另行保存碰撞前的入射速度。该措施引入碰壁耗散。
@@ -111,7 +111,9 @@ simulation = create_pbf2way_simulation(config=config, device="cuda:0")
 simulation.step()  # 推进 1/90 秒：3 个子步，每子步 3 轮压力迭代
 ```
 
-公开数据：`positions`、`velocities`、`densities`、`rigid.position/rotation/velocity/omega/force/torque`、`boundary.position/velocity/volume/body`、`rigid.fault`、`sim_time`、`frame_dt`、`substep_dt`、`current_dt`、`last_dt`、`iterations`、`total_steps`、`total_substeps`。`current_dt/last_dt/frame_dt` 均为完整步的 `1/90 s`，`iterations` 表示每子步的压力轮数，默认为 3。密度误差由主动调用 `diagnostics()` 获取，不维护逐步回读的 CPU 属性。
+公开数据：`positions`、`velocities`、`densities`、`particle_ids`、`rigid.position/rotation/velocity/omega/force/torque`、`boundary.position/velocity/volume/body`、`rigid.fault`、`sim_time`、`frame_dt`、`substep_dt`、`current_dt`、`last_dt`、`iterations`、`total_steps`、`total_substeps`。`current_dt/last_dt/frame_dt` 均为完整步的 `1/90 s`，`iterations` 表示每子步的压力轮数，默认为 3。密度误差由主动调用 `diagnostics()` 获取，不维护逐步回读的 CPU 属性。
+
+两张空间哈希表固定为 `128×160×128`，可覆盖默认场景约 10 万粒子配置所需的 `(52,131,28)` 查询单元跨度；初始化会验证容器及支撑半径覆盖的查询单元范围严格小于该尺寸，避免取模后的远距离单元别名。每个子步在流体 HashGrid 建表后永久按哈希顺序重排 `positions/velocities/old_positions`，因此数组下标不再表示固定粒子。`particle_ids[i]` 给出当前下标 `i` 对应的初始化粒子编号；恢复初始顺序可使用 `restored[particle_ids.numpy()] = values`。NPZ 导出同时保存该映射。
 
 `fluid_lower/fluid_upper` 为内缩后的粒子中心范围。诊断中的 `fluid_boundary_violation` 检查此范围，`max_fluid_violation_ever` 累计每个子步结束时对此范围的越界；`fluid_container_violation` 仍检查原始容器几何范围。预测阶段可能暂时越界，随后由压力迭代的位置更新钳回，渲染读取完整 step 完成后的状态。
 

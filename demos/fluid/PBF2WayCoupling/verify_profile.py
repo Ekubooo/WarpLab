@@ -36,6 +36,7 @@ def verify(path, steps, rendered=False, pressure_iterations=None):
     dtoh = sum(count for kind, count, _ in copies if kind == 2)
     expected = {
         "predict": steps * config.substeps,
+        "reorder_fluid": steps * config.substeps,
         "pressure_correction": steps * config.substeps * config.pressure_iterations,
         "apply_correction": steps * config.substeps * config.pressure_iterations,
         "reconstruct_velocity": steps * config.substeps,

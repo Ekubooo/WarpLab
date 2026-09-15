@@ -18,6 +18,9 @@ except ImportError:
     import coupling_initialization as init
 
 
+HASH_GRID_DIMS = (128, 160, 128)
+
+
 # Device state: one row per rigid body, boundary sample, or fluid particle.
 
 
@@ -170,20 +173,48 @@ def predict(
 
 
 @wp.kernel
+def reorder_fluid(
+    fluid_grid: wp.uint64,
+    source_positions: wp.array(dtype=wp.vec3),
+    source_velocities: wp.array(dtype=wp.vec3),
+    source_old_positions: wp.array(dtype=wp.vec3),
+    source_particle_ids: wp.array(dtype=int),
+    target_positions: wp.array(dtype=wp.vec3),
+    target_velocities: wp.array(dtype=wp.vec3),
+    target_old_positions: wp.array(dtype=wp.vec3),
+    target_particle_ids: wp.array(dtype=int),
+    old_to_sorted: wp.array(dtype=int),
+    fault: wp.array(dtype=int),
+):
+    """Gather persistent fluid state into hash order and build its inverse map."""
+    sorted_index = wp.tid()
+    source_index = sorted_index
+    if fault[0] == 0:
+        source_index = wp.hash_grid_point_id(fluid_grid, sorted_index)
+    target_positions[sorted_index] = source_positions[source_index]
+    target_velocities[sorted_index] = source_velocities[source_index]
+    target_old_positions[sorted_index] = source_old_positions[source_index]
+    target_particle_ids[sorted_index] = source_particle_ids[source_index]
+    old_to_sorted[source_index] = sorted_index
+
+
+@wp.kernel
 def cache_neighbors(
     fluid_grid: wp.uint64,
     boundary_grid: wp.uint64,
     x: wp.array(dtype=wp.vec3),
+    old_to_sorted: wp.array(dtype=int),
     boundary: BoundaryState,
     h: float,
     neighbors: Neighbors,
 ):
     if neighbors.fault[0] != 0:
         return
-    i = wp.hash_grid_point_id(fluid_grid, wp.tid())
+    i = wp.tid()
     fluid_count = int(0)
     boundary_count = int(0)
-    for j in wp.hash_grid_query(fluid_grid, x[i], h):
+    for old_j in wp.hash_grid_query(fluid_grid, x[i], h):
+        j = old_to_sorted[old_j]
         if j != i and wp.length_sq(x[i] - x[j]) < h * h:
             if fluid_count < neighbors.fluid.shape[1]:
                 neighbors.fluid[i, fluid_count] = j
@@ -679,7 +710,7 @@ class PBF2WayCouplingConfig:
     boundary_viscosity: float = 0.0
     two_way: bool = True
     wall_damping: float = 0.8
-    max_speed: float = 10.0  # Fluid speed limit in meters per second.
+    max_speed: float = 6.0  # Fluid speed limit in meters per second.
 
     # Storage capacities and contact solver.
     max_fluid_neighbors: int = 256
@@ -758,6 +789,14 @@ class Example:
         self.total_steps = 0
         self.total_substeps = 0
         self.support_radius = 4 * self.config.particle_radius
+        query_min = np.floor((self.container_min - self.support_radius) / self.support_radius)
+        query_max = np.floor((self.container_max + self.support_radius) / self.support_radius)
+        query_cell_span = (query_max - query_min + 1).astype(int)
+        if np.any(query_cell_span >= np.asarray(HASH_GRID_DIMS)):
+            raise ValueError(
+                "Hash grid dimensions must exceed the container query span: "
+                f"dims={HASH_GRID_DIMS}, required>{tuple(query_cell_span)}"
+            )
         self.fluid_volume = 0.8 * (2 * self.config.particle_radius) ** 3
         self.fluid_mass = self.fluid_volume * self.config.rest_density
 
@@ -822,8 +861,8 @@ class Example:
         self.boundary.position = device_zeros(len(local_samples), wp.vec3)
         self.boundary.velocity = device_zeros(len(local_samples), wp.vec3)
         self.boundary.volume = device_zeros(len(local_samples), float)
-        self.boundary_grid = wp.HashGrid(64, 64, 64, device=self.device)
-        self.fluid_grid = wp.HashGrid(64, 64, 64, device=self.device)
+        self.boundary_grid = wp.HashGrid(*HASH_GRID_DIMS, device=self.device)
+        self.fluid_grid = wp.HashGrid(*HASH_GRID_DIMS, device=self.device)
         wp.launch(
             update_boundary, len(local_samples), [self.rigid, self.boundary], device=self.device
         )
@@ -857,6 +896,12 @@ class Example:
         # Fluid work buffers, device audits and neighbor cache.
         particle_count = self.num_particles
         self.old_positions = device_zeros(particle_count, wp.vec3)
+        self.particle_ids = to_device_array(np.arange(particle_count, dtype=np.int32), int)
+        self.old_to_sorted = to_device_array(np.arange(particle_count, dtype=np.int32), int)
+        self._reorder_positions = device_zeros(particle_count, wp.vec3)
+        self._reorder_velocities = device_zeros(particle_count, wp.vec3)
+        self._reorder_old_positions = device_zeros(particle_count, wp.vec3)
+        self._reorder_particle_ids = device_zeros(particle_count, int)
         self.corrections = device_zeros(particle_count, wp.vec3)
         self.acceleration = device_zeros(particle_count, wp.vec3)
         self.densities = device_zeros(particle_count, float)
@@ -888,6 +933,36 @@ class Example:
         self.contacts.offset_b = device_zeros(self.config.max_contacts, wp.vec3)
         self.contacts.normal_mass = device_zeros(self.config.max_contacts, float)
 
+    def _reorder_fluid(self):
+        wp.launch(
+            reorder_fluid,
+            self.num_particles,
+            [
+                self.fluid_grid.id,
+                self.positions,
+                self.velocities,
+                self.old_positions,
+                self.particle_ids,
+                self._reorder_positions,
+                self._reorder_velocities,
+                self._reorder_old_positions,
+                self._reorder_particle_ids,
+                self.old_to_sorted,
+                self.rigid.fault,
+            ],
+            device=self.device,
+        )
+        self.positions, self._reorder_positions = self._reorder_positions, self.positions
+        self.velocities, self._reorder_velocities = self._reorder_velocities, self.velocities
+        self.old_positions, self._reorder_old_positions = (
+            self._reorder_old_positions,
+            self.old_positions,
+        )
+        self.particle_ids, self._reorder_particle_ids = (
+            self._reorder_particle_ids,
+            self.particle_ids,
+        )
+
     def step(self):
         """Advance one fixed frame interval without reading device state on the CPU."""
         config, device = self.config, self.device
@@ -916,9 +991,10 @@ class Example:
                 device=device,
             )
 
-            # 2. Cache neighbors once; reject overflow before consuming any truncated lists.
+            # 2. Reorder persistent fluid state, then cache neighbors in the new index space.
             self.fluid_grid.build(self.positions, self.support_radius)
             self.boundary_grid.build(self.boundary.position, self.support_radius)
+            self._reorder_fluid()
             wp.launch(
                 cache_neighbors,
                 particle_count,
@@ -926,6 +1002,7 @@ class Example:
                     self.fluid_grid.id,
                     self.boundary_grid.id,
                     self.positions,
+                    self.old_to_sorted,
                     self.boundary,
                     self.support_radius,
                     self.neighbors,

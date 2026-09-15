@@ -1,5 +1,35 @@
 # PBF 双向耦合性能分析
 
+## 固定哈希扩容与流体属性重排（2026-09-16）
+
+两张 HashGrid 现统一固定为 `128×160×128`，其中 Y 维由 96 增至 160，以覆盖约 10 万粒子配置所需的 `(52,131,28)` 查询单元跨度。初始化会按 `container ± support_radius` 计算每轴查询单元跨度，并要求严格小于哈希维度，以避免周期取模令远距离单元产生别名。每个子步在流体建表后执行一次 gather：将 `positions`、`velocities`、`old_positions` 和 `particle_ids` 永久切换到哈希顺序，同时生成原下标到新下标的 `old_to_sorted` 逆映射。流体邻居查询返回的建表前编号经该映射转换；边界点不重排。密度、lambda、修正量、加速度和邻居缓存随后完整覆盖，没有随排序搬运。
+
+### 正确性与行为
+
+- 22 项 `test_coupling` CPU/CUDA 测试通过，包含四个持久属性与稳定 ID 的逐项对应、逆映射、稳定 ID 邻域集合与暴力搜索一致、哈希跨度拒绝、CPU/CUDA 轨迹按 ID 对齐，以及锁存故障后的恒等复制与冻结。
+- 完整数值/墙面/隐藏窗口集合共 32 项，其中 31 项通过；唯一失败是工作树既有的默认速度断言仍期望 `10 m/s`，而按要求保留的当前配置是 `6 m/s`，与本次哈希及重排无关。
+- 溃坝、静水双向和静水单向各运行 `10 s = 900 step = 2700 substep`，无非有限状态、邻居溢出、粒子越界或故障锁存。平均 step 分别为 `4.06 / 5.33 / 7.35 ms`；最终 NPZ 均含 `particle_ids`，抽查为完整排列。
+
+### 无 profiler 与 nsys
+
+RTX 5070 / Warp 1.15.0，默认溃坝预热 3 秒后各测 270 step，四次无 profiler 平均 step 为 `3.363 / 3.681 / 4.073 / 3.157 ms`，中位数 **3.522 ms**、范围 **3.157–4.073 ms**。运行间接触状态不同，不能由该波动推断重排的净收益。
+
+新的 nsys 在预热后采集 90 step：GPU→CPU 复制为 **0**；270 个子步恰好有 270 次 `reorder_fluid`。重排累计 **0.609 ms**，平均 **2.254 μs/次**，约占 kernel 时间 **0.3%**。主要 kernel 仍为：邻居缓存 **53.54 ms / 24.0%**、压力修正 **50.19 ms / 22.5%**、密度/lambda **39.84 ms / 17.9%**。HashGrid 的 CUB radix sort 主过程累计 **20.03 ms / 9.0%**；全部 CUDA memset 合计 5.72 ms，但其中不只有哈希表清零，不能全归因于扩容。该结果表明重排自身很便宜，但扩容和重排没有消除邻居遍历、压力及密度 kernel 的主要成本；本次按要求保留实现，不以性能作为撤销条件。
+
+原始结果位于 `outputs/pbf2way/hash-reorder/`。复现命令：
+
+```powershell
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --output outputs/pbf2way/hash-reorder/acceptance
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/hash-reorder/headless --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 90 --capture --output outputs/pbf2way/hash-reorder/profile.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/hash-reorder/headless.sqlite --steps 90
+```
+
+ncu 在当前非管理员进程中仍返回 `ERR_NVGPUCTRPERM`。启用 NVIDIA performance counter 权限后，在管理员 PowerShell 中执行下列命令可采集重排、邻居、密度和压力的前四次匹配调用：
+
+```powershell
+& 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(reorder_fluid|cache_neighbors|density_lambda|pressure_correction).*' --launch-count 4 --set full --clock-control none --force-overwrite --export outputs/pbf2way/hash-reorder/core-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/hash-reorder/ncu-profile.json
+```
+
 **速度上限更新（2026-09-16）：** 当前流体默认 `max_speed=10 m/s`，在速度重建、粘度更新的墙面处理后按模长限速，方向不变；复用原有 kernel，保留设备故障检测。28 项数值/GL/调度测试通过。下方性能与十秒行为数据均采集于添加全局限速之前。
 
 **当前配置（2026-09-16）：** 完整 step 已改为 `1/90 s`，三个子步各为 `1/270 s`；默认压力迭代为 3 次/子步，接触迭代仍为 5 次。26 项数值/GL/调度测试通过，包括每步 9 次压力修正和 90 步推进一秒。下方保留的是调整前 `1/60 s`、5 轮压力配置的性能与行为数据，不能直接作为新配置的实测结果。验证下方旧 nsys 数据时，给 `verify_profile` 命令添加 `--pressure-iterations 5`。

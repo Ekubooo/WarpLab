@@ -152,6 +152,7 @@ def run_headless(config, device=None, seconds=10.0, output=None, log_interval=No
             path.with_suffix(".npz"),
             positions=simulation.positions.numpy(),
             velocities=simulation.velocities.numpy(),
+            particle_ids=simulation.particle_ids.numpy(),
             rigid_positions=simulation.rigid.position.numpy(),
             rigid_rotations=simulation.rigid.rotation.numpy(),
         )
