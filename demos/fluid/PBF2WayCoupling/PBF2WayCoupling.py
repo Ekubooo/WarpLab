@@ -868,7 +868,7 @@ class PBF2WayCouplingConfig:
     gravity: tuple = (0.0, -9.81, 0.0)
 
     # One public step contains three fixed physical substeps.
-    frame_dt: float = 1.0 / 90.0
+    frame_dt: float = 1.0 / 120.0
     substeps: int = 3
     pressure_iterations: int = 3
 

@@ -1,0 +1,122 @@
+{
+  "name": "floating-equilibrium",
+  "description": "PBF + Akinci2012; solver parameters are PBF2WayCouplingConfig fields.",
+  "source": "SPlisHSPlasH f3f677140761db7637b5443beb54f19f1f835ed4, DamBreakWithObjects.json",
+  "RigidBodies": [
+    {
+      "id": 1,
+      "geometryFile": "../assets/UnitBox.obj",
+      "translation": [
+        0,
+        4,
+        0
+      ],
+      "rotationAxis": [
+        1,
+        0,
+        0
+      ],
+      "rotationAngle": 0,
+      "scale": [
+        3.1,
+        8,
+        1.6
+      ],
+      "color": [
+        0.1,
+        0.4,
+        0.6,
+        1.0
+      ],
+      "isDynamic": false,
+      "isWall": true,
+      "restitution": 0.6,
+      "friction": 0.0
+    },
+    {
+      "id": 2,
+      "geometryFile": "../assets/sphere.obj",
+      "isDynamic": 1,
+      "density": 200,
+      "translation": [
+        -0.55,
+        0.5,
+        0
+      ],
+      "rotationAxis": [
+        1,
+        0,
+        0
+      ],
+      "rotationAngle": 0.0,
+      "scale": [
+        0.2,
+        0.2,
+        0.2
+      ],
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "restitution": 0.6,
+      "friction": 0.2,
+      "color": [
+        0.3,
+        0.5,
+        0.8,
+        1.0
+      ]
+    },
+    {
+      "id": 3,
+      "geometryFile": "../assets/sphere.obj",
+      "isDynamic": 1,
+      "density": 3000,
+      "translation": [
+        0.55,
+        0.5,
+        0
+      ],
+      "rotationAxis": [
+        1,
+        0,
+        0
+      ],
+      "rotationAngle": 0.0,
+      "scale": [
+        0.2,
+        0.2,
+        0.2
+      ],
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "restitution": 0.6,
+      "friction": 0.2,
+      "color": [
+        0.8,
+        0.3,
+        0.15,
+        1
+      ]
+    }
+  ],
+  "FluidBlocks": [
+    {
+      "denseMode": 0,
+      "start": [
+        -1.5,
+        0,
+        -0.75
+      ],
+      "end": [
+        1.5,
+        1.0,
+        0.75
+      ]
+    }
+  ]
+}

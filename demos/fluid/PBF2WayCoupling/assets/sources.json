@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/InteractiveComputerGraphics/SPlisHSPlasH",
+  "commit": "f3f677140761db7637b5443beb54f19f1f835ed4",
+  "source_directory": "data/models",
+  "license": "LICENSE.SPlisHSPlasH",
+  "sha256": {
+    "cylinder.obj": "b910ba975cea350ee852444691a8abc2a7c68f1bd0be172fe60bfc532049b778",
+    "sphere.obj": "cdb8f33480257076d5047cafce4f74ad2f810c0f655e2ca5917723f0d50811b3",
+    "torus.obj": "1e25ad85a3008b15f66ac9273d80973f08add0be279c6816d750fc7a27feba03",
+    "UnitBox.obj": "51bcd6ca642a677a5f132fc90a1e2df2886c20c7da1daeaa9b65bf1bd91230dd"
+  }
+}
