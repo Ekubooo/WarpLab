@@ -37,6 +37,7 @@ def verify(path, steps, rendered=False, pressure_iterations=None):
     expected = {
         "predict": steps * config.substeps,
         "reorder_fluid": steps * config.substeps,
+        "clamp_rigid_to_container": steps * config.substeps,
         "pressure_correction": steps * config.substeps * config.pressure_iterations,
         "apply_correction": steps * config.substeps * config.pressure_iterations,
         "reconstruct_velocity": steps * config.substeps,

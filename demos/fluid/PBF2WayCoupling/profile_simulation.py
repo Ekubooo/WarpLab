@@ -85,6 +85,7 @@ def main():
         render=args.render,
         particles=simulation.num_particles,
         boundary_particles=len(simulation.boundary.local),
+        hash_grid_dims=list(simulation.hash_grid_dims),
         start_time=start_time,
         end_time=simulation.sim_time,
         start_step=start_step,

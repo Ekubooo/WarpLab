@@ -240,7 +240,7 @@ class WallClampTest(unittest.TestCase):
                 self.assertLessEqual(np.linalg.norm(v.numpy(), axis=1).max(), 10.0 + 1e-6)
 
     def test_speed_limit_configuration(self):
-        self.assertEqual(solver.PBF2WayCouplingConfig().max_speed, 10.0)
+        self.assertEqual(solver.PBF2WayCouplingConfig().max_speed, 6.0)
         self.assertEqual(solver.PBF2WayCouplingConfig(max_speed=5.0).max_speed, 5.0)
         for value in (0, -1, np.nan, np.inf):
             with self.assertRaisesRegex(ValueError, "max_speed"):

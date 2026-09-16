@@ -18,9 +18,54 @@ except ImportError:
     import coupling_initialization as init
 
 
-HASH_GRID_DIMS = (128, 160, 128)
 CONTACT_MANIFOLD_POINTS = 8
 CONTACT_NORMAL_DUPLICATE_COS = 0.8660254  # cos(30 degrees)
+HASH_GRID_DEVICE_MEMORY_FRACTION = 0.8
+
+
+def compute_hash_grid_dims(container_min, container_max, cell_width):
+    """Return query span and the first power-of-two dimensions strictly above it."""
+    # Match Warp's float32 cell mapping exactly at integer cell boundaries.
+    lower = np.asarray(container_min, dtype=np.float32)
+    upper = np.asarray(container_max, dtype=np.float32)
+    width = np.float32(cell_width)
+    if (
+        lower.shape != (3,)
+        or upper.shape != (3,)
+        or not np.isfinite(lower).all()
+        or not np.isfinite(upper).all()
+        or not np.isfinite(width)
+        or width <= 0
+    ):
+        raise ValueError("Hash grid bounds and cell width must be finite and valid")
+    query_min = np.floor((lower - width) / width).astype(np.int64)
+    query_max = np.floor((upper + width) / width).astype(np.int64)
+    query_span = query_max - query_min + 1
+    if np.any(query_span < 1):
+        raise ValueError(f"Hash grid query span must be positive, got {tuple(query_span)}")
+    dims = tuple(1 << int(span).bit_length() for span in query_span)
+    cell_count = int(np.prod(dims, dtype=object))
+    if cell_count > np.iinfo(np.int32).max:
+        raise ValueError(
+            "Automatic hash grid exceeds Warp's 32-bit cell index range: "
+            f"span={tuple(query_span)}, dims={dims}, cells={cell_count}"
+        )
+    return tuple(int(value) for value in query_span), dims
+
+
+def estimate_device_storage_bytes(particle_count, boundary_count, grid_dims, config):
+    """Conservative persistent/initialization storage estimate used before CUDA allocation."""
+    neighbor_bytes = particle_count * (
+        config.max_fluid_neighbors + config.max_boundary_neighbors
+    ) * 4
+    # Fluid persistent arrays, HashGrid point workspaces, and exclusion temporaries.
+    fluid_bytes = particle_count * (124 + 24 + 16)
+    # Boundary state and its HashGrid point workspace.
+    boundary_bytes = boundary_count * (44 + 24)
+    # cell_starts/cell_ends for two grids: 2 arrays * 2 grids * sizeof(int).
+    grid_bytes = int(np.prod(grid_dims, dtype=object)) * 16
+    raw_contact_bytes = config.max_contacts * 44
+    return neighbor_bytes + fluid_bytes + boundary_bytes + grid_bytes + raw_contact_bytes
 
 
 # Device state: one row per rigid body, boundary sample, or fluid particle.
@@ -463,6 +508,42 @@ def integrate_rigid(rigid: RigidState, gravity: wp.vec3, dt: float):
         )
         rigid.velocity[body_index] = linear_velocity
         rigid.omega[body_index] = angular_velocity
+
+
+@wp.kernel
+def clamp_rigid_to_container(rigid: RigidState, lower: wp.vec3, upper: wp.vec3):
+    """Translate each dynamic body's rotated AABB inside the container; keep velocities."""
+    if rigid.fault[0] != 0:
+        return
+    body_index = wp.tid()
+    if rigid.inverse_mass[body_index] <= 0.0:
+        return
+
+    local_center = 0.5 * (rigid.lower[body_index] + rigid.upper[body_index])
+    local_extent = 0.5 * (rigid.upper[body_index] - rigid.lower[body_index])
+    rotation = rigid.rotation[body_index]
+    world_center = rigid.position[body_index] + wp.quat_rotate(rotation, local_center)
+    extent_x = wp.quat_rotate(rotation, wp.vec3(local_extent[0], 0.0, 0.0))
+    extent_y = wp.quat_rotate(rotation, wp.vec3(0.0, local_extent[1], 0.0))
+    extent_z = wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, local_extent[2]))
+    world_extent = wp.vec3(
+        wp.abs(extent_x[0]) + wp.abs(extent_y[0]) + wp.abs(extent_z[0]),
+        wp.abs(extent_x[1]) + wp.abs(extent_y[1]) + wp.abs(extent_z[1]),
+        wp.abs(extent_x[2]) + wp.abs(extent_y[2]) + wp.abs(extent_z[2]),
+    )
+
+    corrected_center = wp.vec3(world_center)
+    for axis in range(3):
+        center_lower = lower[axis] + world_extent[axis]
+        center_upper = upper[axis] - world_extent[axis]
+        if center_lower <= center_upper:
+            corrected_center[axis] = wp.clamp(
+                world_center[axis], center_lower, center_upper
+            )
+        else:
+            # No translation can fit an oversized body; use the least-biased position.
+            corrected_center[axis] = 0.5 * (lower[axis] + upper[axis])
+    rigid.position[body_index] += corrected_center - world_center
 
 
 @wp.kernel
@@ -956,14 +1037,33 @@ class Example:
         self.total_steps = 0
         self.total_substeps = 0
         self.support_radius = 4 * self.config.particle_radius
-        query_min = np.floor((self.container_min - self.support_radius) / self.support_radius)
-        query_max = np.floor((self.container_max + self.support_radius) / self.support_radius)
-        query_cell_span = (query_max - query_min + 1).astype(int)
-        if np.any(query_cell_span >= np.asarray(HASH_GRID_DIMS)):
+        self.hash_grid_query_span, self.hash_grid_dims = compute_hash_grid_dims(
+            self.container_min, self.container_max, self.support_radius
+        )
+        if np.any(np.asarray(self.hash_grid_query_span) >= np.asarray(self.hash_grid_dims)):
             raise ValueError(
-                "Hash grid dimensions must exceed the container query span: "
-                f"dims={HASH_GRID_DIMS}, required>{tuple(query_cell_span)}"
+                "Automatic hash grid dimensions must exceed the container query span: "
+                f"dims={self.hash_grid_dims}, span={self.hash_grid_query_span}"
             )
+        boundary_sample_count = sum(len(body.samples) for body in self.body_models)
+        self.estimated_device_storage_bytes = estimate_device_storage_bytes(
+            len(initial_positions), boundary_sample_count, self.hash_grid_dims, self.config
+        )
+        if self.device.is_cuda:
+            available_bytes = self.device.free_memory
+            if self.estimated_device_storage_bytes > int(
+                available_bytes * HASH_GRID_DEVICE_MEMORY_FRACTION
+            ):
+                raise MemoryError(
+                    "Particle radius requires more estimated device storage than the safety "
+                    "budget: "
+                    f"radius={self.config.particle_radius}, "
+                    f"particles={len(initial_positions)}, boundaries={boundary_sample_count}, "
+                    f"hash_grid_dims={self.hash_grid_dims}, "
+                    f"estimated={self.estimated_device_storage_bytes / (1024**2):.1f} MiB, "
+                    f"free={available_bytes / (1024**2):.1f} MiB, "
+                    f"budget={HASH_GRID_DEVICE_MEMORY_FRACTION:.0%}"
+                )
         self.fluid_volume = 0.8 * (2 * self.config.particle_radius) ** 3
         self.fluid_mass = self.fluid_volume * self.config.rest_density
 
@@ -1028,8 +1128,8 @@ class Example:
         self.boundary.position = device_zeros(len(local_samples), wp.vec3)
         self.boundary.velocity = device_zeros(len(local_samples), wp.vec3)
         self.boundary.volume = device_zeros(len(local_samples), float)
-        self.boundary_grid = wp.HashGrid(*HASH_GRID_DIMS, device=self.device)
-        self.fluid_grid = wp.HashGrid(*HASH_GRID_DIMS, device=self.device)
+        self.boundary_grid = wp.HashGrid(*self.hash_grid_dims, device=self.device)
+        self.fluid_grid = wp.HashGrid(*self.hash_grid_dims, device=self.device)
         wp.launch(
             update_boundary, len(local_samples), [self.rigid, self.boundary], device=self.device
         )
@@ -1300,11 +1400,23 @@ class Example:
                 device=device,
             )
 
-            # 5. Integrate rigid bodies, detect contacts, and prepare invariant contact data.
+            # 5. Integrate rigid bodies, project their geometry inside the container,
+            # detect contacts, and prepare invariant contact data. The projection changes
+            # translation only; it does not apply impulses or alter velocity.
             wp.launch(
                 integrate_rigid,
                 len(self.body_models),
                 [self.rigid, wp.vec3(*config.gravity), dt],
+                device=device,
+            )
+            wp.launch(
+                clamp_rigid_to_container,
+                len(self.body_models),
+                [
+                    self.rigid,
+                    wp.vec3(*self.container_min),
+                    wp.vec3(*self.container_max),
+                ],
                 device=device,
             )
             wp.launch(

@@ -30,9 +30,9 @@
 
 交互：`Space` 暂停/继续，`R` 重置并暂停，`G` 反转重力，`Q/E` 绕 Z 轴旋转重力 10°；鼠标和 `W/A/S/D` 控制相机。重置恢复初始物理状态及重力，保留相机。`--num-frames` 限制帧数，`--one-way` 关闭流体对刚体的反作用力。
 
-每次 `step()` 推进 `1/90 s`，紧接着调用一次 `render()`。暂停时只刷新画面。播放速度仅决定帧间等待：默认 `--playback-speed 0.5` 的目标是 45 帧/秒，设为 `1` 则是 90 帧/秒。算不完时自然变慢，不追赶、不跳步、不跳帧；已关闭 vsync 和 Tab 跳过渲染快捷键。`--warmup` 仅用于显式截图/测试预热，会在创建渲染器前推进指定时间。
+每次 `step()` 推进 `1/120 s`，紧接着调用一次 `render()`。暂停时只刷新画面。播放速度仅决定帧间等待：默认 `--playback-speed 0.5` 的目标是 60 帧/秒，设为 `1` 则是 120 帧/秒。算不完时自然变慢，不追赶、不跳步、不跳帧；已关闭 vsync 和 Tab 跳过渲染快捷键。`--warmup` 仅用于显式截图/测试预热，会在创建渲染器前推进指定时间。
 
-固定推进时间在 `PBF2WayCoupling.py` 的 `PBF2WayCouplingConfig.frame_dt` 修改，目前为 `1.0 / 90.0`。子步时间自动计算为 `frame_dt / substeps = 1/270 s`，播放节拍和无窗口步数也由此推导。
+固定推进时间在 `PBF2WayCoupling.py` 的 `PBF2WayCouplingConfig.frame_dt` 修改，目前为 `1.0 / 120.0`。子步时间自动计算为 `frame_dt / substeps = 1/360 s`，播放节拍和无窗口步数也由此推导。
 
 压力迭代次数在同一配置类的 `pressure_iterations` 修改，当前默认 **3 次/子步**；也可在构造配置时传入 `PBF2WayCouplingConfig(pressure_iterations=3)`。此前校验中写死的“必须为 5”已删除，现在接受正整数，并在每个子步执行指定次数，不根据误差提前退出。三个子步合计 **9 次压力修正/step**。`contact_iterations=5` 是另一项刚体接触配置，不是流体压力迭代次数。
 
@@ -46,7 +46,7 @@
 - 保持粒子分辨率、增加水量：扩大场景的 `FluidBlocks.start/end` 范围或增加水块，并确保它们位于容器内且互不重叠。
 - 不要直接修改 `num_particles`；它是初始化后的实际计数，相关设备数组和缓存都按此分配。
 
-默认溃坝水块边长为 1.5 m。`r=0.025` 时为 `29³=24,389` 个；改为 `r=0.015625` 时为 `47³=103,823` 个，约 10 万。规则立方网格的数量是离散变化的，不会恰好等于 100,000。默认半径保持 0.025，以下命令启用约 10 万粒子：
+默认溃坝水块边长为 1.5 m。`r=0.025` 时为 `29³=24,389` 个；改为 `r=0.015625` 时为 `47³=103,823` 个，约 10 万；`r=0.0125` 时为 `59³=205,379` 个，约 20 万。规则立方网格的数量是离散变化的，不会恰好等于目标整数。默认半径保持 0.025，以下命令启用约 10 万粒子：
 
 ```powershell
 # 交互渲染：约 10 万流体粒子，一次 step 一次 render
@@ -54,9 +54,12 @@
 
 # 无窗口十秒，显式诊断和导出
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.015625 --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/100k/dam-break
+
+# 约 20 万流体粒子
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.0125 --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/200k/dam-break
 ```
 
-2026-09-16，RTX 5070 实跑得到 **103,823 个流体粒子 / 163,732 个边界样本**，完成 600 step / 1800 子步 / 10 秒仿真。粒子数量不变，流体内缩边界累计越界为零，无非有限数值和缓存溢出。含逐秒诊断、排除初始化及渲染，平均 **22.74 ms/step**。隐藏窗口渲染和截图通过。最终平均压缩误差为 **0.4858%**；圆柱沉至约 0.092 m，球和环面位于约 0.620/0.656 m，因此不能将更高分辨率视为保持原轨迹或已通过原浮沉验收。固定三子步、五轮压力迭代没有改变，超过帧预算时播放自然变慢。
+HashGrid 会在每次进程启动时按本次粒径独立计算，不缓存上次结果，也不支持实例运行中的粒径热修改。当前默认场景的映射为：`r=0.025 → (64,128,32)`、`r=0.015625 → (64,256,32)`、`r=0.0125 → (128,256,64)`。三档均已完成初始化和完整 step；后两档还完成了 10 秒 CUDA 稳定性运行，分别得到 103,823 和 205,379 个流体粒子，无非有限数值、邻居/接触溢出或粒子越界。
 
 ## 官方参考与改编
 
@@ -81,14 +84,15 @@
 
 - 默认粒子半径 `r=0.025`、支撑半径 `h=4r=0.1`、静止密度 `1000`、粒子体积 `0.8(2r)³`、粒子质量 `0.1`。
 - 密度使用 Poly6，约束梯度使用 Spiky；压缩约束为 `max(ρ/ρ₀−1,0)`，lambda 正则项 `1e-6`。边界梯度累加到中心粒子的梯度，但不单独计入邻居梯度平方和。这一点区别于现有 MMPBF。
-- 每个 `step()` 固定包含 3 个 `dt=1/270 s` 子步，默认每子步 3 轮压力迭代和 5 轮接触迭代。压力轮数可设为任意正整数，运行时按配置固定执行；没有 CFL、误差提前退出或自适应迭代。`densities` 是修正后的归一化密度，显式诊断按其计算平均压缩误差，不要求达到旧的 `0.01%`。
+- 每个 `step()` 固定包含 3 个 `dt=1/360 s` 子步，默认每子步 3 轮压力迭代和 5 轮接触迭代。压力轮数可设为任意正整数，运行时按配置固定执行；没有 CFL、误差提前退出或自适应迭代。`densities` 是修正后的归一化密度，显式诊断按其计算平均压缩误差，不要求达到旧的 `0.01%`。
 - 边界引起的流体位移为 `Δx`，刚体反作用力为 `−mΔx/dt²`，力矩使用该边界样本相对质心的力臂。每一轮压力修正都累积贡献。开启边界粘度时，同样累积 `−m a_boundary`。
 - 边界点世界坐标为 `COM+R x_local`，速度为 `v+ω×(R x_local)`。静态边界共同计算伪体积；运动刚体各自在自身样本内计算，之后不随位姿改变。
 - 子步次序：清空受力 → 流体重力预测 → 构建空间哈希并按哈希顺序重排持久粒子属性 → 缓存一次邻域 → PBF 迭代/反作用力 → 一阶速度重建 → 重算密度及 Standard viscosity → 刚体积分 → 接触检测 → 接触流形压缩 → 速度约束 → 更新边界。阶段之间保留设备端溢出和非有限数值检查。
-- 流体、反作用力及刚体积分统一使用 `substep_dt=1/270`，不能使用完整步的 `current_dt` 计算子步冲量。Standard viscosity 默认 `0.01`，边界粘度默认 `0`。
+- 流体、反作用力及刚体积分统一使用 `substep_dt=1/360`，不能使用完整步的 `current_dt` 计算子步冲量。Standard viscosity 默认 `0.01`，边界粘度默认 `0`。
 - 容器保底：每轮应用 `Δp` 时执行 `x = clamp(x + Δp, container_min + r, container_max - r)`，将粒子中心限制在向内缩一个半径的盒体内。动态刚体仍走原有粒子边界耦合；额外位置修正视为静态容器约束，不修改压力反作用力公式。
+- 刚体保底：每次刚体积分后，将动态刚体当前旋转下的局部 AABB 转换成保守的世界 AABB，并只平移质心使其完整落在容器范围内。该投影不修改旋转、线速度或角速度，不计算反弹、摩擦或额外冲量；静态容器不参与钳制。原有接触求解随后照常执行。
 - 速度重建和粘度速度更新后均检查墙面：仅将贴墙且向外的速度分量改为 `−wall_damping × v`，默认 `wall_damping=0.8`，配置范围 `[0,1]`。保留切向及向内速度，棱角逐轴处理，已反向的速度不会重复衰减。这里使用当前更新后的速度，并非另行保存碰撞前的入射速度。该措施引入碰壁耗散。
-- 上述墙面处理后，统一限制流体速度模长：`|v| > max_speed` 时按比例缩短向量，保持方向不变。默认 **`max_speed=10.0 m/s`**，在 `PBF2WayCoupling.py` 的 `PBF2WayCouplingConfig.max_speed` 修改，或构造配置时传入 `max_speed=5.0` 等有限正数；无需修改校验常量。限速融合进现有两个速度更新 kernel，不增加回读或 kernel 调用。NaN/Inf 保留给设备异常检测。该限速会额外耗散动能，仅限制流体，不限制刚体速度。
+- 上述墙面处理后，统一限制流体速度模长：`|v| > max_speed` 时按比例缩短向量，保持方向不变。默认 **`max_speed=6.0 m/s`**，在 `PBF2WayCoupling.py` 的 `PBF2WayCouplingConfig.max_speed` 修改，或构造配置时传入其他有限正数；无需修改校验常量。限速融合进现有两个速度更新 kernel，不增加回读或 kernel 调用。NaN/Inf 保留给设备异常检测。该限速会额外耗散动能，仅限制流体，不限制刚体速度。
 - 不加入人工浮力、涡量约束或人工压力。设备故障标志保持到重置，检测到邻域/接触溢出或非有限状态后停止后续物理写入，并通过设备 `printf` 输出一次错误；保底钳制保留 NaN/Inf，避免掩盖异常。正常循环不读故障标志；主机提交计数仍继续增长，因此故障后的 `sim_time` 只代表提交的时间，不代表成功推进。显式 `diagnostics(simulation)` 会回读并抛出异常。
 
 ## 网格、接口与实现范围
@@ -104,16 +108,18 @@ config = PBF2WayCouplingConfig(
     scene="floating-equilibrium",
     boundary_viscosity=0.02,
     wall_damping=0.8,
-    max_speed=10.0,
+    max_speed=6.0,
     pressure_iterations=3,
 )
 simulation = create_pbf2way_simulation(config=config, device="cuda:0")
-simulation.step()  # 推进 1/90 秒：3 个子步，每子步 3 轮压力迭代
+simulation.step()  # 推进 1/120 秒：3 个子步，每子步 3 轮压力迭代
 ```
 
-公开数据：`positions`、`velocities`、`densities`、`particle_ids`、`rigid.position/rotation/velocity/omega/force/torque`、`boundary.position/velocity/volume/body`、`rigid.fault`、`sim_time`、`frame_dt`、`substep_dt`、`current_dt`、`last_dt`、`iterations`、`total_steps`、`total_substeps`。`current_dt/last_dt/frame_dt` 均为完整步的 `1/90 s`，`iterations` 表示每子步的压力轮数，默认为 3。密度误差由主动调用 `diagnostics()` 获取，不维护逐步回读的 CPU 属性。
+公开数据：`positions`、`velocities`、`densities`、`particle_ids`、`rigid.position/rotation/velocity/omega/force/torque`、`boundary.position/velocity/volume/body`、`rigid.fault`、`sim_time`、`frame_dt`、`substep_dt`、`current_dt`、`last_dt`、`iterations`、`total_steps`、`total_substeps`、`hash_grid_dims`。`current_dt/last_dt/frame_dt` 均为完整步的 `1/120 s`，`iterations` 表示每子步的压力轮数，默认为 3。密度误差由主动调用 `diagnostics()` 获取，不维护逐步回读的 CPU 属性。
 
-两张空间哈希表固定为 `128×160×128`，可覆盖默认场景约 10 万粒子配置所需的 `(52,131,28)` 查询单元跨度；初始化会验证容器及支撑半径覆盖的查询单元范围严格小于该尺寸，避免取模后的远距离单元别名。每个子步在流体 HashGrid 建表后永久按哈希顺序重排 `positions/velocities/old_positions`，因此数组下标不再表示固定粒子。`particle_ids[i]` 给出当前下标 `i` 对应的初始化粒子编号；恢复初始顺序可使用 `restored[particle_ids.numpy()] = values`。NPZ 导出同时保存该映射。
+两张空间哈希表共用启动时自动计算的尺寸。程序以 `support_radius=4r` 为单元宽度，按 `container ± support_radius` 求每轴实际查询跨度，再取**严格大于跨度**的最小 2 次幂；Warp 本身允许任意正整数尺寸，2 次幂只是这里选定的冗余容量策略，不宣称会让取模或排序更快。初始化仍校验 `span < hash_grid_dims`，并在 CUDA 数组分配前检查总桶数的 32 位索引范围和估算显存安全预算；超限错误包含粒径、粒子/边界规模、尺寸和预计显存。诊断及性能 JSON 均输出 `hash_grid_dims`。
+
+每个子步在流体 HashGrid 建表后永久按哈希顺序重排 `positions/velocities/old_positions`，因此数组下标不再表示固定粒子。`particle_ids[i]` 给出当前下标 `i` 对应的初始化粒子编号；恢复初始顺序可使用 `restored[particle_ids.numpy()] = values`。NPZ 导出同时保存该映射。
 
 流体和边界邻居缓存分别按 `[邻居序号, 当前粒子编号]` 存储，而不是 `[当前粒子编号, 邻居序号]`。`cache_neighbors` 直接写入该布局，不执行额外转置；密度、压力和粘度 kernel 使用相同布局读取，使一个 warp 中相邻粒子的同序号邻居访问连续。邻居数量仍分别保存在 `fluid_count[i]` 和 `boundary_count[i]`。
 
@@ -136,9 +142,9 @@ simulation.step()  # 推进 1/90 秒：3 个子步，每子步 3 轮压力迭代
 
 接触流形压缩在 CPU/CUDA 上验证了每对不超过 8 点、最深点必留、双向动态接触合并、平面覆盖、墙角不同法线保留、空流形和候选溢出。103,823 粒子的 8–9 秒 nsys 窗口中，650–668 个候选压为 8 个求解接触，压缩、准备和求解合计 `0.0757 ms/子步`，相对此前未压缩顺序求解的 `2.876 ms/子步` 约快 38 倍，且正常循环仍无 GPU→CPU 复制。三个默认分辨率十秒场景通过；十万粒子运行无 NaN/缓存溢出，但高速瞬态历史最大穿透 `0.0252 m` 超过粒子半径 `0.015625 m`，说明固定 8 点和纯速度级离散冲量仍不等价于连续碰撞检测。完整数据、限制和复现命令见 [性能分析](PERFORMANCE.md)。
 
-加入默认 10 m/s 速度上限后，28 项数值/GL/调度测试通过。新增 CPU/CUDA 测试覆盖零速、低于/恰好/超过上限、负分量、多轴速度、极大有限速度，以及速度重建和粘度后的限速；检查方向保持、非有限值保留及故障冻结。以下历史性能及十秒行为结果均未启用全局速度上限。
+速度上限测试覆盖零速、低于/恰好/超过上限、负分量、多轴速度、极大有限速度，以及速度重建和粘度后的限速；检查方向保持、非有限值保留及故障冻结。以下较早的历史性能及十秒行为结果使用过不同的时间步、压力迭代数或速度上限，应以各段说明为准。
 
-2026-09-16 将完整步改为 `1/90 s`、默认压力迭代改为 3 后，26 项数值/GL/调度测试通过，验证每步 9 次压力修正、90 次 step 推进一秒，以及其他正整数压力轮数实际生效。以下十秒场景、十万粒子及性能数据均为先前 `1/60 s`、5 轮压力配置的历史实测；新的十秒运行对应 900 step / 2700 子步，尚未重新进行完整十秒验收。验证旧 nsys 记录时，给 `verify_profile` 添加 `--pressure-iterations 5`；省略时按当前配置校验。
+当前完整步为 `1/120 s`、默认压力迭代为 3、默认速度上限为 `6 m/s`。36 项数值、墙面和隐藏窗口测试全部通过，验证每步 9 次压力修正、120 次 step 推进一秒，以及其他正整数压力轮数实际生效。三个默认分辨率场景、约 10 万和约 20 万粒子配置均已按当前时间步完成十秒运行。下表仍是早期 `1/60 s`、5 轮压力配置的历史数据。
 
 性能收益、nsys 零回读验证、ncu 权限限制及复现命令见 [性能分析](PERFORMANCE.md)。`profile_simulation.py --steps N` 现在表示 N 次完整 `step()`（3N 个子步），加 `--render` 后每步渲染一次，计时不包含播放等待。
 

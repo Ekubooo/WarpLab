@@ -63,6 +63,7 @@ def diagnostics(sim):
         next_dt=sim.current_dt,
         particles=sim.num_particles,
         boundary_particles=len(boundary),
+        hash_grid_dims=list(sim.hash_grid_dims),
         iterations=sim.iterations,
         density_error_percent=float(np.maximum(densities - 1.0, 0).mean() * 100),
         max_speed=float(np.linalg.norm(velocities, axis=1).max()),

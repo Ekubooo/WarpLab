@@ -164,6 +164,13 @@ class CouplingTest(unittest.TestCase):
                 sum(call.args[0] is solver.reorder_fluid for call in launches.call_args_list), 3
             )
             self.assertEqual(
+                sum(
+                    call.args[0] is solver.clamp_rigid_to_container
+                    for call in launches.call_args_list
+                ),
+                3,
+            )
+            self.assertEqual(
                 sum(call.args[0] is solver.pressure_correction for call in launches.call_args_list),
                 9,
             )
@@ -198,13 +205,13 @@ class CouplingTest(unittest.TestCase):
                 ),
                 3,
             )
-            for _ in range(89):
+            for _ in range(119):
                 s.step()
         self.assertEqual(s.sim_time, 1.0)
-        self.assertEqual(s.total_steps, 90)
-        self.assertEqual(s.total_substeps, 270)
-        self.assertEqual(s.current_dt, 1 / 90)
-        self.assertEqual(s.substep_dt, 1 / 270)
+        self.assertEqual(s.total_steps, 120)
+        self.assertEqual(s.total_substeps, 360)
+        self.assertEqual(s.current_dt, 1 / 120)
+        self.assertEqual(s.substep_dt, 1 / 360)
 
     def test_hash_order_reorders_persistent_state_and_inverse_map(self):
         devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
@@ -233,16 +240,38 @@ class CouplingTest(unittest.TestCase):
         query_min = np.floor((s.container_min - s.support_radius) / s.support_radius)
         query_max = np.floor((s.container_max + s.support_radius) / s.support_radius)
         span = (query_max - query_min + 1).astype(int)
-        self.assertEqual(solver.HASH_GRID_DIMS, (128, 160, 128))
+        expected_span, expected_dims = solver.compute_hash_grid_dims(
+            s.container_min, s.container_max, s.support_radius
+        )
+        self.assertEqual(s.hash_grid_dims, expected_dims)
+        self.assertTrue(all(dim & (dim - 1) == 0 for dim in s.hash_grid_dims))
+        self.assertEqual(s.hash_grid_query_span, tuple(span))
+        self.assertEqual(s.hash_grid_query_span, expected_span)
         self.assertTrue(
-            np.all(span < np.asarray(solver.HASH_GRID_DIMS)),
-            (span, solver.HASH_GRID_DIMS),
+            np.all(span < np.asarray(s.hash_grid_dims)),
+            (span, s.hash_grid_dims),
         )
 
-    def test_hash_grid_rejects_periodic_aliasing_span(self):
-        with patch.object(solver, "HASH_GRID_DIMS", (1, 160, 128)):
-            with self.assertRaisesRegex(ValueError, "must exceed the container query span"):
-                self.make()
+    def test_hash_grid_dimensions_follow_radius_and_strict_power_of_two(self):
+        lower = np.array([-1.5499999523162842, 0.0, -0.800000011920929])
+        upper = np.array([1.5499999523162842, 8.0, 0.800000011920929])
+        expected = (
+            (0.025, (34, 83, 19), (64, 128, 32)),
+            (0.015625, (52, 131, 28), (64, 256, 32)),
+            (0.0125, (64, 163, 35), (128, 256, 64)),
+        )
+        for radius, expected_span, expected_dims in expected:
+            with self.subTest(radius=radius):
+                span, dims = solver.compute_hash_grid_dims(lower, upper, 4 * radius)
+                self.assertEqual(span, expected_span)
+                self.assertEqual(dims, expected_dims)
+        span, dims = solver.compute_hash_grid_dims([0, 0, 0], [5, 5, 5], 1.0)
+        self.assertEqual(span, (8, 8, 8))
+        self.assertEqual(dims, (16, 16, 16))
+
+    def test_hash_grid_rejects_native_cell_index_overflow(self):
+        with self.assertRaisesRegex(ValueError, "32-bit cell index range"):
+            solver.compute_hash_grid_dims([0, 0, 0], [2**20, 2**20, 2**20], 1.0)
 
     def test_reordered_neighbor_cache_matches_geometry(self):
         devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
@@ -619,6 +648,47 @@ class CouplingTest(unittest.TestCase):
         self.assertGreater(s.rigid.velocity.numpy()[1, 0], 0)
         self.assertGreater(s.rigid.omega.numpy()[1, 1], 0)
         np.testing.assert_allclose(np.linalg.norm(s.rigid.rotation.numpy(), axis=1), 1, atol=1e-7)
+
+    def test_rigid_container_clamp_is_rotation_aware_and_position_only(self):
+        simulations = [self.make()]
+        if wp.is_cuda_available():
+            simulations.append(solver.Example(self.config, device="cuda:0"))
+        for s in simulations:
+            with self.subTest(device=str(s.device)):
+                body_index = next(i for i, body in enumerate(s.body_models) if body.mass)
+                positions = s.rigid.position.numpy()
+                rotations = s.rigid.rotation.numpy()
+                velocities = s.rigid.velocity.numpy()
+                omegas = s.rigid.omega.numpy()
+                static_positions = positions[s.rigid.inverse_mass.numpy() == 0].copy()
+                positions[body_index] = [-4.0, -2.0, 3.0]
+                rotations[body_index] = init.rotation_quaternion([1, 2, 3], 0.7)
+                velocities[body_index] = [1.25, -2.5, 3.75]
+                omegas[body_index] = [-0.5, 0.75, 1.0]
+                s.rigid.position.assign(positions)
+                s.rigid.rotation.assign(rotations)
+                s.rigid.velocity.assign(velocities)
+                s.rigid.omega.assign(omegas)
+
+                wp.launch(
+                    solver.clamp_rigid_to_container,
+                    len(s.body_models),
+                    [s.rigid, wp.vec3(*s.container_min), wp.vec3(*s.container_max)],
+                    device=s.device,
+                )
+
+                clamped_position = s.rigid.position.numpy()[body_index]
+                world_vertices = (
+                    init.rotation_matrix(rotations[body_index])
+                    @ s.body_models[body_index].vertices.T
+                ).T + clamped_position
+                self.assertTrue(np.all(world_vertices.min(axis=0) >= s.container_min - 1e-6))
+                self.assertTrue(np.all(world_vertices.max(axis=0) <= s.container_max + 1e-6))
+                np.testing.assert_array_equal(s.rigid.velocity.numpy(), velocities)
+                np.testing.assert_array_equal(s.rigid.omega.numpy(), omegas)
+                np.testing.assert_array_equal(
+                    s.rigid.position.numpy()[s.rigid.inverse_mass.numpy() == 0], static_positions
+                )
 
     def test_neighbor_overflow_is_reported(self):
         s = self.make(max_fluid_neighbors=1, max_boundary_neighbors=1)

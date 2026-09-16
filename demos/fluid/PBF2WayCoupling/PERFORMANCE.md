@@ -1,5 +1,26 @@
 # PBF 双向耦合性能分析
 
+## CLI 粒径驱动的 HashGrid 自动配置（2026-09-16）
+
+删除固定 `128×160×128` 后，两张 HashGrid 在每次启动时根据本次 `particle_radius`、`support_radius=4r` 和 `container ± support_radius` 独立计算。每轴取严格大于查询跨度的最小 2 次幂；Warp 的实现使用普通取模并不要求 2 次幂，这只是容量冗余策略。默认场景实测映射为：
+
+| 粒径 | 流体/边界粒子 | 查询跨度 | HashGrid 尺寸 | 两张表桶元数据 |
+| --- | ---: | --- | --- | ---: |
+| 0.025 | 24,389 / 64,176 | (34,83,19) | (64,128,32) | 4 MiB |
+| 0.015625 | 103,823 / 163,732 | (52,131,28) | (64,256,32) | 8 MiB |
+| 0.0125 | 205,379 / 253,216 | (64,163,35) | (128,256,64) | 32 MiB |
+
+三档均完成初始化和完整 step；10 万和约 20 万配置各完成 10 秒、1200 step / 3600 子步，未出现 NaN、邻居/接触溢出或流体越界，平均分别为 **5.65 / 8.02 ms/step**。约 20 万配置的全程最大刚体穿透为 `0.01134 m < r=0.0125 m`。
+
+RTX 5070 / Warp 1.15.0 的 10 万粒子稳定阶段 nsys（8–9 秒、360 子步）显示 GPU→CPU 复制仍为 **0**。与此前固定尺寸的 180 子步记录按子步归一化比较：全部 CUDA memset 的清零量从 **42.08 降至 8.52 MB/子步（-79.7%）**，耗时从 **35.10 降至 12.67 μs/子步（-63.9%）**；单次最大 memset 从 10.486 MB 降至 2.097 MB，正好对应单张网格桶数组的缩小。邻居缓存平均 `0.4136 ms/次`，与固定尺寸的 `0.4129 ms/次` 基本相同；密度、压力和 radix sort 的单次耗时也只在约 1–3% 内变化。因此自动尺寸明确减少的是哈希桶清零和元数据显存，并未消除邻域遍历这一主要瓶颈。完整窗口平均 `1.873 ms/子步`，但当前 `dt=1/360`、历史对照为 `1/180`，轨迹和接触状态不同，不能把端到端差异归因于网格尺寸。
+
+原始结果位于 `outputs/pbf2way/hash-auto/`。诊断和 profile JSON 现在输出 `hash_grid_dims`；CUDA 分配前还会检查总桶数的 32 位索引范围和估算显存预算。复现稳定阶段采集：
+
+```powershell
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/hash-auto/late-100k --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 8 --steps 120 --capture --output outputs/pbf2way/hash-auto/late-100k.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/hash-auto/late-100k.sqlite --steps 120
+```
+
 ## 刚体接触流形压缩（2026-09-16）
 
 接触检测现在写入容量仍为 `max_contacts=65536` 的原始候选数组，并将刚体对规范化为 `a < b`。设备端按无序刚体对保留最深点，再逐槽贪心最大化空间/法线覆盖；小于一个粒子半径且法线夹角小于 30° 的点去重，最多保留 8 点。选择使用“候选并行评分 + 64 位稳定键原子归约”，键依次比较覆盖分数、穿透深度和稳定边界采样编号。最终接触按刚体对/槽位顺序紧凑复制后，继续使用原来的 5 轮顺序冲量、恢复系数、摩擦和穿透偏置，没有 Warm Start。
@@ -32,9 +53,9 @@ ncu 仍因当前进程没有 GPU performance counter 权限返回 `ERR_NVGPUCTRP
 & 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(score_contact_manifold_slot|solve_contacts).*' --launch-count 3 --set basic --clock-control none --force-overwrite --export outputs/pbf2way/contact-manifold/parallel-greedy-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/contact-manifold/ncu-profile.json
 ```
 
-## 固定哈希扩容与流体属性重排（2026-09-16）
+## 历史：固定哈希扩容与流体属性重排（2026-09-16）
 
-两张 HashGrid 现统一固定为 `128×160×128`，其中 Y 维由 96 增至 160，以覆盖约 10 万粒子配置所需的 `(52,131,28)` 查询单元跨度。初始化会按 `container ± support_radius` 计算每轴查询单元跨度，并要求严格小于哈希维度，以避免周期取模令远距离单元产生别名。每个子步在流体建表后执行一次 gather：将 `positions`、`velocities`、`old_positions` 和 `particle_ids` 永久切换到哈希顺序，同时生成原下标到新下标的 `old_to_sorted` 逆映射。流体邻居查询返回的建表前编号经该映射转换；边界点不重排。密度、lambda、修正量、加速度和邻居缓存随后完整覆盖，没有随排序搬运。
+以下为自动尺寸实施前的历史记录：两张 HashGrid 当时统一固定为 `128×160×128`，其中 Y 维由 96 增至 160，以覆盖约 10 万粒子配置所需的 `(52,131,28)` 查询单元跨度。初始化会按 `container ± support_radius` 计算每轴查询单元跨度，并要求严格小于哈希维度，以避免周期取模令远距离单元产生别名。每个子步在流体建表后执行一次 gather：将 `positions`、`velocities`、`old_positions` 和 `particle_ids` 永久切换到哈希顺序，同时生成原下标到新下标的 `old_to_sorted` 逆映射。流体邻居查询返回的建表前编号经该映射转换；边界点不重排。密度、lambda、修正量、加速度和邻居缓存随后完整覆盖，没有随排序搬运。
 
 ### 正确性与行为
 
@@ -72,9 +93,9 @@ ncu 在当前非管理员进程中仍返回 `ERR_NVGPUCTRPERM`。启用 NVIDIA p
 
 nsys 对比0–1秒和8–9秒：邻居缓存累计时间基本不变（**114.3→112.0 ms**），因此不是波动来源；`solve_contacts` 从 **78.9 ms / 19.9%** 增至 **776.6 ms / 68.0%**，平均每子步从0.292增至2.876 ms。此 kernel 只启动一个GPU线程，对约600–1000个接触顺序执行5轮冲量求解；每完整step有三个子步，稳定阶段仅该项约8.63 ms。粒径减小还使边界采样由约6.4万增至16.4万，同一刚体表面产生更多接触点。渲染约增加1–2 ms且相对稳定；邻域、哈希和渲染是基础成本，但帧率随时间大幅变化的主因是串行刚体接触数量。原始分段JSON和nsys报告位于 `outputs/pbf2way/fps-timeline/`。
 
-**速度上限更新（2026-09-16）：** 当前流体默认 `max_speed=10 m/s`，在速度重建、粘度更新的墙面处理后按模长限速，方向不变；复用原有 kernel，保留设备故障检测。28 项数值/GL/调度测试通过。下方性能与十秒行为数据均采集于添加全局限速之前。
+**历史速度上限记录（2026-09-16）：** 当时流体默认 `max_speed=10 m/s`；当前默认值已改为 `6 m/s`。限速仍在速度重建、粘度更新的墙面处理后按模长执行，方向不变，并复用原有 kernel。下方更早的性能与十秒行为数据采集于添加全局限速之前。
 
-**当前配置（2026-09-16）：** 完整 step 已改为 `1/90 s`，三个子步各为 `1/270 s`；默认压力迭代为 3 次/子步，接触迭代仍为 5 次。26 项数值/GL/调度测试通过，包括每步 9 次压力修正和 90 步推进一秒。下方保留的是调整前 `1/60 s`、5 轮压力配置的性能与行为数据，不能直接作为新配置的实测结果。验证下方旧 nsys 数据时，给 `verify_profile` 命令添加 `--pressure-iterations 5`。
+**当前配置（2026-09-16）：** 完整 step 为 `1/120 s`，三个子步各为 `1/360 s`；默认压力迭代为 3 次/子步，接触迭代仍为 5 次。36 项数值/GL/调度测试通过，包括每步 9 次压力修正、每子步一次刚体容器投影和 120 步推进一秒。下方保留的是调整前 `1/60 s`、5 轮压力配置的性能与行为数据，不能直接作为当前配置的实测结果。验证下方旧 nsys 数据时，给 `verify_profile` 命令添加 `--pressure-iterations 5`。
 
 ## 约十万流体粒子试运行（2026-09-16）
 
