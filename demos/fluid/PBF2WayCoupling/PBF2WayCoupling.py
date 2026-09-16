@@ -19,6 +19,8 @@ except ImportError:
 
 
 HASH_GRID_DIMS = (128, 160, 128)
+CONTACT_MANIFOLD_POINTS = 8
+CONTACT_NORMAL_DUPLICATE_COS = 0.8660254  # cos(30 degrees)
 
 
 # Device state: one row per rigid body, boundary sample, or fluid particle.
@@ -71,9 +73,19 @@ class Neighbors:
 
 @wp.struct
 class Contacts:
-    """Contact body indices, geometry, target normal speed and accumulated impulses."""
+    """Raw contact candidates plus compact solver manifolds."""
 
     count: wp.array(dtype=int)
+    candidate_count: wp.array(dtype=int)
+    candidate_a: wp.array(dtype=int)
+    candidate_b: wp.array(dtype=int)
+    candidate_source: wp.array(dtype=int)
+    candidate_point: wp.array(dtype=wp.vec3)
+    candidate_normal: wp.array(dtype=wp.vec3)
+    candidate_gap: wp.array(dtype=float)
+    candidate_target: wp.array(dtype=float)
+    selected_candidate: wp.array(dtype=int)
+    selection_key: wp.array(dtype=wp.int64)
     a: wp.array(dtype=int)
     b: wp.array(dtype=int)
     point: wp.array(dtype=wp.vec3)
@@ -153,6 +165,7 @@ def begin_substep(rigid: RigidState, contacts: Contacts):
     rigid.torque[body] = wp.vec3(0.0)
     if body == 0:
         contacts.count[0] = 0
+        contacts.candidate_count[0] = 0
 
 
 @wp.kernel
@@ -216,20 +229,20 @@ def cache_neighbors(
     for old_j in wp.hash_grid_query(fluid_grid, x[i], h):
         j = old_to_sorted[old_j]
         if j != i and wp.length_sq(x[i] - x[j]) < h * h:
-            if fluid_count < neighbors.fluid.shape[1]:
-                neighbors.fluid[i, fluid_count] = j
+            if fluid_count < neighbors.fluid.shape[0]:
+                neighbors.fluid[fluid_count, i] = j
             else:
                 wp.atomic_max(neighbors.overflow, 0, 1)
             fluid_count += 1
     for j in wp.hash_grid_query(boundary_grid, x[i], h):
         if wp.length_sq(x[i] - boundary.position[j]) < h * h:
-            if boundary_count < neighbors.boundary.shape[1]:
-                neighbors.boundary[i, boundary_count] = j
+            if boundary_count < neighbors.boundary.shape[0]:
+                neighbors.boundary[boundary_count, i] = j
             else:
                 wp.atomic_max(neighbors.overflow, 1, 1)
             boundary_count += 1
-    neighbors.fluid_count[i] = wp.min(fluid_count, neighbors.fluid.shape[1])
-    neighbors.boundary_count[i] = wp.min(boundary_count, neighbors.boundary.shape[1])
+    neighbors.fluid_count[i] = wp.min(fluid_count, neighbors.fluid.shape[0])
+    neighbors.boundary_count[i] = wp.min(boundary_count, neighbors.boundary.shape[0])
 
 
 @wp.kernel
@@ -250,14 +263,14 @@ def density_lambda(
     gradient_i = wp.vec3(0.0)
     squared_gradient_sum = float(0.0)
     for k in range(neighbors.fluid_count[i]):
-        j = neighbors.fluid[i, k]
+        j = neighbors.fluid[k, i]
         displacement = x[i] - x[j]
         normalized_density += volume * fn.poly6(wp.length(displacement), h)
         gradient_j = -volume * fn.spiky_gradient(displacement, h)
         squared_gradient_sum += wp.dot(gradient_j, gradient_j)
         gradient_i -= gradient_j
     for k in range(neighbors.boundary_count[i]):
-        j = neighbors.boundary[i, k]
+        j = neighbors.boundary[k, i]
         displacement = x[i] - boundary.position[j]
         normalized_density += boundary.volume[j] * fn.poly6(wp.length(displacement), h)
         # SPlisHSPlasH excludes individual boundary gradient squares.
@@ -287,10 +300,10 @@ def pressure_correction(
     i = wp.tid()
     position_delta = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
-        j = neighbors.fluid[i, k]
+        j = neighbors.fluid[k, i]
         position_delta += (lambdas[i] + lambdas[j]) * volume * fn.spiky_gradient(x[i] - x[j], h)
     for k in range(neighbors.boundary_count[i]):
-        j = neighbors.boundary[i, k]
+        j = neighbors.boundary[k, i]
         boundary_delta = (
             lambdas[i] * boundary.volume[j] * fn.spiky_gradient(x[i] - boundary.position[j], h)
         )
@@ -362,7 +375,7 @@ def viscosity(
     i = wp.tid()
     viscous_acceleration = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
-        j = neighbors.fluid[i, k]
+        j = neighbors.fluid[k, i]
         displacement = x[i] - x[j]
         viscosity_weight = 10.0 * coefficient * volume / density[j]
         viscous_acceleration += (
@@ -373,7 +386,7 @@ def viscosity(
         )
     if boundary_coefficient > 0.0:
         for k in range(neighbors.boundary_count[i]):
-            j = neighbors.boundary[i, k]
+            j = neighbors.boundary[k, i]
             displacement = x[i] - boundary.position[j]
             viscosity_weight = 10.0 * boundary_coefficient * boundary.volume[j] / density[i]
             boundary_acceleration = (
@@ -504,8 +517,8 @@ def detect_contacts(
                 normal = wp.mesh_eval_face_normal(rigid.mesh[body_b], query.face)
             normal = wp.quat_rotate(rigid.rotation[body_b], normal)
     if gap < tolerance:
-        contact_index = wp.atomic_add(contacts.count, 0, 1)
-        if contact_index >= contacts.a.shape[0]:
+        contact_index = wp.atomic_add(contacts.candidate_count, 0, 1)
+        if contact_index >= contacts.candidate_a.shape[0]:
             wp.atomic_max(contacts.overflow, 0, 1)
             return
         offset_a, offset_b = point - rigid.position[body_a], point - rigid.position[body_b]
@@ -519,14 +532,168 @@ def detect_contacts(
                 target,
                 -wp.min(rigid.restitution[body_a], rigid.restitution[body_b]) * normal_velocity,
             )
-        contacts.a[contact_index] = body_a
-        contacts.b[contact_index] = body_b
-        contacts.point[contact_index] = point
-        contacts.normal[contact_index] = normal
-        contacts.gap[contact_index] = gap
-        contacts.target[contact_index] = target
-        contacts.normal_impulse[contact_index] = 0.0
-        contacts.tangent_impulse[contact_index] = wp.vec3(0.0)
+        # Canonical body order makes reciprocal dynamic-body samples compete for
+        # the same fixed manifold. Flip the normal to preserve its b-to-a sense.
+        canonical_a = body_a
+        canonical_b = body_b
+        canonical_normal = normal
+        if canonical_a > canonical_b:
+            canonical_a = body_b
+            canonical_b = body_a
+            canonical_normal = -normal
+        contacts.candidate_a[contact_index] = canonical_a
+        contacts.candidate_b[contact_index] = canonical_b
+        contacts.candidate_source[contact_index] = i
+        contacts.candidate_point[contact_index] = point
+        contacts.candidate_normal[contact_index] = canonical_normal
+        contacts.candidate_gap[contact_index] = gap
+        contacts.candidate_target[contact_index] = target
+
+
+@wp.kernel
+def initialize_contact_manifolds(rigid: RigidState, contacts: Contacts):
+    """Clear fixed pair slots and their reduction keys entirely on the device."""
+    if rigid.fault[0] != 0:
+        return
+    selection_index = wp.tid()
+    contacts.selected_candidate[selection_index] = -1
+    contacts.selection_key[selection_index] = wp.int64(0)
+
+
+@wp.kernel
+def score_contact_manifold_slot(
+    rigid: RigidState,
+    contacts: Contacts,
+    body_count: int,
+    particle_radius: float,
+    tolerance: float,
+    manifold_slot: int,
+):
+    """Score one candidate per thread and atomically retain the stable pair winner."""
+    if rigid.fault[0] != 0:
+        return
+    candidate = wp.tid()
+    if candidate >= wp.min(contacts.candidate_count[0], contacts.candidate_a.shape[0]):
+        return
+    body_a = contacts.candidate_a[candidate]
+    body_b = contacts.candidate_b[candidate]
+    if body_a >= body_b:
+        return
+    selection_index = (
+        (body_a * body_count + body_b) * CONTACT_MANIFOLD_POINTS + manifold_slot
+    )
+
+    score = float(0.0)
+    if manifold_slot == 0:
+        # All detected candidates satisfy gap < tolerance, so this score is positive.
+        score = tolerance - contacts.candidate_gap[candidate]
+    else:
+        point = contacts.candidate_point[candidate]
+        normal = contacts.candidate_normal[candidate]
+        duplicate_distance_sq = particle_radius * particle_radius
+        normal_scale_sq = tolerance * tolerance
+        minimum_score = float(1.0e30)
+        for previous_slot in range(CONTACT_MANIFOLD_POINTS):
+            if previous_slot >= manifold_slot:
+                break
+            selected = contacts.selected_candidate[selection_index - manifold_slot + previous_slot]
+            if selected < 0:
+                return
+            distance_sq = wp.length_sq(point - contacts.candidate_point[selected])
+            normal_dot = wp.clamp(
+                wp.dot(normal, contacts.candidate_normal[selected]), -1.0, 1.0
+            )
+            if (
+                distance_sq < duplicate_distance_sq
+                and normal_dot > CONTACT_NORMAL_DUPLICATE_COS
+            ):
+                return
+            minimum_score = wp.min(
+                minimum_score, distance_sq + normal_scale_sq * (1.0 - normal_dot)
+            )
+        score = minimum_score
+
+    # Pack coverage, penetration depth, and the stable boundary-sample id into a
+    # signed 63-bit key. Atomic max applies the deterministic priority after
+    # quantization: coverage max, gap min, source min. The fields cover this scene.
+    score_quantized = wp.int64(
+        wp.clamp(score * 1000000000.0, 1.0, 17179869183.0)
+    )
+    depth_quantized = wp.int64(
+        wp.clamp(
+            (tolerance - contacts.candidate_gap[candidate]) * 2000.0,
+            1.0,
+            1023.0,
+        )
+    )
+    source_tie = wp.int64(
+        524287 - wp.min(contacts.candidate_source[candidate], 524287)
+    )
+    key = (
+        score_quantized * wp.int64(536870912)
+        + depth_quantized * wp.int64(524288)
+        + source_tie
+    )
+    wp.atomic_max(contacts.selection_key, selection_index, key)
+
+
+@wp.kernel
+def resolve_contact_manifold_slot(
+    rigid: RigidState,
+    contacts: Contacts,
+    body_count: int,
+    manifold_slot: int,
+):
+    """Resolve the atomic key back to its candidate using the stable sample id."""
+    if rigid.fault[0] != 0:
+        return
+    candidate = wp.tid()
+    if candidate >= wp.min(contacts.candidate_count[0], contacts.candidate_a.shape[0]):
+        return
+    body_a = contacts.candidate_a[candidate]
+    body_b = contacts.candidate_b[candidate]
+    if body_a >= body_b:
+        return
+    selection_index = (
+        (body_a * body_count + body_b) * CONTACT_MANIFOLD_POINTS + manifold_slot
+    )
+    key = contacts.selection_key[selection_index]
+    low_word = key - (key // wp.int64(524288)) * wp.int64(524288)
+    winner_source = 524287 - int(low_word)
+    if contacts.candidate_source[candidate] == winner_source:
+        contacts.selected_candidate[selection_index] = candidate
+
+
+@wp.kernel
+def compact_contact_manifolds(
+    rigid: RigidState,
+    contacts: Contacts,
+    body_count: int,
+):
+    """Copy fixed pair slots into the stable, pair-major sequential-solver array."""
+    if rigid.fault[0] != 0:
+        return
+    output_count = int(0)
+    for pair_index in range(body_count * body_count):
+        body_a = pair_index // body_count
+        body_b = pair_index - body_a * body_count
+        if body_a >= body_b:
+            continue
+        slot_base = pair_index * CONTACT_MANIFOLD_POINTS
+        for slot in range(CONTACT_MANIFOLD_POINTS):
+            candidate = contacts.selected_candidate[slot_base + slot]
+            if candidate < 0:
+                continue
+            contacts.a[output_count] = contacts.candidate_a[candidate]
+            contacts.b[output_count] = contacts.candidate_b[candidate]
+            contacts.point[output_count] = contacts.candidate_point[candidate]
+            contacts.normal[output_count] = contacts.candidate_normal[candidate]
+            contacts.gap[output_count] = contacts.candidate_gap[candidate]
+            contacts.target[output_count] = contacts.candidate_target[candidate]
+            contacts.normal_impulse[output_count] = 0.0
+            contacts.tangent_impulse[output_count] = wp.vec3(0.0)
+            output_count += 1
+    contacts.count[0] = output_count
 
 
 @wp.kernel
@@ -912,26 +1079,37 @@ class Example:
         self.neighbors.fault = self.rigid.fault
         self.neighbors.fluid_count = device_zeros(particle_count, int)
         self.neighbors.boundary_count = device_zeros(particle_count, int)
-        self.neighbors.fluid = device_zeros((particle_count, self.config.max_fluid_neighbors), int)
+        self.neighbors.fluid = device_zeros((self.config.max_fluid_neighbors, particle_count), int)
         self.neighbors.boundary = device_zeros(
-            (particle_count, self.config.max_boundary_neighbors), int
+            (self.config.max_boundary_neighbors, particle_count), int
         )
         self.neighbors.overflow = device_zeros(2, int)
         # Contact geometry and per-contact accumulated impulses.
         self.contacts = Contacts()
+        self.max_manifold_contacts = body_count * body_count * CONTACT_MANIFOLD_POINTS
         self.contacts.count = device_zeros(1, int)
+        self.contacts.candidate_count = device_zeros(1, int)
         self.contacts.overflow = device_zeros(1, int)
-        self.contacts.a = device_zeros(self.config.max_contacts, int)
-        self.contacts.b = device_zeros(self.config.max_contacts, int)
-        self.contacts.point = device_zeros(self.config.max_contacts, wp.vec3)
-        self.contacts.normal = device_zeros(self.config.max_contacts, wp.vec3)
-        self.contacts.gap = device_zeros(self.config.max_contacts, float)
-        self.contacts.target = device_zeros(self.config.max_contacts, float)
-        self.contacts.normal_impulse = device_zeros(self.config.max_contacts, float)
-        self.contacts.tangent_impulse = device_zeros(self.config.max_contacts, wp.vec3)
-        self.contacts.offset_a = device_zeros(self.config.max_contacts, wp.vec3)
-        self.contacts.offset_b = device_zeros(self.config.max_contacts, wp.vec3)
-        self.contacts.normal_mass = device_zeros(self.config.max_contacts, float)
+        self.contacts.candidate_a = device_zeros(self.config.max_contacts, int)
+        self.contacts.candidate_b = device_zeros(self.config.max_contacts, int)
+        self.contacts.candidate_source = device_zeros(self.config.max_contacts, int)
+        self.contacts.candidate_point = device_zeros(self.config.max_contacts, wp.vec3)
+        self.contacts.candidate_normal = device_zeros(self.config.max_contacts, wp.vec3)
+        self.contacts.candidate_gap = device_zeros(self.config.max_contacts, float)
+        self.contacts.candidate_target = device_zeros(self.config.max_contacts, float)
+        self.contacts.selected_candidate = device_zeros(self.max_manifold_contacts, int)
+        self.contacts.selection_key = device_zeros(self.max_manifold_contacts, wp.int64)
+        self.contacts.a = device_zeros(self.max_manifold_contacts, int)
+        self.contacts.b = device_zeros(self.max_manifold_contacts, int)
+        self.contacts.point = device_zeros(self.max_manifold_contacts, wp.vec3)
+        self.contacts.normal = device_zeros(self.max_manifold_contacts, wp.vec3)
+        self.contacts.gap = device_zeros(self.max_manifold_contacts, float)
+        self.contacts.target = device_zeros(self.max_manifold_contacts, float)
+        self.contacts.normal_impulse = device_zeros(self.max_manifold_contacts, float)
+        self.contacts.tangent_impulse = device_zeros(self.max_manifold_contacts, wp.vec3)
+        self.contacts.offset_a = device_zeros(self.max_manifold_contacts, wp.vec3)
+        self.contacts.offset_b = device_zeros(self.max_manifold_contacts, wp.vec3)
+        self.contacts.normal_mass = device_zeros(self.max_manifold_contacts, float)
 
     def _reorder_fluid(self):
         wp.launch(
@@ -1161,9 +1339,53 @@ class Example:
             wp.launch(
                 check_faults, 1, [self.neighbors, self.contacts, self.invalid_state], device=device
             )
+            wp.launch(
+                initialize_contact_manifolds,
+                self.max_manifold_contacts,
+                [self.rigid, self.contacts],
+                device=device,
+            )
+            for manifold_slot in range(CONTACT_MANIFOLD_POINTS):
+                wp.launch(
+                    score_contact_manifold_slot,
+                    config.max_contacts,
+                    [
+                        self.rigid,
+                        self.contacts,
+                        len(self.body_models),
+                        config.particle_radius,
+                        config.contact_tolerance,
+                        manifold_slot,
+                    ],
+                    device=device,
+                )
+                wp.launch(
+                    resolve_contact_manifold_slot,
+                    config.max_contacts,
+                    [
+                        self.rigid,
+                        self.contacts,
+                        len(self.body_models),
+                        manifold_slot,
+                    ],
+                    device=device,
+                )
+            wp.launch(
+                compact_contact_manifolds,
+                1,
+                [
+                    self.rigid,
+                    self.contacts,
+                    len(self.body_models),
+                ],
+                device=device,
+            )
             wp.launch(prepare_rigid_contacts, len(self.body_models), [self.rigid], device=device)
             wp.launch(
-                prepare_contacts, config.max_contacts, [self.rigid, self.contacts], device=device
+                prepare_contacts,
+                self.max_manifold_contacts,
+                [self.rigid, self.contacts],
+                device=device,
             )
             wp.launch(
                 solve_contacts,
@@ -1176,7 +1398,7 @@ class Example:
             # 6. Device audits never synchronize the host or correct physical state.
             wp.launch(
                 audit_rigid,
-                max(config.max_contacts, len(self.body_models)),
+                max(self.max_manifold_contacts, len(self.body_models)),
                 [self.rigid, self.contacts, self.audit_maxima, self.invalid_state],
                 device=device,
             )

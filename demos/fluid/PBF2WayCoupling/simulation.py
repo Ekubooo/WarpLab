@@ -31,7 +31,10 @@ def diagnostics(sim):
     rigid_positions, rigid_rotations = sim.rigid.position.numpy(), sim.rigid.rotation.numpy()
     omega = sim.rigid.omega.numpy()
     boundary = sim.boundary.position.numpy()
-    contact_count = min(int(sim.contacts.count.numpy()[0]), sim.config.max_contacts)
+    candidate_count = min(
+        int(sim.contacts.candidate_count.numpy()[0]), sim.config.max_contacts
+    )
+    contact_count = min(int(sim.contacts.count.numpy()[0]), sim.max_manifold_contacts)
     gaps = sim.contacts.gap.numpy()[:contact_count]
     maxima = sim.audit_maxima.numpy()
     densities = sim.densities.numpy()
@@ -72,6 +75,7 @@ def diagnostics(sim):
             )
         ),
         contacts=contact_count,
+        contact_candidates=candidate_count,
         max_contact_penetration=float(max(0, -gaps.min())) if contact_count else 0.0,
         max_fluid_violation_ever=float(maxima[0]),
         max_contact_penetration_ever=float(maxima[1]),

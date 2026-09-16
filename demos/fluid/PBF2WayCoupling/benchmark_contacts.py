@@ -11,7 +11,17 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
-from .PBF2WayCoupling import Example, prepare_contacts, prepare_rigid_contacts, solve_contacts
+from .PBF2WayCoupling import (
+    CONTACT_MANIFOLD_POINTS,
+    Example,
+    compact_contact_manifolds,
+    initialize_contact_manifolds,
+    prepare_contacts,
+    prepare_rigid_contacts,
+    resolve_contact_manifold_slot,
+    score_contact_manifold_slot,
+    solve_contacts,
+)
 from .test_contact_reference import reference_contact_sweep
 
 
@@ -26,7 +36,14 @@ def main():
         simulation.step()
     rigid, contacts = simulation.rigid, simulation.contacts
     arrays = [rigid.velocity, rigid.omega, contacts.normal_impulse, contacts.tangent_impulse]
-    saved = [wp.clone(array) for array in arrays]
+    # Manifolds intentionally do not warm start. Use the same zero-impulse state
+    # for the reference sweeps and the compact solver comparison.
+    saved = [
+        wp.clone(rigid.velocity),
+        wp.clone(rigid.omega),
+        wp.zeros_like(contacts.normal_impulse),
+        wp.zeros_like(contacts.tangent_impulse),
+    ]
 
     def restore():
         for array, original in zip(arrays, saved):
@@ -36,13 +53,48 @@ def main():
         for _ in range(5):
             wp.launch(reference_contact_sweep, 1, [rigid, contacts], device=simulation.device)
 
+    def compression():
+        wp.launch(
+            initialize_contact_manifolds,
+            simulation.max_manifold_contacts,
+            [rigid, contacts],
+            device=simulation.device,
+        )
+        for manifold_slot in range(CONTACT_MANIFOLD_POINTS):
+            wp.launch(
+                score_contact_manifold_slot,
+                simulation.config.max_contacts,
+                [
+                    rigid,
+                    contacts,
+                    len(simulation.body_models),
+                    simulation.config.particle_radius,
+                    simulation.config.contact_tolerance,
+                    manifold_slot,
+                ],
+                device=simulation.device,
+            )
+            wp.launch(
+                resolve_contact_manifold_slot,
+                simulation.config.max_contacts,
+                [rigid, contacts, len(simulation.body_models), manifold_slot],
+                device=simulation.device,
+            )
+        wp.launch(
+            compact_contact_manifolds,
+            1,
+            [rigid, contacts, len(simulation.body_models)],
+            device=simulation.device,
+        )
+
     def optimized():
+        compression()
         wp.launch(
             prepare_rigid_contacts, len(simulation.body_models), [rigid], device=simulation.device
         )
         wp.launch(
             prepare_contacts,
-            simulation.config.max_contacts,
+            simulation.max_manifold_contacts,
             [rigid, contacts],
             device=simulation.device,
         )
@@ -78,10 +130,12 @@ def main():
         return dict(median_us=float(np.median(samples)), samples_us=samples)
 
     result = dict(
+        contact_candidates=int(contacts.candidate_count.numpy()[0]),
         contacts=int(contacts.count.numpy()[0]),
         maximum_absolute_errors=errors,
         timing="CUDA events, 100 frozen-state solves in graph, 7 trials; includes same D2D restores",
         original=measure(original),
+        compression=measure(compression),
         optimized=measure(optimized),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

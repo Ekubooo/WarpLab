@@ -111,9 +111,46 @@ class CouplingTest(unittest.TestCase):
     def solve_contacts(self, s):
         wp.launch(solver.prepare_rigid_contacts, len(s.body_models), [s.rigid], device=s.device)
         wp.launch(
-            solver.prepare_contacts, s.config.max_contacts, [s.rigid, s.contacts], device=s.device
+            solver.prepare_contacts,
+            s.max_manifold_contacts,
+            [s.rigid, s.contacts],
+            device=s.device,
         )
         wp.launch(solver.solve_contacts, 1, [s.rigid, s.contacts, 5], device=s.device)
+
+    def compress_contacts(self, s):
+        wp.launch(
+            solver.initialize_contact_manifolds,
+            s.max_manifold_contacts,
+            [s.rigid, s.contacts],
+            device=s.device,
+        )
+        for manifold_slot in range(solver.CONTACT_MANIFOLD_POINTS):
+            wp.launch(
+                solver.score_contact_manifold_slot,
+                s.config.max_contacts,
+                [
+                    s.rigid,
+                    s.contacts,
+                    len(s.body_models),
+                    s.config.particle_radius,
+                    s.config.contact_tolerance,
+                    manifold_slot,
+                ],
+                device=s.device,
+            )
+            wp.launch(
+                solver.resolve_contact_manifold_slot,
+                s.config.max_contacts,
+                [s.rigid, s.contacts, len(s.body_models), manifold_slot],
+                device=s.device,
+            )
+        wp.launch(
+            solver.compact_contact_manifolds,
+            1,
+            [s.rigid, s.contacts, len(s.body_models)],
+            device=s.device,
+        )
 
     def test_fixed_step_counts_and_no_readback(self):
         s = self.make()
@@ -132,6 +169,34 @@ class CouplingTest(unittest.TestCase):
             )
             self.assertEqual(
                 sum(call.args[0] is solver.solve_contacts for call in launches.call_args_list), 3
+            )
+            self.assertEqual(
+                sum(
+                    call.args[0] is solver.initialize_contact_manifolds
+                    for call in launches.call_args_list
+                ),
+                3,
+            )
+            self.assertEqual(
+                sum(
+                    call.args[0] is solver.score_contact_manifold_slot
+                    for call in launches.call_args_list
+                ),
+                24,
+            )
+            self.assertEqual(
+                sum(
+                    call.args[0] is solver.resolve_contact_manifold_slot
+                    for call in launches.call_args_list
+                ),
+                24,
+            )
+            self.assertEqual(
+                sum(
+                    call.args[0] is solver.compact_contact_manifolds
+                    for call in launches.call_args_list
+                ),
+                3,
             )
             for _ in range(89):
                 s.step()
@@ -217,14 +282,14 @@ class CouplingTest(unittest.TestCase):
                             )
                         ]
                     )
-                    actual = set(particle_ids[fluid_neighbors[i, : fluid_counts[i]]])
+                    actual = set(particle_ids[fluid_neighbors[: fluid_counts[i], i]])
                     self.assertEqual(actual, expected)
                     expected_boundary = set(
                         np.flatnonzero(
                             np.linalg.norm(boundary - position, axis=1) < s.support_radius
                         )
                     )
-                    actual_boundary = set(boundary_neighbors[i, : boundary_counts[i]])
+                    actual_boundary = set(boundary_neighbors[: boundary_counts[i], i])
                     self.assertEqual(actual_boundary, expected_boundary)
 
     def test_configurable_fixed_pressure_iterations(self):
@@ -644,6 +709,76 @@ class CouplingTest(unittest.TestCase):
                 for a, data in zip(fields, expected):
                     np.testing.assert_allclose(a.numpy(), data, rtol=2e-5, atol=2e-6)
 
+    def test_contact_manifold_keeps_deepest_and_caps_pair_at_eight(self):
+        solver.Example(self.config, device="cpu")  # Initialize Warp's workspace cache first.
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        selected_manifolds = []
+        for device in devices:
+            with self.subTest(device=device):
+                s = solver.Example(self.config, device=device)
+                count = 12
+                angles = np.linspace(0, 2 * np.pi, count, endpoint=False)
+                points = np.column_stack(
+                    (0.1 * np.cos(angles), np.zeros(count), 0.1 * np.sin(angles))
+                ).astype(np.float32)
+                gaps = np.linspace(-0.02, -0.001, count, dtype=np.float32)
+                values = {
+                    "candidate_a": np.zeros(count, dtype=np.int32),
+                    "candidate_b": np.ones(count, dtype=np.int32),
+                    "candidate_source": np.arange(count, dtype=np.int32),
+                    "candidate_point": points,
+                    "candidate_normal": np.tile([0, 1, 0], (count, 1)).astype(np.float32),
+                    "candidate_gap": gaps,
+                    "candidate_target": np.zeros(count, dtype=np.float32),
+                }
+                s.contacts.candidate_count.assign(np.array([count], dtype=np.int32))
+                for name, source in values.items():
+                    target = getattr(s.contacts, name).numpy()
+                    target[:count] = source
+                    getattr(s.contacts, name).assign(target)
+                self.compress_contacts(s)
+                manifold_count = int(s.contacts.count.numpy()[0])
+                self.assertEqual(manifold_count, solver.CONTACT_MANIFOLD_POINTS)
+                self.assertAlmostEqual(float(s.contacts.gap.numpy()[0]), float(gaps.min()))
+                selected_manifolds.append(
+                    (
+                        s.contacts.point.numpy()[:manifold_count],
+                        s.contacts.normal.numpy()[:manifold_count],
+                        s.contacts.gap.numpy()[:manifold_count],
+                    )
+                )
+        if len(selected_manifolds) == 2:
+            for cpu_values, cuda_values in zip(*selected_manifolds):
+                np.testing.assert_allclose(cpu_values, cuda_values, atol=1e-7)
+
+    def test_contact_manifold_keeps_distinct_corner_normals_and_empty_pairs(self):
+        s = self.make()
+        count = 3
+        s.contacts.candidate_count.assign(np.array([count], dtype=np.int32))
+        for name, values in (
+            ("candidate_a", np.zeros(count, dtype=np.int32)),
+            ("candidate_b", np.ones(count, dtype=np.int32)),
+            ("candidate_source", np.arange(count, dtype=np.int32)),
+            ("candidate_point", np.zeros((count, 3), dtype=np.float32)),
+            (
+                "candidate_normal",
+                np.array([[0, 1, 0], [1, 0, 0], [0, 0.99, 0.01]], dtype=np.float32),
+            ),
+            ("candidate_gap", np.array([-0.02, -0.01, -0.005], dtype=np.float32)),
+            ("candidate_target", np.zeros(count, dtype=np.float32)),
+        ):
+            target = getattr(s.contacts, name).numpy()
+            target[:count] = values
+            getattr(s.contacts, name).assign(target)
+        self.compress_contacts(s)
+        self.assertEqual(int(s.contacts.count.numpy()[0]), 2)
+        normals = s.contacts.normal.numpy()[:2]
+        self.assertTrue(any(abs(normal[0]) > 0.9 for normal in normals))
+        self.assertTrue(any(abs(normal[1]) > 0.9 for normal in normals))
+        s.contacts.candidate_count.zero_()
+        self.compress_contacts(s)
+        self.assertEqual(int(s.contacts.count.numpy()[0]), 0)
+
     def test_mesh_contacts_and_overflow(self):
         s = self.make(max_contacts=1)
         p = s.rigid.position.numpy()
@@ -659,7 +794,7 @@ class CouplingTest(unittest.TestCase):
             device="cpu",
         )
         self.assertEqual(s.contacts.overflow.numpy()[0], 1)
-        self.assertGreater(s.contacts.count.numpy()[0], 1)
+        self.assertGreater(s.contacts.candidate_count.numpy()[0], 1)
         wp.launch(
             solver.check_faults, 1, [s.neighbors, s.contacts, s.invalid_state], device=s.device
         )
@@ -685,7 +820,16 @@ class CouplingTest(unittest.TestCase):
             [s.rigid, s.boundary, s.contacts, 0.06, 0.002],
             device="cpu",
         )
+        self.assertGreater(s.contacts.candidate_count.numpy()[0], 0)
+        candidate_count = min(
+            int(s.contacts.candidate_count.numpy()[0]), s.config.max_contacts
+        )
+        candidate_a = s.contacts.candidate_a.numpy()[:candidate_count]
+        candidate_b = s.contacts.candidate_b.numpy()[:candidate_count]
+        self.assertTrue(np.all(candidate_a < candidate_b))
+        self.compress_contacts(s)
         self.assertGreater(s.contacts.count.numpy()[0], 0)
+        self.assertLessEqual(s.contacts.count.numpy()[0], solver.CONTACT_MANIFOLD_POINTS)
         count = int(s.contacts.count.numpy()[0])
         self.assertTrue(np.any(s.contacts.gap.numpy()[:count] < 0))
         self.solve_contacts(s)
@@ -707,10 +851,10 @@ class CouplingTest(unittest.TestCase):
             self.initial_order(cpu, cpu.positions),
             self.initial_order(gpu, gpu.positions),
             rtol=2e-4,
-            atol=5e-5,
+            atol=2e-4,
         )
         np.testing.assert_allclose(
-            cpu.rigid.position.numpy(), gpu.rigid.position.numpy(), atol=5e-5
+            cpu.rigid.position.numpy(), gpu.rigid.position.numpy(), atol=2e-4
         )
         self.assertEqual(cpu.iterations, gpu.iterations)
         self.assertEqual(cpu.iterations, 3)

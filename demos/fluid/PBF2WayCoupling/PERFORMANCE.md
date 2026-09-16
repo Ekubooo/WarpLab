@@ -1,5 +1,37 @@
 # PBF 双向耦合性能分析
 
+## 刚体接触流形压缩（2026-09-16）
+
+接触检测现在写入容量仍为 `max_contacts=65536` 的原始候选数组，并将刚体对规范化为 `a < b`。设备端按无序刚体对保留最深点，再逐槽贪心最大化空间/法线覆盖；小于一个粒子半径且法线夹角小于 30° 的点去重，最多保留 8 点。选择使用“候选并行评分 + 64 位稳定键原子归约”，键依次比较覆盖分数、穿透深度和稳定边界采样编号。最终接触按刚体对/槽位顺序紧凑复制后，继续使用原来的 5 轮顺序冲量、恢复系数、摩擦和穿透偏置，没有 Warm Start。
+
+### 实测性能
+
+RTX 5070 / Warp 1.15.0，103,823 个流体粒子、163,732 个边界点，预热到 8 秒后用 nsys 采集 8–9 秒的 60 step / 180 子步。候选数从窗口开始的 650 变为结束的 668，最终求解数均为 8：
+
+- 初始化、8 轮并行评分、8 轮赢家解析和紧凑复制合计 **6.564 ms / 180 子步 = 0.0365 ms/子步**。
+- 刚体/接触准备和 5 轮顺序冲量合计 **7.055 ms / 180 子步 = 0.0392 ms/子步**。
+- 压缩到求解的总成本为 **0.0757 ms/子步**；若连检测也计入则为 **0.1006 ms/子步**。
+- 相比压缩前晚期 `solve_contacts` 的 **2.876 ms/子步**，压缩到求解部分约快 **38.0 倍**，超过 4 倍目标。相比最初正确但串行扫描候选的压缩版本 **1.599 ms/子步**，并行归约约快 **21.1 倍**。
+- 正常循环仍为 **0 次 GPU→CPU 复制**；记录中只有 Host→Device 复制和 memset。新的主要 GPU kernel 已回到邻居缓存、压力修正和密度/λ，分别占 kernel 时间 29.6%、25.2% 和 20.8%；接触压缩及求解不再是主瓶颈。
+
+无 profiler 的十万粒子 10 秒运行平均 **5.83 ms/step**，无 NaN、缓存溢出或流体越界，最终 896 个候选压成 16 个接触。三个默认分辨率十秒验收场景全部通过，默认溃坝历史最大穿透 `0.0220 m < r=0.025 m`。但十万粒子高速碰撞的历史最大穿透为 **0.0252 m > r=0.015625 m**，虽然结束时瞬时最大穿透为 0.0124 m；因此“十万粒子全程穿透小于一个粒子半径”这一验收项未通过。CPU NumPy 串行贪心与 GPU 归约在同一候选集上的代表点和顺序完全一致，超标来自既有离散接触先积分、后速度冲量且不回推位置的限制；本次按范围没有修改子步、5 轮迭代或冲量公式。
+
+`test_coupling` 24 项中 23 项通过，唯一失败是工作树既有的测试仍按 90 步等于 1 秒，而当前配置为 `frame_dt=1/60`；墙面与隐藏窗口共 10 项中 9 项通过，唯一失败是既有测试期望默认 `max_speed=10`，当前配置为 6。接触流形新增测试、CPU/CUDA短轨迹、故障冻结、候选溢出和隐藏窗口零回读均通过。
+
+原始文件位于 `outputs/pbf2way/contact-manifold/parallel-greedy-late-100k*`、`acceptance/` 和 `100k/high-precision-key.*`。复现：
+
+```powershell
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --device cuda:0 --output outputs/pbf2way/contact-manifold/acceptance
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.015625 --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/contact-manifold/100k/dam-break
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/contact-manifold/parallel-greedy-late-100k --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 8 --steps 60 --capture --output outputs/pbf2way/contact-manifold/parallel-greedy-late-100k.json
+```
+
+ncu 仍因当前进程没有 GPU performance counter 权限返回 `ERR_NVGPUCTRPERM`。授权后可复现：
+
+```powershell
+& 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(score_contact_manifold_slot|solve_contacts).*' --launch-count 3 --set basic --clock-control none --force-overwrite --export outputs/pbf2way/contact-manifold/parallel-greedy-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/contact-manifold/ncu-profile.json
+```
+
 ## 固定哈希扩容与流体属性重排（2026-09-16）
 
 两张 HashGrid 现统一固定为 `128×160×128`，其中 Y 维由 96 增至 160，以覆盖约 10 万粒子配置所需的 `(52,131,28)` 查询单元跨度。初始化会按 `container ± support_radius` 计算每轴查询单元跨度，并要求严格小于哈希维度，以避免周期取模令远距离单元产生别名。每个子步在流体建表后执行一次 gather：将 `positions`、`velocities`、`old_positions` 和 `particle_ids` 永久切换到哈希顺序，同时生成原下标到新下标的 `old_to_sorted` 逆映射。流体邻居查询返回的建表前编号经该映射转换；边界点不重排。密度、lambda、修正量、加速度和邻居缓存随后完整覆盖，没有随排序搬运。
@@ -29,6 +61,16 @@ ncu 在当前非管理员进程中仍返回 `ERR_NVGPUCTRPERM`。启用 NVIDIA p
 ```powershell
 & 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(reorder_fluid|cache_neighbors|density_lambda|pressure_correction).*' --launch-count 4 --set full --clock-control none --force-overwrite --export outputs/pbf2way/hash-reorder/core-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/hash-reorder/ncu-profile.json
 ```
+
+### 邻居数组转置
+
+邻居缓存现直接按 `[邻居序号, 粒子编号]` 分配、写入和读取，不增加转置 kernel。相同 `128×160×128` 哈希尺寸、预热 3 秒并采集 90 step 的 nsys 对照显示，默认 24,389 粒子下邻居缓存、密度/λ、压力和粘度合计由 **151.8 ms** 增至 **164.5 ms**（慢约 8.4%）；103,823 粒子下则由 **464.6 ms** 降至 **326.4 ms**（快约 29.8%）。十万粒子下密度/λ、压力和粘度分别约减少 **40.4% / 35.2% / 48.4%**，邻居缓存本身减少约 1.1%。说明小规模时每线程连续扫描旧行布局更容易留在缓存中，而大规模工作集下跨 warp 的合并访问收益占优。当前目标包含约十万粒子，故保留转置布局；原始报告位于 `outputs/pbf2way/neighbor-{row-major-160,transposed}*`。
+
+### 十万粒子运行中的帧率波动
+
+隐藏窗口、103,823 流体/163,732 边界粒子、关闭播放等待，每个时间段独立预热后测量90帧。0–1秒为 **6.30 ms/帧（159 FPS原始吞吐）**，所以交互入口会等待到目标90 FPS；1–2和2–3秒分别升至 **17.29/17.05 ms（57.8/58.6 FPS）**，单帧最大33.6/45.7 ms；4–6秒回落到约14.0–14.2 ms，6–7秒又随接触状态升至16.0 ms。该曲线复现了“开始90、碰撞时40–50、随后约59”的现象；动态刚体轨迹和接触原子顺序会令具体时间段变化。
+
+nsys 对比0–1秒和8–9秒：邻居缓存累计时间基本不变（**114.3→112.0 ms**），因此不是波动来源；`solve_contacts` 从 **78.9 ms / 19.9%** 增至 **776.6 ms / 68.0%**，平均每子步从0.292增至2.876 ms。此 kernel 只启动一个GPU线程，对约600–1000个接触顺序执行5轮冲量求解；每完整step有三个子步，稳定阶段仅该项约8.63 ms。粒径减小还使边界采样由约6.4万增至16.4万，同一刚体表面产生更多接触点。渲染约增加1–2 ms且相对稳定；邻域、哈希和渲染是基础成本，但帧率随时间大幅变化的主因是串行刚体接触数量。原始分段JSON和nsys报告位于 `outputs/pbf2way/fps-timeline/`。
 
 **速度上限更新（2026-09-16）：** 当前流体默认 `max_speed=10 m/s`，在速度重建、粘度更新的墙面处理后按模长限速，方向不变；复用原有 kernel，保留设备故障检测。28 项数值/GL/调度测试通过。下方性能与十秒行为数据均采集于添加全局限速之前。
 

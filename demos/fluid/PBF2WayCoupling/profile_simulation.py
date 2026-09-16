@@ -44,6 +44,7 @@ def main():
     start_time = simulation.sim_time
     start_step = simulation.total_steps
     contacts_before = int(simulation.contacts.count.numpy()[0])
+    contact_candidates_before = int(simulation.contacts.candidate_count.numpy()[0])
     driver = None
     if args.capture:
         if not simulation.device.is_cuda:
@@ -100,6 +101,8 @@ def main():
         min_dt=float(values[:, 2].min()),
         contacts_before=contacts_before,
         contacts_after=int(simulation.contacts.count.numpy()[0]),
+        contact_candidates_before=contact_candidates_before,
+        contact_candidates_after=int(simulation.contacts.candidate_count.numpy()[0]),
         simulated_seconds_per_wall_second=(simulation.sim_time - start_time) / elapsed,
         sample_columns=["step_ms", "iterations_per_substep", "substep_dt"],
         samples=samples,
