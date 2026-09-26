@@ -19,6 +19,9 @@
 # 主动验证：每秒回读诊断，并导出最终状态
 .venv/Scripts/python.exe demos/fluid/PBF2WayCoupling/simulation.py --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/run
 
+# 恢复加入两项补偿前的物理路径：人工压力和涡度补偿都关闭
+.venv/Scripts/python.exe demos/fluid/PBF2WayCoupling/render_opengl.py --no-artificial-pressure --no-vorticity-confinement
+
 # CPU 小分辨率运行；渲染前端本身需要 CUDA/OpenGL
 .venv/Scripts/python.exe demos/fluid/PBF2WayCoupling/render_opengl.py --headless --device cpu --particle-radius 0.05 --seconds 0.1
 
@@ -29,6 +32,22 @@
 默认自动选择 CUDA，否则无窗口仿真使用 CPU。首次启动会编译 kernels，缓存写入仓库 `.warp_cache`。所有网格随代码提供，运行无需联网。
 
 交互：`Space` 暂停/继续，`R` 重置并暂停，`G` 反转重力，`Q/E` 绕 Z 轴旋转重力 10°；鼠标和 `W/A/S/D` 控制相机。重置恢复初始物理状态及重力，保留相机。`--num-frames` 限制帧数，`--one-way` 关闭流体对刚体的反作用力。
+
+人工压力与涡度补偿有互相独立的 CLI 开关：`--[no-]artificial-pressure` 和 `--[no-]vorticity-confinement`。**人工压力默认关闭，涡度补偿默认启用。** 当前单边密度约束已像 SPlisHSPlasH 和 PositionBasedDynamics 一样钳制负压力，因此原论文的无条件 `s_corr` 只作为实验功能保留；它可能使自由表面膨胀，必须显式传入 `--artificial-pressure` 才会启用。实验强度已针对当前粒子体积、`h=4r` 和三轮压力迭代从 `0.1` 重新标定为 `0.001`；这是经验折中，不是对论文参数的逐字复现。双关闭时使用加入两项补偿前的物理路径。建议使用不同输出目录对比四种组合：
+
+```powershell
+# 都关闭：旧路径
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --no-artificial-pressure --no-vorticity-confinement --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/compare/off-off
+
+# 仅人工压力
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --artificial-pressure --no-vorticity-confinement --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/compare/pressure-only
+
+# 仅涡度补偿；这也是默认状态
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --no-artificial-pressure --vorticity-confinement --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/compare/vorticity-only
+
+# 都启用；人工压力属于显式实验模式
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --artificial-pressure --vorticity-confinement --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/compare/on-on
+```
 
 每次 `step()` 推进 `1/120 s`，紧接着调用一次 `render()`。暂停时只刷新画面。播放速度仅决定帧间等待：默认 `--playback-speed 0.5` 的目标是 60 帧/秒，设为 `1` 则是 120 帧/秒。算不完时自然变慢，不追赶、不跳步、不跳帧；已关闭 vsync 和 Tab 跳过渲染快捷键。`--warmup` 仅用于显式截图/测试预热，会在创建渲染器前推进指定时间。
 
@@ -87,13 +106,15 @@ HashGrid 会在每次进程启动时按本次粒径独立计算，不缓存上�
 - 每个 `step()` 固定包含 3 个 `dt=1/360 s` 子步，默认每子步 3 轮压力迭代和 5 轮接触迭代。压力轮数可设为任意正整数，运行时按配置固定执行；没有 CFL、误差提前退出或自适应迭代。`densities` 是修正后的归一化密度，显式诊断按其计算平均压缩误差，不要求达到旧的 `0.01%`。
 - 边界引起的流体位移为 `Δx`，刚体反作用力为 `−mΔx/dt²`，力矩使用该边界样本相对质心的力臂。每一轮压力修正都累积贡献。开启边界粘度时，同样累积 `−m a_boundary`。
 - 边界点世界坐标为 `COM+R x_local`，速度为 `v+ω×(R x_local)`。静态边界共同计算伪体积；运动刚体各自在自身样本内计算，之后不随位姿改变。
-- 子步次序：清空受力 → 流体重力预测 → 构建空间哈希并按哈希顺序重排持久粒子属性 → 缓存一次邻域 → PBF 迭代/反作用力 → 一阶速度重建 → 重算密度及 Standard viscosity → 刚体积分 → 接触检测 → 接触流形压缩 → 速度约束 → 更新边界。阶段之间保留设备端溢出和非有限数值检查。
-- 流体、反作用力及刚体积分统一使用 `substep_dt=1/360`，不能使用完整步的 `current_dt` 计算子步冲量。Standard viscosity 默认 `0.01`，边界粘度默认 `0`。
+- 子步次序：清空受力 → 流体重力预测 → 构建空间哈希并按哈希顺序重排持久粒子属性 → 缓存一次邻域 → PBF 迭代/反作用力 → 一阶速度重建 → 重算密度 → Standard viscosity 加速度 → 计算涡度与涡度约束加速度 → 一次性更新速度 → 刚体积分 → 接触检测 → 接触流形压缩 → 速度约束 → 更新边界。阶段之间保留设备端溢出和非有限数值检查。
+- 流体、反作用力及刚体积分统一使用 `substep_dt=1/360`，不能使用完整步的 `current_dt` 计算子步冲量。Standard viscosity 默认 `0.01`，边界粘度默认 `0`；涡度补偿是在同一速度更新前累加的另一项加速度，没有改成 XSPH。
+- 可选的流体—流体实验路径加入 [Position Based Fluids 原文](https://mmacklin.com/pbf_sig_preprint.pdf)形式的人工压力：`s_corr = -(strength h²)(W(r,h)/W(qh,h))⁴`。当前经验参数为 `strength=0.001`、`q=0.3`、指数4；较低强度用于缓和单边密度约束下的自由表面膨胀，并不等同于论文中的原始 `k=0.1`。参考核值 `W(qh,h)` 在初始化时预计算；它不作用于边界邻居，也不改变刚体压力反作用力。该路径默认关闭，需设置 `enable_artificial_pressure=True` 或传入 `--artificial-pressure`；系数设为0同样可关闭。
+- 涡度补偿先以流体邻居计算 `ωᵢ = Σ(V/ρⱼ)(vᵢ-vⱼ)×∇ᵢWᵢⱼ`，再计算涡度模梯度 `ηᵢ`，累加 `ε normalize(ηᵢ)×ωᵢ`；默认 `ε=0.5`，设 `vorticity_confinement=0` 可关闭。边界样本不参与，也不向刚体施加人工反作用力。
 - 容器保底：每轮应用 `Δp` 时执行 `x = clamp(x + Δp, container_min + r, container_max - r)`，将粒子中心限制在向内缩一个半径的盒体内。动态刚体仍走原有粒子边界耦合；额外位置修正视为静态容器约束，不修改压力反作用力公式。
 - 刚体保底：每次刚体积分后，将动态刚体当前旋转下的局部 AABB 转换成保守的世界 AABB，并只平移质心使其完整落在容器范围内。该投影不修改旋转、线速度或角速度，不计算反弹、摩擦或额外冲量；静态容器不参与钳制。原有接触求解随后照常执行。
 - 速度重建和粘度速度更新后均检查墙面：仅将贴墙且向外的速度分量改为 `−wall_damping × v`，默认 `wall_damping=0.8`，配置范围 `[0,1]`。保留切向及向内速度，棱角逐轴处理，已反向的速度不会重复衰减。这里使用当前更新后的速度，并非另行保存碰撞前的入射速度。该措施引入碰壁耗散。
 - 上述墙面处理后，统一限制流体速度模长：`|v| > max_speed` 时按比例缩短向量，保持方向不变。默认 **`max_speed=6.0 m/s`**，在 `PBF2WayCoupling.py` 的 `PBF2WayCouplingConfig.max_speed` 修改，或构造配置时传入其他有限正数；无需修改校验常量。限速融合进现有两个速度更新 kernel，不增加回读或 kernel 调用。NaN/Inf 保留给设备异常检测。该限速会额外耗散动能，仅限制流体，不限制刚体速度。
-- 不加入人工浮力、涡量约束或人工压力。设备故障标志保持到重置，检测到邻域/接触溢出或非有限状态后停止后续物理写入，并通过设备 `printf` 输出一次错误；保底钳制保留 NaN/Inf，避免掩盖异常。正常循环不读故障标志；主机提交计数仍继续增长，因此故障后的 `sim_time` 只代表提交的时间，不代表成功推进。显式 `diagnostics(simulation)` 会回读并抛出异常。
+- 不加入人工浮力。设备故障标志保持到重置，检测到邻域/接触溢出或非有限状态后停止后续物理写入，并通过设备 `printf` 输出一次错误；保底钳制保留 NaN/Inf，避免掩盖异常。正常循环不读故障标志；主机提交计数仍继续增长，因此故障后的 `sim_time` 只代表提交的时间，不代表成功推进。显式 `diagnostics(simulation)` 会回读并抛出异常。
 
 ## 网格、接口与实现范围
 
@@ -110,6 +131,11 @@ config = PBF2WayCouplingConfig(
     wall_damping=0.8,
     max_speed=6.0,
     pressure_iterations=3,
+    enable_artificial_pressure=False,  # 实验功能；CLI 用 --artificial-pressure 开启
+    artificial_pressure_strength=0.001,
+    artificial_pressure_q=0.3,
+    enable_vorticity_confinement=True,
+    vorticity_confinement=0.5,
 )
 simulation = create_pbf2way_simulation(config=config, device="cuda:0")
 simulation.step()  # 推进 1/120 秒：3 个子步，每子步 3 轮压力迭代
@@ -144,7 +170,7 @@ simulation.step()  # 推进 1/120 秒：3 个子步，每子步 3 轮压力迭�
 
 速度上限测试覆盖零速、低于/恰好/超过上限、负分量、多轴速度、极大有限速度，以及速度重建和粘度后的限速；检查方向保持、非有限值保留及故障冻结。以下较早的历史性能及十秒行为结果使用过不同的时间步、压力迭代数或速度上限，应以各段说明为准。
 
-当前完整步为 `1/120 s`、默认压力迭代为 3、默认速度上限为 `6 m/s`。36 项数值、墙面和隐藏窗口测试全部通过，验证每步 9 次压力修正、120 次 step 推进一秒，以及其他正整数压力轮数实际生效。三个默认分辨率场景、约 10 万和约 20 万粒子配置均已按当前时间步完成十秒运行。下表仍是早期 `1/60 s`、5 轮压力配置的历史数据。
+当前完整步为 `1/120 s`、默认压力迭代为3、默认速度上限为 `6 m/s`；默认只启用涡度补偿，不启用人工压力。39项数值、墙面和隐藏窗口测试覆盖两个独立CLI开关、默认压力强度实际为0、显式实验开启、双关闭旧路径、CPU/CUDA涡度公式、粒子重排兼容性和kernel调用数。默认十秒与性能结果以性能文档的最新记录为准；显式人工压力的旧运行仅作为异常诊断，不再代表默认行为。
 
 性能收益、nsys 零回读验证、ncu 权限限制及复现命令见 [性能分析](PERFORMANCE.md)。`profile_simulation.py --steps N` 现在表示 N 次完整 `step()`（3N 个子步），加 `--render` 后每步渲染一次，计时不包含播放等待。
 

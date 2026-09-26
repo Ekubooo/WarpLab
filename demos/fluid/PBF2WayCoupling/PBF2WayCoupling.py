@@ -60,6 +60,8 @@ def estimate_device_storage_bytes(particle_count, boundary_count, grid_dims, con
     ) * 4
     # Fluid persistent arrays, HashGrid point workspaces, and exclusion temporaries.
     fluid_bytes = particle_count * (124 + 24 + 16)
+    if config.enable_vorticity_confinement and config.vorticity_confinement > 0.0:
+        fluid_bytes += particle_count * 16  # vec4 vorticity scratch array
     # Boundary state and its HashGrid point workspace.
     boundary_bytes = boundary_count * (44 + 24)
     # cell_starts/cell_ends for two grids: 2 arrays * 2 grids * sizeof(int).
@@ -334,6 +336,8 @@ def pressure_correction(
     volume: float,
     mass: float,
     h: float,
+    artificial_pressure_strength: float,
+    artificial_pressure_reference: float,
     dt: float,
     two_way: int,
     lambdas: wp.array(dtype=float),
@@ -346,7 +350,18 @@ def pressure_correction(
     position_delta = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
         j = neighbors.fluid[k, i]
-        position_delta += (lambdas[i] + lambdas[j]) * volume * fn.spiky_gradient(x[i] - x[j], h)
+        displacement = x[i] - x[j]
+        constraint_scale = lambdas[i] + lambdas[j]
+        if artificial_pressure_strength > 0.0:
+            constraint_scale += fn.artificial_pressure(
+                wp.length(displacement),
+                h,
+                artificial_pressure_strength,
+                artificial_pressure_reference,
+            )
+        position_delta += (
+            constraint_scale * volume * fn.spiky_gradient(displacement, h)
+        )
     for k in range(neighbors.boundary_count[i]):
         j = neighbors.boundary[k, i]
         boundary_delta = (
@@ -451,6 +466,61 @@ def viscosity(
                     wp.cross(boundary.position[j] - rigid.position[body_index], force),
                 )
     acceleration[i] = viscous_acceleration
+
+
+@wp.kernel
+def compute_vorticity(
+    x: wp.array(dtype=wp.vec3),
+    v: wp.array(dtype=wp.vec3),
+    neighbors: Neighbors,
+    density: wp.array(dtype=float),
+    volume: float,
+    h: float,
+    vorticity: wp.array(dtype=wp.vec4),
+):
+    """Compute the fluid curl after PBF velocity reconstruction."""
+    if neighbors.fault[0] != 0:
+        return
+    i = wp.tid()
+    omega = wp.vec3(0.0)
+    for k in range(neighbors.fluid_count[i]):
+        j = neighbors.fluid[k, i]
+        gradient = fn.spiky_gradient(x[i] - x[j], h)
+        neighbor_volume = volume / wp.max(density[j], 1.0e-6)
+        omega += neighbor_volume * wp.cross(v[i] - v[j], gradient)
+    vorticity[i] = wp.vec4(omega[0], omega[1], omega[2], wp.length(omega))
+
+
+@wp.kernel
+def add_vorticity_confinement(
+    x: wp.array(dtype=wp.vec3),
+    neighbors: Neighbors,
+    density: wp.array(dtype=float),
+    volume: float,
+    h: float,
+    coefficient: float,
+    vorticity: wp.array(dtype=wp.vec4),
+    acceleration: wp.array(dtype=wp.vec3),
+):
+    """Add epsilon * normalize(grad |omega|) cross omega to fluid acceleration."""
+    if neighbors.fault[0] != 0:
+        return
+    i = wp.tid()
+    omega_i_data = vorticity[i]
+    omega_i = wp.vec3(omega_i_data[0], omega_i_data[1], omega_i_data[2])
+    eta = wp.vec3(0.0)
+    for k in range(neighbors.fluid_count[i]):
+        j = neighbors.fluid[k, i]
+        gradient = fn.spiky_gradient(x[i] - x[j], h)
+        neighbor_volume = volume / wp.max(density[j], 1.0e-6)
+        eta += (
+            neighbor_volume
+            * (vorticity[j][3] - omega_i_data[3])
+            * gradient
+        )
+    eta_length = wp.length(eta)
+    if eta_length > 1.0e-8:
+        acceleration[i] += coefficient * wp.cross(eta / eta_length, omega_i)
 
 
 @wp.kernel
@@ -949,13 +1019,19 @@ class PBF2WayCouplingConfig:
     gravity: tuple = (0.0, -9.81, 0.0)
 
     # One public step contains three fixed physical substeps.
-    frame_dt: float = 1.0 / 120.0
+    frame_dt: float = 1.0 / 90.0
     substeps: int = 3
     pressure_iterations: int = 3
+    # Experimental with this compression-only density constraint; disabled by default.
+    enable_artificial_pressure: bool = False
+    artificial_pressure_strength: float = 0.0075
+    artificial_pressure_q: float = 0.3
 
     # Non-pressure forces and rigid-body feedback.
     viscosity: float = 0.01
     boundary_viscosity: float = 0.0
+    enable_vorticity_confinement: bool = True
+    vorticity_confinement: float = 0.5
     two_way: bool = True
     wall_damping: float = 0.8
     max_speed: float = 6.0  # Fluid speed limit in meters per second.
@@ -968,6 +1044,13 @@ class PBF2WayCouplingConfig:
     contact_iterations: int = 5
 
     def __post_init__(self):
+        for name in (
+            "enable_artificial_pressure",
+            "enable_vorticity_confinement",
+            "two_way",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
         for name in (
             "particle_radius",
             "rest_density",
@@ -987,9 +1070,19 @@ class PBF2WayCouplingConfig:
         ):
             if not isinstance(getattr(self, name), int) or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("viscosity", "boundary_viscosity"):
+        for name in (
+            "viscosity",
+            "boundary_viscosity",
+            "artificial_pressure_strength",
+            "vorticity_confinement",
+        ):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
+        if (
+            not np.isfinite(self.artificial_pressure_q)
+            or not 0 < self.artificial_pressure_q < 1
+        ):
+            raise ValueError("artificial_pressure_q must be finite and in (0, 1)")
         if len(self.gravity) != 3 or not np.isfinite(self.gravity).all():
             raise ValueError("gravity must contain three finite components")
         if not np.isfinite(self.wall_damping) or not 0 <= self.wall_damping <= 1:
@@ -1037,6 +1130,12 @@ class Example:
         self.total_steps = 0
         self.total_substeps = 0
         self.support_radius = 4 * self.config.particle_radius
+        q = self.config.artificial_pressure_q
+        self.artificial_pressure_reference = (
+            315.0
+            / (64.0 * np.pi * self.support_radius**3)
+            * (1.0 - q * q) ** 3
+        )
         self.hash_grid_query_span, self.hash_grid_dims = compute_hash_grid_dims(
             self.container_min, self.container_max, self.support_radius
         )
@@ -1171,6 +1270,13 @@ class Example:
         self._reorder_particle_ids = device_zeros(particle_count, int)
         self.corrections = device_zeros(particle_count, wp.vec3)
         self.acceleration = device_zeros(particle_count, wp.vec3)
+        vorticity_count = (
+            particle_count
+            if self.config.enable_vorticity_confinement
+            and self.config.vorticity_confinement > 0.0
+            else 1
+        )
+        self._vorticity = device_zeros(vorticity_count, wp.vec4)
         self.densities = device_zeros(particle_count, float)
         self.lambdas = device_zeros(particle_count, float)
         self.audit_maxima = device_zeros(3, float)
@@ -1318,6 +1424,12 @@ class Example:
                         self.fluid_volume,
                         self.fluid_mass,
                         self.support_radius,
+                        (
+                            config.artificial_pressure_strength
+                            if config.enable_artificial_pressure
+                            else 0.0
+                        ),
+                        self.artificial_pressure_reference,
                         dt,
                         int(config.two_way),
                         self.lambdas,
@@ -1332,7 +1444,8 @@ class Example:
                     device=device,
                 )
 
-            # 4. Reconstruct velocity and evaluate viscosity using the corrected density.
+            # 4. Reconstruct velocity, then accumulate viscosity and vorticity
+            # confinement before applying a single bounded velocity update.
             wp.launch(
                 reconstruct_velocity,
                 particle_count,
@@ -1383,6 +1496,36 @@ class Example:
                 ],
                 device=device,
             )
+            if config.enable_vorticity_confinement and config.vorticity_confinement > 0.0:
+                wp.launch(
+                    compute_vorticity,
+                    particle_count,
+                    [
+                        self.positions,
+                        self.velocities,
+                        self.neighbors,
+                        self.densities,
+                        self.fluid_volume,
+                        self.support_radius,
+                        self._vorticity,
+                    ],
+                    device=device,
+                )
+                wp.launch(
+                    add_vorticity_confinement,
+                    particle_count,
+                    [
+                        self.positions,
+                        self.neighbors,
+                        self.densities,
+                        self.fluid_volume,
+                        self.support_radius,
+                        config.vorticity_confinement,
+                        self._vorticity,
+                        self.acceleration,
+                    ],
+                    device=device,
+                )
             wp.launch(
                 apply_viscosity,
                 particle_count,

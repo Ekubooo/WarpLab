@@ -11,11 +11,20 @@ except ImportError:
     from PBF2WayCoupling import PBF2WayCouplingConfig
 
 
-def verify(path, steps, rendered=False, pressure_iterations=None):
-    config = (
-        PBF2WayCouplingConfig()
-        if pressure_iterations is None
-        else PBF2WayCouplingConfig(pressure_iterations=pressure_iterations)
+def verify(
+    path,
+    steps,
+    rendered=False,
+    pressure_iterations=None,
+    vorticity_confinement=True,
+):
+    config = PBF2WayCouplingConfig(
+        pressure_iterations=(
+            PBF2WayCouplingConfig.pressure_iterations
+            if pressure_iterations is None
+            else pressure_iterations
+        ),
+        enable_vorticity_confinement=vorticity_confinement,
     )
     with sqlite3.connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -38,6 +47,8 @@ def verify(path, steps, rendered=False, pressure_iterations=None):
         "predict": steps * config.substeps,
         "reorder_fluid": steps * config.substeps,
         "clamp_rigid_to_container": steps * config.substeps,
+        "compute_vorticity": steps * config.substeps if vorticity_confinement else 0,
+        "add_vorticity_confinement": steps * config.substeps if vorticity_confinement else 0,
         "pressure_correction": steps * config.substeps * config.pressure_iterations,
         "apply_correction": steps * config.substeps * config.pressure_iterations,
         "reconstruct_velocity": steps * config.substeps,
@@ -74,6 +85,18 @@ if __name__ == "__main__":
         "--pressure-iterations", type=int,
         help="Pressure iterations used in the trace; defaults to the current config",
     )
+    parser.add_argument(
+        "--vorticity-confinement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether the trace enabled vorticity confinement",
+    )
     args = parser.parse_args()
-    result = verify(args.sqlite, args.steps, args.render, args.pressure_iterations)
+    result = verify(
+        args.sqlite,
+        args.steps,
+        args.render,
+        args.pressure_iterations,
+        args.vorticity_confinement,
+    )
     print(json.dumps({k: v for k, v in result.items() if k != "kernels"}, indent=2))

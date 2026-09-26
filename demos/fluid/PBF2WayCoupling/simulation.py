@@ -64,6 +64,11 @@ def diagnostics(sim):
         particles=sim.num_particles,
         boundary_particles=len(boundary),
         hash_grid_dims=list(sim.hash_grid_dims),
+        artificial_pressure_enabled=sim.config.enable_artificial_pressure,
+        artificial_pressure_strength=sim.config.artificial_pressure_strength,
+        artificial_pressure_q=sim.config.artificial_pressure_q,
+        vorticity_confinement_enabled=sim.config.enable_vorticity_confinement,
+        vorticity_confinement=sim.config.vorticity_confinement,
         iterations=sim.iterations,
         density_error_percent=float(np.maximum(densities - 1.0, 0).mean() * 100),
         max_speed=float(np.linalg.norm(velocities, axis=1).max()),
@@ -105,12 +110,31 @@ def add_simulation_arguments(parser):
     parser.add_argument(
         "--one-way", action="store_true", help="Disable reaction forces for comparison"
     )
+    parser.add_argument(
+        "--artificial-pressure",
+        action=argparse.BooleanOptionalAction,
+        default=PBF2WayCouplingConfig.enable_artificial_pressure,
+        help=(
+            "Enable experimental PBF artificial pressure; disabled by default because the "
+            "solver clamps negative pressure"
+        ),
+    )
+    parser.add_argument(
+        "--vorticity-confinement",
+        action=argparse.BooleanOptionalAction,
+        default=PBF2WayCouplingConfig.enable_vorticity_confinement,
+        help="Enable vorticity confinement (use --no-vorticity-confinement to disable)",
+    )
     parser.add_argument("--verbose", action="store_true")
 
 
 def config_from_args(args):
     return PBF2WayCouplingConfig(
-        scene=args.scene, particle_radius=args.particle_radius, two_way=not args.one_way
+        scene=args.scene,
+        particle_radius=args.particle_radius,
+        two_way=not args.one_way,
+        enable_artificial_pressure=args.artificial_pressure,
+        enable_vorticity_confinement=args.vorticity_confinement,
     )
 
 

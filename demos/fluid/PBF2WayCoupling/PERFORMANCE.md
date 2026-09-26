@@ -1,5 +1,64 @@
 # PBF 双向耦合性能分析
 
+## PBF 人工压力与涡度补偿（2026-09-26）
+
+标准默认路径保留压缩型单边密度约束，不加入人工压力，与当前 SPlisHSPlasH 和 PositionBasedDynamics 的 PBF 实现一致。原论文形式的 `s_corr = -(strength h²)(W(r,h)/W(0.3h,h))⁴` 仍是必须显式设置 `enable_artificial_pressure=True` 或 CLI `--artificial-pressure` 才启用的实验路径；针对当前粒子体积、`h=4r` 和三轮压力迭代，经验强度由 `0.1` 降为 `0.001`。涡度补偿仍默认启用，也可用 `enable_vorticity_confinement` 或 `--no-vorticity-confinement` 独立关闭。双关闭时不计算 `s_corr`、不启动涡度 kernel，并只分配一个占位 `vec4`，物理路径恢复为加入两项补偿前的版本。诊断及 profile JSON 同时记录开关和系数，便于四组独立对照。
+
+独立开关加入后的首轮诊断使用 `r=0.05`、默认溃坝、0.1 秒/12 step：双关闭最大流速为 **0.9874 m/s**，仅涡度为 **0.9842 m/s**；仅人工压力为 **5.9996 m/s**，双开启为 **6.0000 m/s**，后两组已经触及 `max_speed=6`。默认 `r=0.025` 的补充对照同样明显：双关闭为 **1.4394 m/s**，仅人工压力为 **5.1226 m/s**。这组短程结果把当前异常的首要嫌疑指向人工压力的有效强度/尺度，而不是涡度补偿；它只是定位证据，不足以据此选定新系数。
+
+强度扫参使用 `r=0.025`、关闭涡度以隔离变量。将强度降至 `0.001` 后，0.1 秒最大速度为 **1.4287 m/s**，横向跨度为 `1.5015 m`，相对关闭人工压力的 `1.4936 m` 增加约 **0.53%**；不再触及速度上限。1 秒时，最近邻小于 `0.8×` 初始粒子间距的比例从关闭时的 **53.2%** 降至 **16.7%**，平均归一化密度从 `0.9757` 降至 `0.9525`。10 秒时该近邻比例从 **35.9%** 降至 **2.53%**，平均密度为 `0.9845`。`0.0003` 对密度影响更小但抑制过近粒子较弱；`0.003` 已出现更明显稀释，因此选择 `0.001` 作为实验默认强度。此标定只缓和当前公式，不消除无条件自由表面排斥的结构性限制。
+
+新强度下，显式开启人工压力的默认溃坝、浮沉和单向耦合三个场景以及 103,823 粒子溃坝均完成 10 秒，启用标记和 `0.001` 系数正确写入诊断；四组均保持有限状态、故障码0、无缓存溢出和流体越界。十万粒子运行平均为 **6.450 ms/step**。刚体接触不是本次调参目标：默认分辨率溃坝的历史最大刚体穿透在重复运行中达到 `0.055–0.115 m > r=0.025 m`，反映已有的离散接触和轨迹敏感性，因此这些结果不能视为刚体接触精度验收。结果位于 `outputs/pbf2way/artificial-pressure-low-strength/`。
+
+```powershell
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --artificial-pressure --seconds 10 --diagnostic-interval 10 --output outputs/pbf2way/artificial-pressure-low-strength/acceptance/dam-break
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --scene floating-equilibrium --artificial-pressure --seconds 10 --diagnostic-interval 10 --output outputs/pbf2way/artificial-pressure-low-strength/acceptance/floating
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --scene floating-equilibrium --one-way --artificial-pressure --seconds 10 --diagnostic-interval 10 --output outputs/pbf2way/artificial-pressure-low-strength/acceptance/one-way
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.015625 --artificial-pressure --seconds 10 --diagnostic-interval 10 --output outputs/pbf2way/artificial-pressure-low-strength/100k/dam-break
+```
+
+默认关闭后的验收已完成：39 项 CPU/CUDA/隐藏窗口测试全部通过；三个默认十秒场景均无 NaN、缓存溢出或越界。`r=0.015625` 的 103,823 个流体粒子、163,732 个边界点也完成十秒运行，最终平均 **5.763 ms/step**，同样没有 NaN、缓存溢出或越界。短程 nsys 采集 12 step / 36 子步：
+
+| 模式 | `compute_vorticity` | `add_vorticity_confinement` | GPU→CPU |
+| --- | ---: | ---: | ---: |
+| 默认（人工压力关、涡度开） | 36 | 36 | 0 |
+| 双关闭 | 0 | 0 | 0 |
+
+默认与 profile JSON 都记录 `artificial_pressure_enabled=false`、`vorticity_confinement_enabled=true`；双关闭记录两个开关均为 `false`。历史 `0.1` 强度的 **5.1226 m/s** 异常速度保留为重新标定依据；新的显式实验模式使用 `0.001`，仍没有被误作稳定默认实现。
+
+新的默认关闭结果位于 `outputs/pbf2way/artificial-pressure-default-off/`。复现：
+
+```powershell
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_coupling demos.fluid.PBF2WayCoupling.test_wall_clamp demos.fluid.PBF2WayCoupling.test_rendering -q
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --device cuda:0 --output outputs/pbf2way/artificial-pressure-default-off/acceptance
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.015625 --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/artificial-pressure-default-off/100k/dam-break
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-default-off/nsys/default-short --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.05 --warmup-seconds 0.1 --steps 12 --capture --output outputs/pbf2way/artificial-pressure-default-off/nsys/default-short.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/artificial-pressure-default-off/nsys/default-short.sqlite --steps 12
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.05 --no-artificial-pressure --no-vorticity-confinement --warmup-seconds 0.1 --steps 12 --capture --output outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short.sqlite --steps 12 --no-vorticity-confinement
+```
+
+以下性能是人工压力仍默认开启时留下的**实验模式历史记录**，不代表新的标准默认路径。RTX 5070 / Warp 1.15.0，103,823 个流体粒子、163,732 个边界点，预热到8秒后用nsys采集8–9秒的120 step / 360子步。与加入补偿前的 `outputs/pbf2way/hash-auto/late-100k` 对比：
+
+| kernel | 修改前单次 | 修改后单次 | 变化 |
+| --- | ---: | ---: | ---: |
+| `pressure_correction` | 121.36 μs | 134.08 μs | +10.5% |
+| `compute_vorticity` | — | 94.71 μs | 新增 |
+| `add_vorticity_confinement` | — | 79.13 μs | 新增 |
+
+两个涡度 kernel 合计 **0.1738 ms/子步**，按三个子步约为 **0.522 ms/step**。本次 nsys 窗口平均为 `1.970 ms/子步`、`5.909 ms/step`；修改前窗口为 `1.873 ms/子步`、`5.619 ms/step`，但两次轨迹及 profiler 抖动不同，端到端差值只作参考。无 profiler 的十万粒子十秒运行平均为 **6.014 ms/step**。验证器确认 360 个子步各有一次 `compute_vorticity` 和 `add_vorticity_confinement`，压力调用为 1080 次，GPU→CPU 复制仍为 **0**。
+
+实验模式下三个场景、十万粒子及 `r=0.0075` 曾完成十秒运行，无 NaN、缓存溢出或越界；这些结果只说明数值没有崩溃，不能证明人工压力行为正确。
+
+原始结果位于 `outputs/pbf2way/artificial-pressure-vorticity/`。复现：
+
+```powershell
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_coupling demos.fluid.PBF2WayCoupling.test_wall_clamp demos.fluid.PBF2WayCoupling.test_rendering -q
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.0075 --artificial-pressure --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/artificial-pressure-vorticity/r0075/dam-break
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --artificial-pressure --warmup-seconds 8 --steps 120 --capture --output outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.sqlite --steps 120
+```
+
 ## CLI 粒径驱动的 HashGrid 自动配置（2026-09-16）
 
 删除固定 `128×160×128` 后，两张 HashGrid 在每次启动时根据本次 `particle_radius`、`support_radius=4r` 和 `container ± support_radius` 独立计算。每轴取严格大于查询跨度的最小 2 次幂；Warp 的实现使用普通取模并不要求 2 次幂，这只是容量冗余策略。默认场景实测映射为：

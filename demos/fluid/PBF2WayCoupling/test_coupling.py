@@ -1,5 +1,6 @@
 """Independent formula and rigid-body checks; CPU by default, CUDA parity if available."""
 
+import argparse
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -13,7 +14,7 @@ import warp as wp
 from . import PBF2WayCoupling as solver
 from . import coupling_initialization as init
 from . import coupling_functions as fn
-from .simulation import diagnostics
+from .simulation import add_simulation_arguments, config_from_args, diagnostics
 
 
 @wp.kernel
@@ -43,6 +44,10 @@ def w(r, h):
 def grad(x, h):
     r = np.linalg.norm(x)
     return -45 / (np.pi * h**6) * (h - r) ** 2 * x / r if 1e-9 < r < h else np.zeros(3)
+
+
+def artificial_pressure(r, h, strength=0.001, q=0.3):
+    return -strength * h * h * (w(r, h) / w(q * h, h)) ** 4
 
 
 class CouplingTest(unittest.TestCase):
@@ -174,6 +179,47 @@ class CouplingTest(unittest.TestCase):
                 sum(call.args[0] is solver.pressure_correction for call in launches.call_args_list),
                 9,
             )
+            default_pressure_calls = [
+                call
+                for call in launches.call_args_list
+                if call.args[0] is solver.pressure_correction
+            ]
+            self.assertTrue(all(call.args[2][7] == 0.0 for call in default_pressure_calls))
+            self.assertEqual(
+                sum(call.args[0] is solver.compute_vorticity for call in launches.call_args_list),
+                3,
+            )
+            self.assertEqual(
+                sum(
+                    call.args[0] is solver.add_vorticity_confinement
+                    for call in launches.call_args_list
+                ),
+                3,
+            )
+            first_launch = {
+                kernel: next(
+                    index
+                    for index, call in enumerate(launches.call_args_list)
+                    if call.args[0] is kernel
+                )
+                for kernel in (
+                    solver.viscosity,
+                    solver.compute_vorticity,
+                    solver.add_vorticity_confinement,
+                    solver.apply_viscosity,
+                    solver.integrate_rigid,
+                )
+            }
+            self.assertLess(first_launch[solver.viscosity], first_launch[solver.compute_vorticity])
+            self.assertLess(
+                first_launch[solver.compute_vorticity],
+                first_launch[solver.add_vorticity_confinement],
+            )
+            self.assertLess(
+                first_launch[solver.add_vorticity_confinement],
+                first_launch[solver.apply_viscosity],
+            )
+            self.assertLess(first_launch[solver.apply_viscosity], first_launch[solver.integrate_rigid])
             self.assertEqual(
                 sum(call.args[0] is solver.solve_contacts for call in launches.call_args_list), 3
             )
@@ -212,6 +258,87 @@ class CouplingTest(unittest.TestCase):
         self.assertEqual(s.total_substeps, 360)
         self.assertEqual(s.current_dt, 1 / 120)
         self.assertEqual(s.substep_dt, 1 / 360)
+
+        disabled = self.make(
+            enable_artificial_pressure=False,
+            enable_vorticity_confinement=False,
+        )
+        with patch.object(wp, "launch", wraps=wp.launch) as launches:
+            disabled.step()
+        self.assertFalse(
+            any(
+                call.args[0] in (solver.compute_vorticity, solver.add_vorticity_confinement)
+                for call in launches.call_args_list
+            )
+        )
+        pressure_calls = [
+            call for call in launches.call_args_list
+            if call.args[0] is solver.pressure_correction
+        ]
+        self.assertTrue(pressure_calls)
+        self.assertTrue(all(call.args[2][7] == 0.0 for call in pressure_calls))
+        self.assertEqual(disabled._vorticity.shape[0], 1)
+
+        coefficient_disabled = self.make(
+            artificial_pressure_strength=0.0,
+            vorticity_confinement=0.0,
+        )
+        coefficient_disabled.step()
+        legacy_strength_disabled = self.make(
+            enable_artificial_pressure=False,
+            artificial_pressure_strength=0.1,
+            enable_vorticity_confinement=False,
+        )
+        legacy_strength_disabled.step()
+        for comparison in (coefficient_disabled, legacy_strength_disabled):
+            for left, right in (
+                (disabled.positions, comparison.positions),
+                (disabled.velocities, comparison.velocities),
+                (disabled.rigid.position, comparison.rigid.position),
+                (disabled.rigid.velocity, comparison.rigid.velocity),
+            ):
+                np.testing.assert_array_equal(left.numpy(), right.numpy())
+
+        experimental = self.make(
+            enable_artificial_pressure=True,
+            enable_vorticity_confinement=False,
+        )
+        with patch.object(wp, "launch", wraps=wp.launch) as launches:
+            experimental.step()
+        experimental_pressure_calls = [
+            call
+            for call in launches.call_args_list
+            if call.args[0] is solver.pressure_correction
+        ]
+        self.assertTrue(
+            all(
+                call.args[2][7] == self.config.artificial_pressure_strength
+                for call in experimental_pressure_calls
+            )
+        )
+
+    def test_cli_compensation_switches_are_independent(self):
+        parser = argparse.ArgumentParser(add_help=False)
+        add_simulation_arguments(parser)
+        cases = (
+            ([], False, True),
+            (["--no-artificial-pressure"], False, True),
+            (["--no-vorticity-confinement"], False, False),
+            (["--no-artificial-pressure", "--no-vorticity-confinement"], False, False),
+            (["--artificial-pressure", "--vorticity-confinement"], True, True),
+            (["--artificial-pressure", "--no-vorticity-confinement"], True, False),
+        )
+        for arguments, artificial_pressure_enabled, vorticity_enabled in cases:
+            with self.subTest(arguments=arguments):
+                config = config_from_args(parser.parse_args(arguments))
+                self.assertEqual(
+                    config.enable_artificial_pressure,
+                    artificial_pressure_enabled,
+                )
+                self.assertEqual(
+                    config.enable_vorticity_confinement,
+                    vorticity_enabled,
+                )
 
     def test_hash_order_reorders_persistent_state_and_inverse_map(self):
         devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
@@ -534,16 +661,30 @@ class CouplingTest(unittest.TestCase):
         np.testing.assert_allclose(s.lambdas.numpy(), lambdas, rtol=3e-5, atol=1e-8)
         self.assertGreater(max(densities), 1.05)
         correction = np.zeros_like(x)
+        legacy_correction = np.zeros_like(x)
         forces, torques = np.zeros((2, 3)), np.zeros((2, 3))
         bodies = s.boundary.body.numpy()
         centers = s.rigid.position.numpy()
         for i, xi in enumerate(x):
             for j in np.flatnonzero(np.linalg.norm(x - xi, axis=1) < h):
                 if i != j:
-                    correction[i] += (lambdas[i] + lambdas[j]) * volume * grad(xi - x[j], h)
+                    distance = np.linalg.norm(xi - x[j])
+                    s_corr = artificial_pressure(
+                        distance,
+                        h,
+                        s.config.artificial_pressure_strength,
+                        s.config.artificial_pressure_q,
+                    )
+                    correction[i] += (
+                        lambdas[i] + lambdas[j] + s_corr
+                    ) * volume * grad(xi - x[j], h)
+                    legacy_correction[i] += (
+                        lambdas[i] + lambdas[j]
+                    ) * volume * grad(xi - x[j], h)
             for j in np.flatnonzero(np.linalg.norm(bx - xi, axis=1) < h):
                 dx = lambdas[i] * bv[j] * grad(xi - bx[j], h)
                 correction[i] += dx
+                legacy_correction[i] += dx
                 b = bodies[j]
                 if b == 1:
                     force = -mass * dx / s.substep_dt**2
@@ -560,6 +701,8 @@ class CouplingTest(unittest.TestCase):
                 volume,
                 mass,
                 h,
+                s.config.artificial_pressure_strength,
+                s.artificial_pressure_reference,
                 s.substep_dt,
                 1,
                 s.lambdas,
@@ -568,6 +711,32 @@ class CouplingTest(unittest.TestCase):
             device=s.device,
         )
         np.testing.assert_allclose(s.corrections.numpy(), correction, rtol=2e-4, atol=1e-7)
+        np.testing.assert_allclose(s.rigid.force.numpy(), forces, rtol=1e-4, atol=0.1)
+        np.testing.assert_allclose(s.rigid.torque.numpy(), torques, rtol=1e-4, atol=0.02)
+
+        s.rigid.force.zero_()
+        s.rigid.torque.zero_()
+        wp.launch(
+            solver.pressure_correction,
+            s.num_particles,
+            [
+                s.positions,
+                s.boundary,
+                s.rigid,
+                s.neighbors,
+                volume,
+                mass,
+                h,
+                0.0,
+                s.artificial_pressure_reference,
+                s.substep_dt,
+                1,
+                s.lambdas,
+                s.corrections,
+            ],
+            device=s.device,
+        )
+        np.testing.assert_allclose(s.corrections.numpy(), legacy_correction, rtol=2e-4, atol=1e-7)
         np.testing.assert_allclose(s.rigid.force.numpy(), forces, rtol=1e-4, atol=0.1)
         np.testing.assert_allclose(s.rigid.torque.numpy(), torques, rtol=1e-4, atol=0.02)
 
@@ -623,6 +792,8 @@ class CouplingTest(unittest.TestCase):
                 s.fluid_volume,
                 s.fluid_mass,
                 s.support_radius,
+                s.config.artificial_pressure_strength,
+                s.artificial_pressure_reference,
                 0.002,
                 1,
                 s.lambdas,
@@ -648,6 +819,164 @@ class CouplingTest(unittest.TestCase):
         self.assertGreater(s.rigid.velocity.numpy()[1, 0], 0)
         self.assertGreater(s.rigid.omega.numpy()[1, 1], 0)
         np.testing.assert_allclose(np.linalg.norm(s.rigid.rotation.numpy(), axis=1), 1, atol=1e-7)
+
+    def test_artificial_pressure_scaling_and_disable(self):
+        for h in (0.1, 0.03):
+            with self.subTest(h=h):
+                self.assertAlmostEqual(artificial_pressure(0.3 * h, h) / (h * h), -0.001)
+                self.assertAlmostEqual(
+                    artificial_pressure(0.3 * h, h, strength=0.1) / (h * h),
+                    -0.1,
+                )
+                self.assertLess(artificial_pressure(0.15 * h, h), artificial_pressure(0.3 * h, h))
+                self.assertEqual(artificial_pressure(h, h), 0.0)
+                self.assertEqual(artificial_pressure(0.3 * h, h, strength=0.0), 0.0)
+        s = self.make()
+        self.assertAlmostEqual(
+            s.artificial_pressure_reference,
+            w(s.config.artificial_pressure_q * s.support_radius, s.support_radius),
+        )
+
+    def test_vorticity_confinement_against_numpy(self):
+        simulations = [self.make()]
+        if wp.is_cuda_available():
+            simulations.append(solver.Example(self.config, device="cuda:0"))
+        reference_vorticity = None
+        reference_acceleration = None
+        for s in simulations:
+            with self.subTest(device=str(s.device)):
+                # Reuse exactly the same velocity field for CPU and CUDA.
+                rng = np.random.default_rng(17)
+                velocities = rng.normal(0.0, 0.3, (s.num_particles, 3)).astype(np.float32)
+                s.velocities.assign(velocities)
+                self.search(s)
+                wp.launch(
+                    solver.density_lambda,
+                    s.num_particles,
+                    [
+                        s.positions,
+                        s.boundary,
+                        s.neighbors,
+                        s.fluid_volume,
+                        s.support_radius,
+                        s.densities,
+                        s.lambdas,
+                    ],
+                    device=s.device,
+                )
+                s.acceleration.zero_()
+                wp.launch(
+                    solver.compute_vorticity,
+                    s.num_particles,
+                    [
+                        s.positions,
+                        s.velocities,
+                        s.neighbors,
+                        s.densities,
+                        s.fluid_volume,
+                        s.support_radius,
+                        s._vorticity,
+                    ],
+                    device=s.device,
+                )
+                wp.launch(
+                    solver.add_vorticity_confinement,
+                    s.num_particles,
+                    [
+                        s.positions,
+                        s.neighbors,
+                        s.densities,
+                        s.fluid_volume,
+                        s.support_radius,
+                        s.config.vorticity_confinement,
+                        s._vorticity,
+                        s.acceleration,
+                    ],
+                    device=s.device,
+                )
+
+                x = s.positions.numpy().astype(float)
+                density = s.densities.numpy().astype(float)
+                omega = np.zeros_like(x)
+                for i, xi in enumerate(x):
+                    for j in np.flatnonzero(np.linalg.norm(x - xi, axis=1) < s.support_radius):
+                        if i != j:
+                            omega[i] += (
+                                s.fluid_volume
+                                / max(density[j], 1e-6)
+                                * np.cross(velocities[i] - velocities[j], grad(xi - x[j], s.support_radius))
+                            )
+                magnitudes = np.linalg.norm(omega, axis=1)
+                expected_acceleration = np.zeros_like(x)
+                for i, xi in enumerate(x):
+                    eta = np.zeros(3)
+                    for j in np.flatnonzero(np.linalg.norm(x - xi, axis=1) < s.support_radius):
+                        if i != j:
+                            eta += (
+                                s.fluid_volume
+                                / max(density[j], 1e-6)
+                                * (magnitudes[j] - magnitudes[i])
+                                * grad(xi - x[j], s.support_radius)
+                            )
+                    eta_length = np.linalg.norm(eta)
+                    if eta_length > 1e-8:
+                        expected_acceleration[i] = s.config.vorticity_confinement * np.cross(
+                            eta / eta_length, omega[i]
+                        )
+                np.testing.assert_allclose(
+                    s._vorticity.numpy()[:, :3], omega, rtol=2e-5, atol=2e-5
+                )
+                np.testing.assert_allclose(
+                    s.acceleration.numpy(), expected_acceleration, rtol=3e-5, atol=3e-5
+                )
+                self.assertGreater(np.linalg.norm(expected_acceleration), 0.0)
+                np.testing.assert_array_equal(s.rigid.force.numpy(), np.zeros((2, 3)))
+
+                seeded_acceleration = np.full((s.num_particles, 3), 0.125, dtype=np.float32)
+                s.acceleration.assign(seeded_acceleration)
+                wp.launch(
+                    solver.add_vorticity_confinement,
+                    s.num_particles,
+                    [
+                        s.positions,
+                        s.neighbors,
+                        s.densities,
+                        s.fluid_volume,
+                        s.support_radius,
+                        0.0,
+                        s._vorticity,
+                        s.acceleration,
+                    ],
+                    device=s.device,
+                )
+                np.testing.assert_array_equal(s.acceleration.numpy(), seeded_acceleration)
+                if reference_vorticity is None:
+                    reference_vorticity = s._vorticity.numpy().copy()
+                    reference_acceleration = s.acceleration.numpy().copy()
+                else:
+                    np.testing.assert_allclose(s._vorticity.numpy(), reference_vorticity, atol=2e-5)
+                    np.testing.assert_allclose(
+                        s.acceleration.numpy(), reference_acceleration, atol=3e-5
+                    )
+
+                uniform = np.tile([0.2, -0.1, 0.3], (s.num_particles, 1)).astype(np.float32)
+                s.velocities.assign(uniform)
+                s.acceleration.zero_()
+                wp.launch(
+                    solver.compute_vorticity,
+                    s.num_particles,
+                    [
+                        s.positions,
+                        s.velocities,
+                        s.neighbors,
+                        s.densities,
+                        s.fluid_volume,
+                        s.support_radius,
+                        s._vorticity,
+                    ],
+                    device=s.device,
+                )
+                np.testing.assert_array_equal(s._vorticity.numpy(), 0.0)
 
     def test_rigid_container_clamp_is_rotation_aware_and_position_only(self):
         simulations = [self.make()]
@@ -935,6 +1264,12 @@ class CouplingTest(unittest.TestCase):
             {"particle_radius": 0},
             {"gravity": (0, float("nan"), 0)},
             {"viscosity": -1},
+            {"enable_artificial_pressure": 1},
+            {"artificial_pressure_strength": -1},
+            {"artificial_pressure_q": 0},
+            {"artificial_pressure_q": 1},
+            {"vorticity_confinement": -1},
+            {"enable_vorticity_confinement": "yes"},
             {"frame_dt": 0},
             {"substeps": 0},
             {"substeps": 4},

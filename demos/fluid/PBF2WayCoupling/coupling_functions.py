@@ -71,6 +71,19 @@ def spiky_gradient(x: wp.vec3, h: float):
 
 
 @wp.func
+def artificial_pressure(
+    distance: float,
+    h: float,
+    strength: float,
+    reference_weight: float,
+):
+    """Resolution-scaled PBF tensile correction with the paper's fixed n=4."""
+    ratio = poly6(distance, h) / reference_weight
+    ratio_squared = ratio * ratio
+    return -strength * h * h * ratio_squared * ratio_squared
+
+
+@wp.func
 def world_inverse_inertia(q: wp.quat, inertia: wp.mat33):
     rotation = wp.quat_to_matrix(q)
     return rotation * inertia * wp.transpose(rotation)
