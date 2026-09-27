@@ -10,9 +10,13 @@ import numpy as np
 import warp as wp
 
 try:
-    from .simulation import add_simulation_arguments, config_from_args, create_pbf2way_simulation
+    from ..simulation import add_simulation_arguments, config_from_args, create_pbf2way_simulation
 except ImportError:
-    from simulation import add_simulation_arguments, config_from_args, create_pbf2way_simulation
+    from demos.fluid.PBF2WayCoupling.simulation import (
+        add_simulation_arguments,
+        config_from_args,
+        create_pbf2way_simulation,
+    )
 
 
 def main():

@@ -11,10 +11,10 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from . import PBF2WayCoupling as solver
-from . import coupling_initialization as init
-from . import coupling_functions as fn
-from .simulation import add_simulation_arguments, config_from_args, diagnostics
+from .. import PBF2WayCoupling as solver
+from .. import coupling_initialization as init
+from .. import coupling_functions as fn
+from ..simulation import add_simulation_arguments, config_from_args, diagnostics
 
 
 @wp.kernel

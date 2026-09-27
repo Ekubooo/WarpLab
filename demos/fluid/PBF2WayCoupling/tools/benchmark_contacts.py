@@ -1,6 +1,6 @@
 """Time old/new contact sweeps on one frozen scene state, including precomputation.
 
-Run with python -m demos.fluid.PBF2WayCoupling.benchmark_contacts.
+Run with python -m demos.fluid.PBF2WayCoupling.tools.benchmark_contacts.
 This explicit diagnostic reads arrays and uses a test-only copy of the old solver.
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
-from .PBF2WayCoupling import (
+from ..PBF2WayCoupling import (
     CONTACT_MANIFOLD_POINTS,
     Example,
     compact_contact_manifolds,
@@ -22,7 +22,7 @@ from .PBF2WayCoupling import (
     score_contact_manifold_slot,
     solve_contacts,
 )
-from .test_contact_reference import reference_contact_sweep
+from ..tests.test_contact_reference import reference_contact_sweep
 
 
 def main():

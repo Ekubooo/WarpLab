@@ -1,6 +1,6 @@
 """Optional hidden-window GL checks; requires an NVIDIA CUDA/OpenGL device.
 
-Run explicitly with: python -m unittest demos.fluid.PBF2WayCoupling.test_rendering -v
+Run explicitly with: python -m unittest demos.fluid.PBF2WayCoupling.tests.test_rendering -v
 """
 
 from pathlib import Path
@@ -10,8 +10,8 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from .simulation import create_pbf2way_simulation
-from .render_opengl import (
+from ..simulation import create_pbf2way_simulation
+from ..render_opengl import (
     CouplingRenderer,
     register_keyboard_controls,
     reverse_gravity,
@@ -19,7 +19,7 @@ from .render_opengl import (
     advance_and_render,
     pace_frame,
 )
-from .PBF2WayCoupling import PBF2WayCouplingConfig
+from ..PBF2WayCoupling import PBF2WayCouplingConfig
 
 
 class RenderingTest(unittest.TestCase):
@@ -74,7 +74,7 @@ class RenderingTest(unittest.TestCase):
         simulation = create_pbf2way_simulation(device="cuda:0")
         renderer = CouplingRenderer(device=simulation.device, hidden=True)
         simulation.renderer = renderer
-        output = Path(__file__).resolve().parents[3] / "outputs/pbf2way/render-check"
+        output = Path(__file__).resolve().parents[4] / "outputs/pbf2way/render-check"
         output.mkdir(parents=True, exist_ok=True)
         try:
             renderer.update_rigid_scene(simulation)

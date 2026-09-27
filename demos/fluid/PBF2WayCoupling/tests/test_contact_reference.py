@@ -1,8 +1,8 @@
 """Original sequential contact sweep, retained only for equivalence tests/benchmarks."""
 
 import warp as wp
-from .PBF2WayCoupling import RigidState, Contacts
-from . import coupling_functions as fn
+from ..PBF2WayCoupling import RigidState, Contacts
+from .. import coupling_functions as fn
 
 
 @wp.kernel

@@ -29,13 +29,13 @@
 新的默认关闭结果位于 `outputs/pbf2way/artificial-pressure-default-off/`。复现：
 
 ```powershell
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_coupling demos.fluid.PBF2WayCoupling.test_wall_clamp demos.fluid.PBF2WayCoupling.test_rendering -q
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --device cuda:0 --output outputs/pbf2way/artificial-pressure-default-off/acceptance
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_wall_clamp demos.fluid.PBF2WayCoupling.tests.test_rendering -q
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --device cuda:0 --output outputs/pbf2way/artificial-pressure-default-off/acceptance
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.015625 --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/artificial-pressure-default-off/100k/dam-break
-nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-default-off/nsys/default-short --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.05 --warmup-seconds 0.1 --steps 12 --capture --output outputs/pbf2way/artificial-pressure-default-off/nsys/default-short.json
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/artificial-pressure-default-off/nsys/default-short.sqlite --steps 12
-nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.05 --no-artificial-pressure --no-vorticity-confinement --warmup-seconds 0.1 --steps 12 --capture --output outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short.json
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short.sqlite --steps 12 --no-vorticity-confinement
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-default-off/nsys/default-short --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.05 --warmup-seconds 0.1 --steps 12 --capture --output outputs/pbf2way/artificial-pressure-default-off/nsys/default-short.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/artificial-pressure-default-off/nsys/default-short.sqlite --steps 12
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.05 --no-artificial-pressure --no-vorticity-confinement --warmup-seconds 0.1 --steps 12 --capture --output outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/artificial-pressure-default-off/nsys/all-off-short.sqlite --steps 12 --no-vorticity-confinement
 ```
 
 以下性能是人工压力仍默认开启时留下的**实验模式历史记录**，不代表新的标准默认路径。RTX 5070 / Warp 1.15.0，103,823 个流体粒子、163,732 个边界点，预热到8秒后用nsys采集8–9秒的120 step / 360子步。与加入补偿前的 `outputs/pbf2way/hash-auto/late-100k` 对比：
@@ -53,10 +53,10 @@ nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cud
 原始结果位于 `outputs/pbf2way/artificial-pressure-vorticity/`。复现：
 
 ```powershell
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_coupling demos.fluid.PBF2WayCoupling.test_wall_clamp demos.fluid.PBF2WayCoupling.test_rendering -q
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_wall_clamp demos.fluid.PBF2WayCoupling.tests.test_rendering -q
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.0075 --artificial-pressure --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/artificial-pressure-vorticity/r0075/dam-break
-nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --artificial-pressure --warmup-seconds 8 --steps 120 --capture --output outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.json
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.sqlite --steps 120
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.015625 --artificial-pressure --warmup-seconds 8 --steps 120 --capture --output outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.sqlite --steps 120
 ```
 
 ## CLI 粒径驱动的 HashGrid 自动配置（2026-09-16）
@@ -76,8 +76,8 @@ RTX 5070 / Warp 1.15.0 的 10 万粒子稳定阶段 nsys（8–9 秒、360 子�
 原始结果位于 `outputs/pbf2way/hash-auto/`。诊断和 profile JSON 现在输出 `hash_grid_dims`；CUDA 分配前还会检查总桶数的 32 位索引范围和估算显存预算。复现稳定阶段采集：
 
 ```powershell
-nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/hash-auto/late-100k --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 8 --steps 120 --capture --output outputs/pbf2way/hash-auto/late-100k.json
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/hash-auto/late-100k.sqlite --steps 120
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/hash-auto/late-100k --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 8 --steps 120 --capture --output outputs/pbf2way/hash-auto/late-100k.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/hash-auto/late-100k.sqlite --steps 120
 ```
 
 ## 刚体接触流形压缩（2026-09-16）
@@ -101,15 +101,15 @@ RTX 5070 / Warp 1.15.0，103,823 个流体粒子、163,732 个边界点，预热
 原始文件位于 `outputs/pbf2way/contact-manifold/parallel-greedy-late-100k*`、`acceptance/` 和 `100k/high-precision-key.*`。复现：
 
 ```powershell
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --device cuda:0 --output outputs/pbf2way/contact-manifold/acceptance
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --device cuda:0 --output outputs/pbf2way/contact-manifold/acceptance
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.015625 --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/contact-manifold/100k/dam-break
-nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/contact-manifold/parallel-greedy-late-100k --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 8 --steps 60 --capture --output outputs/pbf2way/contact-manifold/parallel-greedy-late-100k.json
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/contact-manifold/parallel-greedy-late-100k --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 8 --steps 60 --capture --output outputs/pbf2way/contact-manifold/parallel-greedy-late-100k.json
 ```
 
 ncu 仍因当前进程没有 GPU performance counter 权限返回 `ERR_NVGPUCTRPERM`。授权后可复现：
 
 ```powershell
-& 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(score_contact_manifold_slot|solve_contacts).*' --launch-count 3 --set basic --clock-control none --force-overwrite --export outputs/pbf2way/contact-manifold/parallel-greedy-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/contact-manifold/ncu-profile.json
+& 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(score_contact_manifold_slot|solve_contacts).*' --launch-count 3 --set basic --clock-control none --force-overwrite --export outputs/pbf2way/contact-manifold/parallel-greedy-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.015625 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/contact-manifold/ncu-profile.json
 ```
 
 ## 历史：固定哈希扩容与流体属性重排（2026-09-16）
@@ -131,15 +131,15 @@ RTX 5070 / Warp 1.15.0，默认溃坝预热 3 秒后各测 270 step，四次无 
 原始结果位于 `outputs/pbf2way/hash-reorder/`。复现命令：
 
 ```powershell
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --output outputs/pbf2way/hash-reorder/acceptance
-nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/hash-reorder/headless --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 90 --capture --output outputs/pbf2way/hash-reorder/profile.json
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/hash-reorder/headless.sqlite --steps 90
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --output outputs/pbf2way/hash-reorder/acceptance
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/hash-reorder/headless --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 90 --capture --output outputs/pbf2way/hash-reorder/profile.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/hash-reorder/headless.sqlite --steps 90
 ```
 
 ncu 在当前非管理员进程中仍返回 `ERR_NVGPUCTRPERM`。启用 NVIDIA performance counter 权限后，在管理员 PowerShell 中执行下列命令可采集重排、邻居、密度和压力的前四次匹配调用：
 
 ```powershell
-& 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(reorder_fluid|cache_neighbors|density_lambda|pressure_correction).*' --launch-count 4 --set full --clock-control none --force-overwrite --export outputs/pbf2way/hash-reorder/core-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/hash-reorder/ncu-profile.json
+& 'C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.1\target\windows-desktop-win7-x64\ncu.exe' --profile-from-start off --kernel-name-base function --kernel-name 'regex:^(reorder_fluid|cache_neighbors|density_lambda|pressure_correction).*' --launch-count 4 --set full --clock-control none --force-overwrite --export outputs/pbf2way/hash-reorder/core-kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/hash-reorder/ncu-profile.json
 ```
 
 ### 邻居数组转置
@@ -189,12 +189,12 @@ RTX 5070、Warp 1.15.0，十秒仿真共 600 step / 1800 子步，耗时 **13.64
 复现：
 
 ```powershell
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_wall_clamp demos.fluid.PBF2WayCoupling.test_coupling demos.fluid.PBF2WayCoupling.test_rendering -q
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --interactions --output outputs/pbf2way/wall-clamp/acceptance
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 0 --steps 600 --output outputs/pbf2way/wall-clamp/after.json
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_wall_clamp demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_rendering -q
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --interactions --output outputs/pbf2way/wall-clamp/acceptance
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 0 --steps 600 --output outputs/pbf2way/wall-clamp/after.json
 
-nsys profile --trace=cuda --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/wall-clamp/rendered --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 60 --render --capture --output outputs/pbf2way/wall-clamp/rendered_profile.json
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/wall-clamp/rendered.sqlite --steps 60 --render
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/wall-clamp/rendered --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 60 --render --capture --output outputs/pbf2way/wall-clamp/rendered_profile.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/wall-clamp/rendered.sqlite --steps 60 --render
 ```
 
 无窗口 trace 去掉两个命令中的 `--render`，并将输出名改为 `headless`。原始日志、JSON、nsys 和 SQLite 保存在忽略目录 `outputs/pbf2way/wall-clamp/`。下方保留钳制加入前的测量作为历史对照。
@@ -263,20 +263,20 @@ nsys 采集期间分别为 5.24 ms/step、8.11 ms/step+render；无 profiler 的
 
 ```powershell
 # 无 profiler；--steps 是完整 step 数，--render 可省略
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 60 --render --output outputs/pbf2way/fixed-step/rendered_baseline.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 60 --render --output outputs/pbf2way/fixed-step/rendered_baseline.json
 
 # nsys：正常仿真 + 每步一帧；无窗口采集时去掉 --render 并更换输出名
-nsys profile --trace=cuda --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/fixed-step/rendered --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 60 --render --capture --output outputs/pbf2way/fixed-step/rendered_profile.json
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/fixed-step/rendered --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 60 --render --capture --output outputs/pbf2way/fixed-step/rendered_profile.json
 
 # 核对复制与调用数；无窗口验证去掉 --render
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.verify_profile outputs/pbf2way/fixed-step/rendered.sqlite --steps 60 --render
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/fixed-step/rendered.sqlite --steps 60 --render
 
 # 同一状态比较原接触公式与优化结果、计时
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.benchmark_contacts --output outputs/pbf2way/fixed-step/contact_benchmark.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.benchmark_contacts --output outputs/pbf2way/fixed-step/contact_benchmark.json
 
 # 数值/调度/GL，以及三个十秒场景
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_coupling demos.fluid.PBF2WayCoupling.test_rendering -q
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --output outputs/pbf2way/fixed-step/acceptance
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_rendering -q
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --output outputs/pbf2way/fixed-step/acceptance
 ```
 
 原始 `.nsys-rep`、SQLite、`*.verified.json`、测试日志及阶段计时均在忽略目录 `outputs/pbf2way/fixed-step/`。复现会因原子顺序产生不同接触数量，应以重新采集的结果为准。
@@ -420,10 +420,10 @@ render 调用是 CPU 范围计时，可能包含提交、同步与呈现；它�
 
 ```powershell
 # 不开 profiler 的基线
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 200 --output outputs/pbf2way/profiling/late_baseline.json
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 200 --output outputs/pbf2way/profiling/late_baseline.json
 
 # nsys：预热完毕后才采集
-nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/profiling/late --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 200 --capture --output outputs/pbf2way/profiling/late_profile.json
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/profiling/late --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 200 --capture --output outputs/pbf2way/profiling/late_profile.json
 
 nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum --format csv --output outputs/pbf2way/profiling/late_stats outputs/pbf2way/profiling/late.sqlite
 ```
@@ -442,10 +442,10 @@ nsys profile --trace=cuda --sample=none --cpuctxsw=none --capture-range=cudaProf
 ```powershell
 # 管理员终端；直接调用 exe，避免 ncu.bat 将正则的 | 当作 shell 管道。
 $ncuExe = 'C:/Program Files/NVIDIA Corporation/Nsight Compute 2025.1.1/target/windows-desktop-win7-x64/ncu.exe'
-& $ncuExe --profile-from-start off --kernel-name 'regex:^(cache_neighbors|density_lambda|pressure_correction).*' --launch-count 3 --set full --clock-control none --force-overwrite --export outputs/pbf2way/profiling/early_kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/profiling/early_ncu.json
+& $ncuExe --profile-from-start off --kernel-name 'regex:^(cache_neighbors|density_lambda|pressure_correction).*' --launch-count 3 --set full --clock-control none --force-overwrite --export outputs/pbf2way/profiling/early_kernels .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 0.1 --steps 1 --capture --output outputs/pbf2way/profiling/early_ncu.json
 
 # 接触较多的状态，单独选择接触求解 kernel
-& $ncuExe --profile-from-start off --kernel-name 'regex:^solve_contacts.*' --launch-count 1 --set full --clock-control none --force-overwrite --export outputs/pbf2way/profiling/contact_kernel .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 1 --capture --output outputs/pbf2way/profiling/contact_ncu.json
+& $ncuExe --profile-from-start off --kernel-name 'regex:^solve_contacts.*' --launch-count 1 --set full --clock-control none --force-overwrite --export outputs/pbf2way/profiling/contact_kernel .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 3 --steps 1 --capture --output outputs/pbf2way/profiling/contact_ncu.json
 ```
 
 `--clock-control none` 不更改 GPU 时钟；比较硬件指标时仍需留意时钟与桌面负载。ncu replay 会引入大量采集开销，应用计时不能用于推断正常运行速度，见 [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/)。

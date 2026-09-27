@@ -1024,7 +1024,7 @@ class PBF2WayCouplingConfig:
     pressure_iterations: int = 3
     # Experimental with this compression-only density constraint; disabled by default.
     enable_artificial_pressure: bool = False
-    artificial_pressure_strength: float = 0.0075
+    artificial_pressure_strength: float = 0.005
     artificial_pressure_q: float = 0.3
 
     # Non-pressure forces and rigid-body feedback.

@@ -2,6 +2,15 @@
 
 独立的三维 Warp DSL 演示：PBF 流体、Akinci2012 粒子边界、可平移和旋转的网格刚体、刚体碰撞，以及 billboard 流体和带阴影的实体渲染。
 
+## 目录结构
+
+- 根目录：主求解器、仿真入口和渲染入口。
+- `assets/`：网格及第三方资源说明。
+- `scenes/`：场景配置。
+- `tests/`：数值、耦合、边界和渲染测试。
+- `tools/`：验收、基准、nsys/ncu 工作负载及报告校验工具。
+- `docs/`：实现说明与性能分析记录。
+
 ## 运行
 
 在仓库根目录使用现有环境（本机 Python 3.12.3、`warp-lang==1.15.0`、NumPy、Pyglet）：
@@ -166,29 +175,29 @@ simulation.step()  # 推进 1/120 秒：3 个子步，每子步 3 轮压力迭�
 
 ## 测试与实际结果
 
-接触流形压缩在 CPU/CUDA 上验证了每对不超过 8 点、最深点必留、双向动态接触合并、平面覆盖、墙角不同法线保留、空流形和候选溢出。103,823 粒子的 8–9 秒 nsys 窗口中，650–668 个候选压为 8 个求解接触，压缩、准备和求解合计 `0.0757 ms/子步`，相对此前未压缩顺序求解的 `2.876 ms/子步` 约快 38 倍，且正常循环仍无 GPU→CPU 复制。三个默认分辨率十秒场景通过；十万粒子运行无 NaN/缓存溢出，但高速瞬态历史最大穿透 `0.0252 m` 超过粒子半径 `0.015625 m`，说明固定 8 点和纯速度级离散冲量仍不等价于连续碰撞检测。完整数据、限制和复现命令见 [性能分析](PERFORMANCE.md)。
+接触流形压缩在 CPU/CUDA 上验证了每对不超过 8 点、最深点必留、双向动态接触合并、平面覆盖、墙角不同法线保留、空流形和候选溢出。103,823 粒子的 8–9 秒 nsys 窗口中，650–668 个候选压为 8 个求解接触，压缩、准备和求解合计 `0.0757 ms/子步`，相对此前未压缩顺序求解的 `2.876 ms/子步` 约快 38 倍，且正常循环仍无 GPU→CPU 复制。三个默认分辨率十秒场景通过；十万粒子运行无 NaN/缓存溢出，但高速瞬态历史最大穿透 `0.0252 m` 超过粒子半径 `0.015625 m`，说明固定 8 点和纯速度级离散冲量仍不等价于连续碰撞检测。完整数据、限制和复现命令见 [性能分析](docs/PERFORMANCE.md)。
 
 速度上限测试覆盖零速、低于/恰好/超过上限、负分量、多轴速度、极大有限速度，以及速度重建和粘度后的限速；检查方向保持、非有限值保留及故障冻结。以下较早的历史性能及十秒行为结果使用过不同的时间步、压力迭代数或速度上限，应以各段说明为准。
 
 当前完整步为 `1/120 s`、默认压力迭代为3、默认速度上限为 `6 m/s`；默认只启用涡度补偿，不启用人工压力。39项数值、墙面和隐藏窗口测试覆盖两个独立CLI开关、默认压力强度实际为0、显式实验开启、双关闭旧路径、CPU/CUDA涡度公式、粒子重排兼容性和kernel调用数。默认十秒与性能结果以性能文档的最新记录为准；显式人工压力的旧运行仅作为异常诊断，不再代表默认行为。
 
-性能收益、nsys 零回读验证、ncu 权限限制及复现命令见 [性能分析](PERFORMANCE.md)。`profile_simulation.py --steps N` 现在表示 N 次完整 `step()`（3N 个子步），加 `--render` 后每步渲染一次，计时不包含播放等待。
+性能收益、nsys 零回读验证、ncu 权限限制及复现命令见 [性能分析](docs/PERFORMANCE.md)。`tools/profile_simulation.py --steps N` 现在表示 N 次完整 `step()`（3N 个子步），加 `--render` 后每步渲染一次，计时不包含播放等待。
 
 ```powershell
 # 数值测试；CPU 公式检查，有 CUDA 时增加短程对照
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_coupling -v
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling -v
 
 # 容器六面/棱角、反弹衰减、粘度后再次检查及非有限值测试
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_wall_clamp -v
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_wall_clamp -v
 
 # 独立隐藏窗口 OpenGL 测试，需要 NVIDIA CUDA/OpenGL
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.test_rendering -v
+.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_rendering -v
 
 # 三个场景各运行至少 10 秒，输出逐秒诊断、最终状态及汇总
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate
 
 # 另加两个十秒重力反转/旋转交互压力测试
-.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate --interactions --output outputs/pbf2way/wall-clamp/acceptance
+.venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --interactions --output outputs/pbf2way/wall-clamp/acceptance
 ```
 
 2026-09-15，加入容器钳制后，本机 RTX 5070 12 GiB、Warp 1.15.0：22 项数值测试及 3 项 OpenGL/调度测试通过。覆盖六面与棱角、大幅越界、0/0.8/1 反弹系数、粘度后的向外速度、非有限值保留，以及固定步计数、故障锁存、CPU/CUDA 对照、暂停/重置和零回读。公式对照使用独立 NumPy 计算；尚未编译官方 C++ 程序做整体轨迹对照。
@@ -203,6 +212,6 @@ simulation.step()  # 推进 1/120 秒：3 个子步，每子步 3 轮压力迭�
 
 三组保持有限数值和粒子数量，无缓存溢出；逐子步累计流体内缩边界越界为零，最大四元数长度误差约 `1.2e-7`。默认场景最终球、圆柱、环面质心高度约 `0.680/0.548/0.673 m`，都有明显平移和转动。静水轻球从 `0.5 m` 上浮至 `0.855 m`，重球落至 `0.198 m`；关闭反作用力后，轻球也落至 `0.198 m`。
 
-两个交互压力测试分别在 2/6 秒反转重力、4 秒旋转 90°、8 秒再旋转 45°，各推进十秒。流体在每子步结束时均位于内缩范围内，保持有限数值、粒子数和无故障；但刚体最大接触穿透分别达到 **0.1383 m / 0.0446 m**，超出普通场景验收界限。本次仅给流体增加容器保底，未修复强交互下的刚体接触问题，也不保证任意场景长期稳定。最新结果与性能记录见 [性能分析](PERFORMANCE.md)，原始数据在 `outputs/pbf2way/wall-clamp/`。
+两个交互压力测试分别在 2/6 秒反转重力、4 秒旋转 90°、8 秒再旋转 45°，各推进十秒。流体在每子步结束时均位于内缩范围内，保持有限数值、粒子数和无故障；但刚体最大接触穿透分别达到 **0.1383 m / 0.0446 m**，超出普通场景验收界限。本次仅给流体增加容器保底，未修复强交互下的刚体接触问题，也不保证任意场景长期稳定。最新结果与性能记录见 [性能分析](docs/PERFORMANCE.md)，原始数据在 `outputs/pbf2way/wall-clamp/`。
 
 OpenGL 检查包含阴影开/关的像素差、billboard 与实体共用深度缓冲、GL 错误、暂停/重置请求和重力控制回调；没有依赖人工点击。截图和详细运行日志写入忽略的 `outputs/pbf2way/`，重新运行验证脚本可生成。

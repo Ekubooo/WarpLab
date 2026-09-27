@@ -1,7 +1,7 @@
 """Run the full-resolution 10-second behavioral acceptance scenarios.
 
 Run from the repository root:
-    .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.validate
+    .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate
 """
 
 import argparse
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .PBF2WayCoupling import PBF2WayCouplingConfig
-from .simulation import create_pbf2way_simulation, diagnostics, run_headless
+from ..PBF2WayCoupling import PBF2WayCouplingConfig
+from ..simulation import create_pbf2way_simulation, diagnostics, run_headless
 
 
 def check_stability(simulation, history):
@@ -31,7 +31,7 @@ def check_stability(simulation, history):
 
 def check_gravity_interactions(config, device, output):
     """Exercise the same gravity operations as G/Q/E, without opening a window."""
-    from .render_opengl import reverse_gravity, rotate_gravity
+    from ..render_opengl import reverse_gravity, rotate_gravity
 
     simulation = create_pbf2way_simulation(config=config, device=device)
     history = [diagnostics(simulation)]

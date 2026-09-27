@@ -6,9 +6,9 @@ from pathlib import Path
 import sqlite3
 
 try:
-    from .PBF2WayCoupling import PBF2WayCouplingConfig
+    from ..PBF2WayCoupling import PBF2WayCouplingConfig
 except ImportError:
-    from PBF2WayCoupling import PBF2WayCouplingConfig
+    from demos.fluid.PBF2WayCoupling.PBF2WayCoupling import PBF2WayCouplingConfig
 
 
 def verify(

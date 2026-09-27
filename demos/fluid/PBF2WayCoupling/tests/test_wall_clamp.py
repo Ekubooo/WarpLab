@@ -7,13 +7,13 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from . import PBF2WayCoupling as solver
+from .. import PBF2WayCoupling as solver
 
 
 class WallClampTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        wp.config.kernel_cache_dir = str(Path(__file__).resolve().parents[3] / ".warp_cache")
+        wp.config.kernel_cache_dir = str(Path(__file__).resolve().parents[4] / ".warp_cache")
         wp.init()
         cls.devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
         cls.lower, cls.upper = wp.vec3(-1, -2, -3), wp.vec3(1, 2, 3)
