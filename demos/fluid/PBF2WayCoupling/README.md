@@ -42,10 +42,10 @@
 
 交互：`Space` 暂停/继续，`R` 重置并暂停，`G` 反转重力，`Q/E` 绕 Z 轴旋转重力 10°；鼠标和 `W/A/S/D` 控制相机。重置恢复初始物理状态及重力，保留相机。`--num-frames` 限制帧数，`--one-way` 关闭流体对刚体的反作用力。
 
-人工压力与涡度补偿有互相独立的 CLI 开关：`--[no-]artificial-pressure` 和 `--[no-]vorticity-confinement`。**人工压力默认关闭，涡度补偿默认启用。** 当前单边密度约束已像 SPlisHSPlasH 和 PositionBasedDynamics 一样钳制负压力，因此原论文的无条件 `s_corr` 只作为实验功能保留；它可能使自由表面膨胀，必须显式传入 `--artificial-pressure` 才会启用。实验强度已针对当前粒子体积、`h=4r` 和三轮压力迭代从 `0.1` 重新标定为 `0.001`；这是经验折中，不是对论文参数的逐字复现。双关闭时使用加入两项补偿前的物理路径。建议使用不同输出目录对比四种组合：
+人工压力与负压力钳制由 `--[no-]artificial-pressure` 和 `--[no-]clamp-negative-pressure` 独立控制，**两者默认关闭**。默认使用有符号密度约束，不加入人工压力；涡度补偿仍默认启用，可用 `--no-vorticity-confinement` 独立关闭。人工压力强度默认为 `0.0025`，是当前实现的经验值，不是论文原始参数的直接复现。以下命令对比人工压力与涡度补偿；负压力钳制均保持默认关闭。
 
 ```powershell
-# 都关闭：旧路径
+# 人工压力和涡度补偿都关闭；负压力钳制默认关闭
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --no-artificial-pressure --no-vorticity-confinement --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/compare/off-off
 
 # 仅人工压力
@@ -58,9 +58,9 @@
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --artificial-pressure --vorticity-confinement --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/compare/on-on
 ```
 
-每次 `step()` 推进 `1/120 s`，紧接着调用一次 `render()`。暂停时只刷新画面。播放速度仅决定帧间等待：默认 `--playback-speed 0.5` 的目标是 60 帧/秒，设为 `1` 则是 120 帧/秒。算不完时自然变慢，不追赶、不跳步、不跳帧；已关闭 vsync 和 Tab 跳过渲染快捷键。`--warmup` 仅用于显式截图/测试预热，会在创建渲染器前推进指定时间。
+每次 `step()` 推进 `1/90 s`，紧接着调用一次 `render()`。暂停时只刷新画面。播放速度仅决定帧间等待：默认 `--playback-speed 0.5` 的目标是 45 帧/秒，设为 `1` 则是 90 帧/秒。算不完时自然变慢，不追赶、不跳步、不跳帧；已关闭 vsync 和 Tab 跳过渲染快捷键。`--warmup` 仅用于显式截图/测试预热，会在创建渲染器前推进指定时间。
 
-固定推进时间在 `PBF2WayCoupling.py` 的 `PBF2WayCouplingConfig.frame_dt` 修改，目前为 `1.0 / 120.0`。子步时间自动计算为 `frame_dt / substeps = 1/360 s`，播放节拍和无窗口步数也由此推导。
+固定推进时间在 `PBF2WayCoupling.py` 的 `PBF2WayCouplingConfig.frame_dt` 修改，目前为 `1.0 / 90.0`。子步时间自动计算为 `frame_dt / substeps = 1/270 s`，播放节拍和无窗口步数也由此推导。
 
 压力迭代次数在同一配置类的 `pressure_iterations` 修改，当前默认 **3 次/子步**；也可在构造配置时传入 `PBF2WayCouplingConfig(pressure_iterations=3)`。此前校验中写死的“必须为 5”已删除，现在接受正整数，并在每个子步执行指定次数，不根据误差提前退出。三个子步合计 **9 次压力修正/step**。`contact_iterations=5` 是另一项刚体接触配置，不是流体压力迭代次数。
 
@@ -100,7 +100,7 @@ HashGrid 会在每次进程启动时按本次粒径独立计算，不缓存上�
 | 密度、lambda、修正、压力受力 | `SPlisHSPlasH/PBF/TimeStepPBF.cpp` |
 | Akinci 伪体积与静态/动态邻域分组 | `BoundaryModel_Akinci2012.cpp`、`Simulation::updateBoundaryVolume` |
 | `F`、`(x_boundary−COM)×F`、边界点速度 | `SPlisHSPlasH/BoundaryModel.h` |
-| Standard viscosity 及反作用力 | `SPlisHSPlasH/Viscosity/Viscosity_Standard.cpp` 的标量 Akinci 路径 |
+| 边界 Standard viscosity 及反作用力 | `SPlisHSPlasH/Viscosity/Viscosity_Standard.cpp` 的标量 Akinci 路径 |
 | 规则流体块 | `Simulator/SimulatorBase::createFluidBlocks` |
 | 刚体受力/速度更新的接口语义 | `Simulator/PositionBasedDynamicsWrapper/PBDRigidBody.h` |
 
@@ -111,13 +111,13 @@ HashGrid 会在每次进程启动时按本次粒径独立计算，不缓存上�
 ## 数值模型
 
 - 默认粒子半径 `r=0.025`、支撑半径 `h=4r=0.1`、静止密度 `1000`、粒子体积 `0.8(2r)³`、粒子质量 `0.1`。
-- 密度使用 Poly6，约束梯度使用 Spiky；压缩约束为 `max(ρ/ρ₀−1,0)`，lambda 正则项 `1e-6`。边界梯度累加到中心粒子的梯度，但不单独计入邻居梯度平方和。这一点区别于现有 MMPBF。
-- 每个 `step()` 固定包含 3 个 `dt=1/360 s` 子步，默认每子步 3 轮压力迭代和 5 轮接触迭代。压力轮数可设为任意正整数，运行时按配置固定执行；没有 CFL、误差提前退出或自适应迭代。`densities` 是修正后的归一化密度，显式诊断按其计算平均压缩误差，不要求达到旧的 `0.01%`。
+- 密度使用 Poly6，约束梯度使用 Spiky；默认约束为 `ρ/ρ₀−1`，仅开启 `clamp_negative_pressure` 时取 `max(C,0)`。CFM 正则项为 `epsilon = lambda_regularization / h²`，无量纲 `lambda_regularization` 默认 `1.0`，可通过同名配置或 CLI `--lambda-regularization` 设置，必须有限且大于零。固定配置下 epsilon 保持常量：`r=0.025` 时为100，`r=0.01` 时为625。这是当前实现的标定，不是论文推荐值；不增加位置修正限幅。边界梯度继续累加到中心粒子的梯度，不单独计入邻居梯度平方和。
+- 每个 `step()` 固定包含 3 个 `dt=1/270 s` 子步，默认每子步 3 轮压力迭代和 5 轮接触迭代。压力轮数可设为任意正整数，运行时按配置固定执行；没有 CFL、误差提前退出或自适应迭代。`densities` 是修正后的归一化密度，显式诊断按其计算平均压缩误差，不要求达到旧的 `0.01%`。
 - 边界引起的流体位移为 `Δx`，刚体反作用力为 `−mΔx/dt²`，力矩使用该边界样本相对质心的力臂。每一轮压力修正都累积贡献。开启边界粘度时，同样累积 `−m a_boundary`。
 - 边界点世界坐标为 `COM+R x_local`，速度为 `v+ω×(R x_local)`。静态边界共同计算伪体积；运动刚体各自在自身样本内计算，之后不随位姿改变。
-- 子步次序：清空受力 → 流体重力预测 → 构建空间哈希并按哈希顺序重排持久粒子属性 → 缓存一次邻域 → PBF 迭代/反作用力 → 一阶速度重建 → 重算密度 → Standard viscosity 加速度 → 计算涡度与涡度约束加速度 → 一次性更新速度 → 刚体积分 → 接触检测 → 接触流形压缩 → 速度约束 → 更新边界。阶段之间保留设备端溢出和非有限数值检查。
-- 流体、反作用力及刚体积分统一使用 `substep_dt=1/360`，不能使用完整步的 `current_dt` 计算子步冲量。Standard viscosity 默认 `0.01`，边界粘度默认 `0`；涡度补偿是在同一速度更新前累加的另一项加速度，没有改成 XSPH。
-- 可选的流体—流体实验路径加入 [Position Based Fluids 原文](https://mmacklin.com/pbf_sig_preprint.pdf)形式的人工压力：`s_corr = -(strength h²)(W(r,h)/W(qh,h))⁴`。当前经验参数为 `strength=0.001`、`q=0.3`、指数4；较低强度用于缓和单边密度约束下的自由表面膨胀，并不等同于论文中的原始 `k=0.1`。参考核值 `W(qh,h)` 在初始化时预计算；它不作用于边界邻居，也不改变刚体压力反作用力。该路径默认关闭，需设置 `enable_artificial_pressure=True` 或传入 `--artificial-pressure`；系数设为0同样可关闭。
+- 子步次序：清空受力 → 重力预测 → 构建空间哈希并重排粒子 → 缓存一次邻域 → PBF 迭代/反作用力 → 速度重建 → 重算密度 → 计算流体 XSPH 速度修正及边界黏性加速度 → 累加涡度加速度 → 一次性更新速度 → 刚体积分和接触求解 → 更新边界。XSPH 先写独立 `xsph_delta` 缓冲区，邻居读取同一份重建速度，避免原地更新竞争。
+- 流体间黏性改为体积加权 XSPH：`Δvᵢ = c Σⱼ (V/ρ̂ⱼ)(vⱼ−vᵢ) Poly6(rᵢⱼ,h)`，其中 `ρ̂=ρ/ρ₀`。配置名 `viscosity` 保留，默认 `c=0.01`，含义改为无量纲速度平滑系数，**不乘 dt**；设为0关闭流体间平滑。边界黏性保持原 Standard viscosity 加速度及刚体反作用力，默认系数仍为0。最终 `v_new = v + xsph_delta + dt * (a_boundary + a_vorticity)`，其中 `dt=1/270 s`。旧流体黏性系数的物理含义不再适用于 XSPH。
+- 可选的流体—流体实验路径加入 [Position Based Fluids 原文](https://mmacklin.com/pbf_sig_preprint.pdf)形式的人工压力：`s_corr = -(strength h²)(W(r,h)/W(qh,h))⁴`。当前经验参数为 `strength=0.0025`、`q=0.3`、指数4；该经验参数独立于密度约束是否钳制，并不等同于论文中的原始 `k=0.1`。参考核值 `W(qh,h)` 在初始化时预计算；它不作用于边界邻居，也不改变刚体压力反作用力。该路径默认关闭，需设置 `enable_artificial_pressure=True` 或传入 `--artificial-pressure`；系数设为0同样可关闭。
 - 涡度补偿先以流体邻居计算 `ωᵢ = Σ(V/ρⱼ)(vᵢ-vⱼ)×∇ᵢWᵢⱼ`，再计算涡度模梯度 `ηᵢ`，累加 `ε normalize(ηᵢ)×ωᵢ`；默认 `ε=0.5`，设 `vorticity_confinement=0` 可关闭。边界样本不参与，也不向刚体施加人工反作用力。
 - 容器保底：每轮应用 `Δp` 时执行 `x = clamp(x + Δp, container_min + r, container_max - r)`，将粒子中心限制在向内缩一个半径的盒体内。动态刚体仍走原有粒子边界耦合；额外位置修正视为静态容器约束，不修改压力反作用力公式。
 - 刚体保底：每次刚体积分后，将动态刚体当前旋转下的局部 AABB 转换成保守的世界 AABB，并只平移质心使其完整落在容器范围内。该投影不修改旋转、线速度或角速度，不计算反弹、摩擦或额外冲量；静态容器不参与钳制。原有接触求解随后照常执行。
@@ -141,16 +141,19 @@ config = PBF2WayCouplingConfig(
     max_speed=6.0,
     pressure_iterations=3,
     enable_artificial_pressure=False,  # 实验功能；CLI 用 --artificial-pressure 开启
-    artificial_pressure_strength=0.001,
+    clamp_negative_pressure=False,
+    lambda_regularization=1.0,  # epsilon = alpha / h²；CLI --lambda-regularization
+    viscosity=0.01,  # 无量纲 XSPH c，不乘 dt
+    artificial_pressure_strength=0.0025,
     artificial_pressure_q=0.3,
     enable_vorticity_confinement=True,
     vorticity_confinement=0.5,
 )
 simulation = create_pbf2way_simulation(config=config, device="cuda:0")
-simulation.step()  # 推进 1/120 秒：3 个子步，每子步 3 轮压力迭代
+simulation.step()  # 推进 1/90 秒：3 个子步，每子步 3 轮压力迭代
 ```
 
-公开数据：`positions`、`velocities`、`densities`、`particle_ids`、`rigid.position/rotation/velocity/omega/force/torque`、`boundary.position/velocity/volume/body`、`rigid.fault`、`sim_time`、`frame_dt`、`substep_dt`、`current_dt`、`last_dt`、`iterations`、`total_steps`、`total_substeps`、`hash_grid_dims`。`current_dt/last_dt/frame_dt` 均为完整步的 `1/120 s`，`iterations` 表示每子步的压力轮数，默认为 3。密度误差由主动调用 `diagnostics()` 获取，不维护逐步回读的 CPU 属性。
+公开数据：`positions`、`velocities`、`densities`、`xsph_delta`、`particle_ids`、`rigid.position/rotation/velocity/omega/force/torque`、`boundary.position/velocity/volume/body`、`rigid.fault`、`sim_time`、`frame_dt`、`substep_dt`、`current_dt`、`last_dt`、`iterations`、`total_steps`、`total_substeps`、`hash_grid_dims`。`current_dt/last_dt/frame_dt` 均为完整步的 `1/90 s`，`iterations` 表示每子步的压力轮数，默认为 3。密度误差由主动调用 `diagnostics()` 获取，不维护逐步回读的 CPU 属性。
 
 两张空间哈希表共用启动时自动计算的尺寸。程序以 `support_radius=4r` 为单元宽度，按 `container ± support_radius` 求每轴实际查询跨度，再取**严格大于跨度**的最小 2 次幂；Warp 本身允许任意正整数尺寸，2 次幂只是这里选定的冗余容量策略，不宣称会让取模或排序更快。初始化仍校验 `span < hash_grid_dims`，并在 CUDA 数组分配前检查总桶数的 32 位索引范围和估算显存安全预算；超限错误包含粒径、粒子/边界规模、尺寸和预计显存。诊断及性能 JSON 均输出 `hash_grid_dims`。
 
@@ -179,7 +182,9 @@ simulation.step()  # 推进 1/120 秒：3 个子步，每子步 3 轮压力迭�
 
 速度上限测试覆盖零速、低于/恰好/超过上限、负分量、多轴速度、极大有限速度，以及速度重建和粘度后的限速；检查方向保持、非有限值保留及故障冻结。以下较早的历史性能及十秒行为结果使用过不同的时间步、压力迭代数或速度上限，应以各段说明为准。
 
-当前完整步为 `1/120 s`、默认压力迭代为3、默认速度上限为 `6 m/s`；默认只启用涡度补偿，不启用人工压力。39项数值、墙面和隐藏窗口测试覆盖两个独立CLI开关、默认压力强度实际为0、显式实验开启、双关闭旧路径、CPU/CUDA涡度公式、粒子重排兼容性和kernel调用数。默认十秒与性能结果以性能文档的最新记录为准；显式人工压力的旧运行仅作为异常诊断，不再代表默认行为。
+当前完整步为 `1/90 s`、默认压力迭代为3、默认速度上限为 `6 m/s`；人工压力与负压力钳制默认关闭，涡度补偿默认启用。44项数值、墙面和隐藏窗口测试通过，包含稀疏双粒子正则化、半径缩放、XSPH NumPy 参考、零系数/均匀速度/dt独立性和边界黏性反作用力。CPU/CUDA 单项公式及初始5步轨迹通过对照；有符号压力会放大邻居归约顺序产生的浮点差异，后续轨迹不要求逐粒子相等，但两端继续检查有限数值和故障。
+
+2026-10-01，默认溃坝场景的 `r=0.025`、`r=0.01` 各四种压力开关组合均完成10秒模拟，无设备故障或非有限状态。40万粒子（405,224个）最大单轮位置修正为 `0.719–0.942h`，默认双关闭为 `0.942h`；默认半径最大为 `0.567h`，均低于验收阈值2h。测量使用容器钳制前的压力修正，不依赖速度上限判断稳定。另一内置场景的四种组合通过1秒短时回归。结果见 `outputs/pbf2way/regularization-xsph-acceptance.json`；不代表任意场景、参数或更长时长的稳定性保证。
 
 性能收益、nsys 零回读验证、ncu 权限限制及复现命令见 [性能分析](docs/PERFORMANCE.md)。`tools/profile_simulation.py --steps N` 现在表示 N 次完整 `step()`（3N 个子步），加 `--render` 后每步渲染一次，计时不包含播放等待。
 

@@ -59,7 +59,7 @@ def estimate_device_storage_bytes(particle_count, boundary_count, grid_dims, con
         config.max_fluid_neighbors + config.max_boundary_neighbors
     ) * 4
     # Fluid persistent arrays, HashGrid point workspaces, and exclusion temporaries.
-    fluid_bytes = particle_count * (124 + 24 + 16)
+    fluid_bytes = particle_count * (136 + 24 + 16)
     if config.enable_vorticity_confinement and config.vorticity_confinement > 0.0:
         fluid_bytes += particle_count * 16  # vec4 vorticity scratch array
     # Boundary state and its HashGrid point workspace.
@@ -301,6 +301,8 @@ def density_lambda(
     h: float,
     density: wp.array(dtype=float),
     lambdas: wp.array(dtype=float),
+    clamp_negative_pressure: int,
+    lambda_epsilon: float,
 ):
     """Evaluate normalized density and the PBF constraint multiplier."""
     if neighbors.fault[0] != 0:
@@ -322,9 +324,11 @@ def density_lambda(
         normalized_density += boundary.volume[j] * fn.poly6(wp.length(displacement), h)
         # SPlisHSPlasH excludes individual boundary gradient squares.
         gradient_i += boundary.volume[j] * fn.spiky_gradient(displacement, h)
-    constraint = wp.max(normalized_density - 1.0, 0.0)
+    constraint = normalized_density - 1.0
+    if clamp_negative_pressure != 0:
+        constraint = wp.max(constraint, 0.0)
     density[i] = normalized_density
-    lambdas[i] = -constraint / (squared_gradient_sum + wp.dot(gradient_i, gradient_i) + 1.0e-6)
+    lambdas[i] = -constraint / (squared_gradient_sum + wp.dot(gradient_i, gradient_i) + lambda_epsilon)
 
 
 @wp.kernel
@@ -429,20 +433,20 @@ def viscosity(
     boundary_coefficient: float,
     two_way: int,
     acceleration: wp.array(dtype=wp.vec3),
+    xsph_delta: wp.array(dtype=wp.vec3),
 ):
+    """Compute XSPH velocity smoothing and the unchanged boundary viscosity force."""
     if rigid.fault[0] != 0:
         return
     i = wp.tid()
+    velocity_delta = wp.vec3(0.0)
     viscous_acceleration = wp.vec3(0.0)
     for k in range(neighbors.fluid_count[i]):
         j = neighbors.fluid[k, i]
         displacement = x[i] - x[j]
-        viscosity_weight = 10.0 * coefficient * volume / density[j]
-        viscous_acceleration += (
-            viscosity_weight
-            * wp.dot(v[i] - v[j], displacement)
-            / (wp.length_sq(displacement) + 0.01 * h * h)
-            * fn.spiky_gradient(displacement, h)
+        viscosity_weight = coefficient * volume / wp.max(density[j], 1.0e-6)
+        velocity_delta += (
+            viscosity_weight * (v[j] - v[i]) * fn.poly6(wp.length(displacement), h)
         )
     if boundary_coefficient > 0.0:
         for k in range(neighbors.boundary_count[i]):
@@ -466,6 +470,7 @@ def viscosity(
                     wp.cross(boundary.position[j] - rigid.position[body_index], force),
                 )
     acceleration[i] = viscous_acceleration
+    xsph_delta[i] = velocity_delta
 
 
 @wp.kernel
@@ -534,11 +539,12 @@ def apply_viscosity(
     wall_damping: float,
     max_speed: float,
     fault: wp.array(dtype=int),
+    xsph_delta: wp.array(dtype=wp.vec3),
 ):
     if fault[0] != 0:
         return
     i = wp.tid()
-    velocity = v[i] + dt * acceleration[i]
+    velocity = v[i] + xsph_delta[i] + dt * acceleration[i]
     velocity = fn.reflect_wall_velocity(x[i], velocity, lower, upper, wall_damping)
     v[i] = fn.limit_speed(velocity, max_speed)
 
@@ -1022,13 +1028,15 @@ class PBF2WayCouplingConfig:
     frame_dt: float = 1.0 / 90.0
     substeps: int = 3
     pressure_iterations: int = 3
-    # Experimental with this compression-only density constraint; disabled by default.
+    # Independent pressure options; both disabled by default.
     enable_artificial_pressure: bool = False
+    clamp_negative_pressure: bool = False
+    lambda_regularization: float = 1.0  # Dimensionless alpha; epsilon = alpha / h^2.
     artificial_pressure_strength: float = 0.0025
     artificial_pressure_q: float = 0.3
 
     # Non-pressure forces and rigid-body feedback.
-    viscosity: float = 0.015
+    viscosity: float = 0.03  # Dimensionless XSPH coefficient, applied without dt.
     boundary_viscosity: float = 0.0
     enable_vorticity_confinement: bool = True
     vorticity_confinement: float = 0.5
@@ -1046,6 +1054,7 @@ class PBF2WayCouplingConfig:
     def __post_init__(self):
         for name in (
             "enable_artificial_pressure",
+            "clamp_negative_pressure",
             "enable_vorticity_confinement",
             "two_way",
         ):
@@ -1054,6 +1063,7 @@ class PBF2WayCouplingConfig:
         for name in (
             "particle_radius",
             "rest_density",
+            "lambda_regularization",
             "frame_dt",
             "contact_tolerance",
             "max_speed",
@@ -1270,6 +1280,7 @@ class Example:
         self._reorder_particle_ids = device_zeros(particle_count, int)
         self.corrections = device_zeros(particle_count, wp.vec3)
         self.acceleration = device_zeros(particle_count, wp.vec3)
+        self.xsph_delta = device_zeros(particle_count, wp.vec3)
         vorticity_count = (
             particle_count
             if self.config.enable_vorticity_confinement
@@ -1352,6 +1363,7 @@ class Example:
         config, device = self.config, self.device
         self.iterations = config.pressure_iterations
         dt = self.substep_dt
+        lambda_epsilon = config.lambda_regularization / (self.support_radius * self.support_radius)
         lower, upper = wp.vec3(*self.fluid_lower), wp.vec3(*self.fluid_upper)
         particle_count, boundary_count = self.num_particles, len(self.boundary.local)
         fault = self.rigid.fault
@@ -1410,6 +1422,8 @@ class Example:
                         self.support_radius,
                         self.densities,
                         self.lambdas,
+                        int(config.clamp_negative_pressure),
+                        lambda_epsilon,
                     ],
                     device=device,
                 )
@@ -1444,8 +1458,8 @@ class Example:
                     device=device,
                 )
 
-            # 4. Reconstruct velocity, then accumulate viscosity and vorticity
-            # confinement before applying a single bounded velocity update.
+            # 4. Compute XSPH from reconstructed velocities, alongside boundary
+            # viscosity and vorticity accelerations, then update velocities once.
             wp.launch(
                 reconstruct_velocity,
                 particle_count,
@@ -1473,6 +1487,8 @@ class Example:
                     self.support_radius,
                     self.densities,
                     self.lambdas,
+                    int(config.clamp_negative_pressure),
+                    lambda_epsilon,
                 ],
                 device=device,
             )
@@ -1493,6 +1509,7 @@ class Example:
                     config.boundary_viscosity,
                     int(config.two_way),
                     self.acceleration,
+                    self.xsph_delta,
                 ],
                 device=device,
             )
@@ -1539,6 +1556,7 @@ class Example:
                     config.wall_damping,
                     config.max_speed,
                     fault,
+                    self.xsph_delta,
                 ],
                 device=device,
             )

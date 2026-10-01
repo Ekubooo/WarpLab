@@ -115,7 +115,8 @@ class WallClampTest(unittest.TestCase):
                     wp.launch(
                         solver.apply_viscosity,
                         len(x),
-                        [v, acceleration, dt, x, self.lower, self.upper, damping, 1.0e6, fault],
+                        [v, acceleration, dt, x, self.lower, self.upper, damping, 1.0e6, fault,
+                         wp.zeros_like(v)],
                         device=device,
                     )
                     np.testing.assert_allclose(v.numpy(), expected, atol=2e-6)
@@ -125,7 +126,8 @@ class WallClampTest(unittest.TestCase):
                     wp.launch(
                         solver.apply_viscosity,
                         len(x),
-                        [v, acceleration, dt, x, self.lower, self.upper, damping, 1.0e6, fault],
+                        [v, acceleration, dt, x, self.lower, self.upper, damping, 1.0e6, fault,
+                         wp.zeros_like(v)],
                         device=device,
                     )
                     expected = self.reflected(positions, expected + dt * acceleration_host, damping)
@@ -148,7 +150,7 @@ class WallClampTest(unittest.TestCase):
                 wp.launch(
                     solver.apply_viscosity,
                     3,
-                    [v, zeros, 0.25, x, self.lower, self.upper, 0.8, 10.0, fault],
+                    [v, zeros, 0.25, x, self.lower, self.upper, 0.8, 10.0, fault, zeros],
                     device=device,
                 )
                 np.testing.assert_array_equal(v.numpy(), invalid)
@@ -185,7 +187,7 @@ class WallClampTest(unittest.TestCase):
                 wp.launch(
                     solver.apply_viscosity,
                     1,
-                    [v, delta, 0.25, x, self.lower, self.upper, 0.8, 10.0, fault],
+                    [v, delta, 0.25, x, self.lower, self.upper, 0.8, 10.0, fault, delta],
                     device=device,
                 )
                 np.testing.assert_array_equal(x.numpy(), initial)
@@ -233,7 +235,8 @@ class WallClampTest(unittest.TestCase):
                 wp.launch(
                     solver.apply_viscosity,
                     len(x),
-                    [v, acceleration, 1.0, x, self.lower, self.upper, 0.8, 10.0, fault],
+                    [v, acceleration, 1.0, x, self.lower, self.upper, 0.8, 10.0, fault,
+                     wp.zeros_like(v)],
                     device=device,
                 )
                 np.testing.assert_allclose(v.numpy(), reference, atol=1e-6)

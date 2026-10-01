@@ -67,6 +67,10 @@ def diagnostics(sim):
         artificial_pressure_enabled=sim.config.enable_artificial_pressure,
         artificial_pressure_strength=sim.config.artificial_pressure_strength,
         artificial_pressure_q=sim.config.artificial_pressure_q,
+        clamp_negative_pressure=sim.config.clamp_negative_pressure,
+        lambda_regularization=sim.config.lambda_regularization,
+        lambda_epsilon=sim.config.lambda_regularization / sim.support_radius**2,
+        xsph_viscosity=sim.config.viscosity,
         vorticity_confinement_enabled=sim.config.enable_vorticity_confinement,
         vorticity_confinement=sim.config.vorticity_confinement,
         iterations=sim.iterations,
@@ -108,16 +112,25 @@ def add_simulation_arguments(parser):
     )
     parser.add_argument("--particle-radius", type=positive_float, default=0.025)
     parser.add_argument(
+        "--lambda-regularization",
+        type=positive_float,
+        default=PBF2WayCouplingConfig.lambda_regularization,
+        help="Dimensionless CFM alpha; epsilon = alpha / h^2 (default: 1.0)",
+    )
+    parser.add_argument(
         "--one-way", action="store_true", help="Disable reaction forces for comparison"
     )
     parser.add_argument(
         "--artificial-pressure",
         action=argparse.BooleanOptionalAction,
         default=PBF2WayCouplingConfig.enable_artificial_pressure,
-        help=(
-            "Enable experimental PBF artificial pressure; disabled by default because the "
-            "solver clamps negative pressure"
-        ),
+        help="Enable the PBF artificial pressure term (disabled by default)",
+    )
+    parser.add_argument(
+        "--clamp-negative-pressure",
+        action=argparse.BooleanOptionalAction,
+        default=PBF2WayCouplingConfig.clamp_negative_pressure,
+        help="Clamp the density constraint to zero to disable negative pressure (disabled by default)",
     )
     parser.add_argument(
         "--vorticity-confinement",
@@ -134,6 +147,8 @@ def config_from_args(args):
         particle_radius=args.particle_radius,
         two_way=not args.one_way,
         enable_artificial_pressure=args.artificial_pressure,
+        clamp_negative_pressure=args.clamp_negative_pressure,
+        lambda_regularization=args.lambda_regularization,
         enable_vorticity_confinement=args.vorticity_confinement,
     )
 
