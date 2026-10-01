@@ -1032,7 +1032,7 @@ class PBF2WayCouplingConfig:
     enable_artificial_pressure: bool = False
     clamp_negative_pressure: bool = False
     lambda_regularization: float = 2.0  # Dimensionless alpha; epsilon = alpha / h^2.
-    artificial_pressure_strength: float = 0.001
+    artificial_pressure_strength: float = 0.0025
     artificial_pressure_q: float = 0.1
 
     # Non-pressure forces and rigid-body feedback.
