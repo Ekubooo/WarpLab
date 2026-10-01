@@ -1031,12 +1031,12 @@ class PBF2WayCouplingConfig:
     # Independent pressure options; both disabled by default.
     enable_artificial_pressure: bool = False
     clamp_negative_pressure: bool = False
-    lambda_regularization: float = 1.0  # Dimensionless alpha; epsilon = alpha / h^2.
-    artificial_pressure_strength: float = 0.0025
-    artificial_pressure_q: float = 0.3
+    lambda_regularization: float = 2.0  # Dimensionless alpha; epsilon = alpha / h^2.
+    artificial_pressure_strength: float = 0.001
+    artificial_pressure_q: float = 0.1
 
     # Non-pressure forces and rigid-body feedback.
-    viscosity: float = 0.03  # Dimensionless XSPH coefficient, applied without dt.
+    viscosity: float = 0.25  # Dimensionless XSPH coefficient, applied without dt.
     boundary_viscosity: float = 0.0
     enable_vorticity_confinement: bool = True
     vorticity_confinement: float = 0.5
