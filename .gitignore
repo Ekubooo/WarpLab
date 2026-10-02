@@ -3,6 +3,7 @@ Doc/
 output/
 outputs/
 profiles/
+ExampleSource/
 
 # Python bytecode and native extension artifacts
 __pycache__/
