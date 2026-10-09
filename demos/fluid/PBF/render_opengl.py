@@ -14,10 +14,10 @@ except ModuleNotFoundError:
     from demos.fluid.common.billboard_renderer import create_billboard_renderer
 
 try:
-    from .pbf_init import PBFConfig
+    from .pbf_functions import PBFConfig
     from .simulation import create_pbf_simulation
 except ImportError:
-    from pbf_init import PBFConfig
+    from pbf_functions import PBFConfig
     from simulation import create_pbf_simulation
 
 

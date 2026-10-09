@@ -2,11 +2,9 @@ import warp as wp
 import warp.render
 
 if __package__:
-    from . import pbf_init as init
-    from .pbf_functions import *
+    from . import pbf_helper as fn
 else:
-    import pbf_init as init
-    from pbf_functions import *  # noqa: F403
+    import pbf_helper as fn
 
 @wp.kernel
 def apply_predict(
@@ -51,12 +49,12 @@ def calc_lambda(
         NPos = pre_Pos[index]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > square(smoothing_length):
+        if sqrD2N > fn.square(smoothing_length):
             continue
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
-        density += Poly6(dst2N, smoothing_length)
-        currGrad = dir2N * Inv_Rho0 * DPow3(dst2N, smoothing_length)
+        density += fn.Poly6(dst2N, smoothing_length)
+        currGrad = dir2N * fn.Inv_Rho0 * fn.DPow3(dst2N, smoothing_length)
 
         grad_i += currGrad
         if index!=i : 
@@ -64,9 +62,9 @@ def calc_lambda(
         # do something.
     
     gradSum = grad_j + wp.dot(grad_i, grad_i)
-    # constraint = wp.max(density*Inv_Rho0 - 1.0, 0.0)
-    constraint = density*Inv_Rho0 - 1.0
-    lambdaCurr = -constraint / (gradSum + Lamb_Eps)
+    # constraint = wp.max(density*fn.Inv_Rho0 - 1.0, 0.0)
+    constraint = density*fn.Inv_Rho0 - 1.0
+    lambdaCurr = -constraint / (gradSum + fn.Lamb_Eps)
 
     # Density[tid] = density # density only for lambda.
     lambda_Opt[i] = lambdaCurr
@@ -88,7 +86,7 @@ def calc_deltaPos(
 
     # data
     delta_Q = 0.3 * smoothing_length
-    WDeltaQ = Poly6(delta_Q, smoothing_length)
+    WDeltaQ = fn.Poly6(delta_Q, smoothing_length)
     lambda_i = lambda_Opt[i]
     delta_Movement = wp.vec3(0,0,0)
 
@@ -98,29 +96,29 @@ def calc_deltaPos(
         NPos = pre_Pos[index]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > square(smoothing_length):
+        if sqrD2N > fn.square(smoothing_length):
             continue
 
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
-        poly6 = Poly6(dst2N, smoothing_length)
+        poly6 = fn.Poly6(dst2N, smoothing_length)
 
-        # S_corr = -S_corr_K * wp.pow(wp.abs(poly6/WDeltaQ), S_corr_N) 
+        # S_corr = -fn.S_corr_K * wp.pow(wp.abs(poly6/WDeltaQ), fn.S_corr_N)
         x = poly6 * (1.0/WDeltaQ)
         x2 = x * x
         x4 = x2 * x2 
-        S_corr = -S_corr_K * x4
+        S_corr = -fn.S_corr_K * x4
 
         lambda_j = lambda_Opt[index]
         lambda_Sum = lambda_i + lambda_j + S_corr
-        currGrad = dir2N * DPow3(dst2N, smoothing_length)
+        currGrad = dir2N * fn.DPow3(dst2N, smoothing_length)
         delta_Movement -= lambda_Sum * currGrad
 
-    delta_Pos[i] = delta_Movement * Inv_Rho0
+    delta_Pos[i] = delta_Movement * fn.Inv_Rho0
 
     # what if fusion？
     # currPos = delta_Pos[tid] + pre_Pos[tid]
-    # pre_Pos[tid] = apply_boundary(currPos)
+    # pre_Pos[tid] = fn.apply_boundary(currPos)
 
 @wp.kernel
 def update_prePos(
@@ -131,7 +129,7 @@ def update_prePos(
     # can this kernel fusion into last kernel?
     tid = wp.tid()
     currPos = delta_Pos[tid] + pre_Pos[tid]
-    pre_Pos[tid] = apply_boundary(currPos, boundary, tid)
+    pre_Pos[tid] = fn.apply_boundary(currPos, boundary, tid)
 
 @wp.kernel
 def update_position(
@@ -146,7 +144,7 @@ def update_position(
     currPos = pos[tid]
     incomingVel = vel[tid]
     reconstructedVel = (pPos - currPos) / dt
-    reconstructedVel = apply_boundary_collision_velocity(
+    reconstructedVel = fn.apply_boundary_collision_velocity(
         pPos, boundary, reconstructedVel, incomingVel
     )
 
@@ -177,7 +175,7 @@ def calc_curl(
         NPos = pre_Pos[index]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > square(smoothing_length):
+        if sqrD2N > fn.square(smoothing_length):
             continue
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
@@ -185,7 +183,7 @@ def calc_curl(
         # curl
         NVel = vel[index]
         Vel_ij = NVel - currVel
-        omega_i += wp.cross(Vel_ij, dir2N * DPow3(dst2N, smoothing_length)) 
+        omega_i += wp.cross(Vel_ij, dir2N * fn.DPow3(dst2N, smoothing_length))
 
     curl[i] = wp.vec4(omega_i[0], omega_i[1], omega_i[2], wp.length(omega_i))
 
@@ -217,7 +215,7 @@ def calc_visvor(
         NPos = pre_Pos[index]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > square(smoothing_length):
+        if sqrD2N > fn.square(smoothing_length):
             continue
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
@@ -226,27 +224,27 @@ def calc_visvor(
         NVel = vel[index]
         Vel_ij = NVel - currVel
         NCurl = curl[index]
-        currGrad = DPow3(dst2N, smoothing_length)
+        currGrad = fn.DPow3(dst2N, smoothing_length)
 
         # voricity
         etaTotal += -1.0 * dir2N * currGrad * NCurl[3]
 
         # viscosity
-        vel_corr += Vel_ij * Poly6(dst2N, smoothing_length)
-        # vel_corr += Vel_ij * Pow3(dst2N, smoothing_length) 
+        vel_corr += Vel_ij * fn.Poly6(dst2N, smoothing_length)
+        # vel_corr += Vel_ij * fn.Pow3(dst2N, smoothing_length)
 
-        # currDensity += Poly6(dst2N,smoothing_length)
+        # currDensity += fn.Poly6(dst2N,smoothing_length)
 
 
-    if wp.length(etaTotal) > 1e-4 and vorConfirm >0.0:
-        epsilon = dt * vorConfirm
+    if wp.length(etaTotal) > 1e-4 and fn.vorConfirm >0.0:
+        epsilon = dt * fn.vorConfirm
         currCurl = curl[i]
         N = wp.normalize(etaTotal)
         force = wp.cross(N, wp.vec3(currCurl[0],currCurl[1],currCurl[2]))
         impulse += epsilon * force
 
     # XSPH
-    impulse += visStrength * vel_corr   # or vorCon?currDensity
+    impulse += fn.visStrength * vel_corr   # or vorCon?currDensity
     delta_Vel[i] = impulse
 
 @wp.kernel
@@ -257,163 +255,13 @@ def update_velocity(
     tid = wp.tid()
     currDVel = vel[tid] + delta_Vel[tid] 
     sqrDVel = wp.dot(currDVel,currDVel)
-    if sqrDVel > MaxVel * MaxVel:
-        currDVel *= MaxVel/wp.sqrt(sqrDVel) 
+    if sqrDVel > fn.MaxVel * fn.MaxVel:
+        currDVel *= fn.MaxVel/wp.sqrt(sqrDVel)
 
     vel[tid] = currDVel
 
 
-# ============================================
-
-@wp.kernel
-def compute_density(
-    grid: wp.uint64,
-    particle_x: wp.array[wp.vec3],
-    particle_rho: wp.array[float],
-    density_normalization: float,
-    smoothing_length: float,
-):
-    tid = wp.tid()
-
-    # order threads by cell
-    i = wp.hash_grid_point_id(grid, tid)
-
-    # get local particle variables
-    x = particle_x[i]
-
-    # store density
-    rho = float(0.0)
-
-    # particle contact
-    neighbors = wp.hash_grid_query(grid, x, smoothing_length)
-
-    # loop through neighbors to compute density
-    for index in neighbors:
-        # compute distance
-        distance = x - particle_x[index]
-
-        # compute kernel derivative
-        rho += density_kernel(distance, smoothing_length)
-
-    # add external potential
-    particle_rho[i] = density_normalization * rho
-
-
-@wp.kernel
-def get_acceleration(
-    grid: wp.uint64,
-    particle_x: wp.array[wp.vec3],
-    particle_v: wp.array[wp.vec3],
-    particle_rho: wp.array[float],
-    particle_a: wp.array[wp.vec3],
-    isotropic_exp: float,
-    base_density: float,
-    gravity: float,
-    pressure_normalization: float,
-    viscous_normalization: float,
-    smoothing_length: float,
-):
-    tid = wp.tid()
-
-    # order threads by cell
-    i = wp.hash_grid_point_id(grid, tid)
-
-    # get local particle variables
-    x = particle_x[i]
-    v = particle_v[i]
-    rho = particle_rho[i]
-    pressure = isotropic_exp * (rho - base_density)
-
-    # store forces
-    pressure_force = wp.vec3()
-    viscous_force = wp.vec3()
-
-    # particle contact
-    neighbors = wp.hash_grid_query(grid, x, smoothing_length)
-
-    # loop through neighbors to compute acceleration
-    for index in neighbors:
-        if index != i:
-            # get neighbor velocity
-            neighbor_v = particle_v[index]
-
-            # get neighbor density and pressures
-            neighbor_rho = particle_rho[index]
-            neighbor_pressure = isotropic_exp * (neighbor_rho - base_density)
-
-            # compute relative position
-            relative_position = particle_x[index] - x
-
-            # calculate pressure force
-            pressure_force += diff_pressure_kernel(
-                relative_position, pressure, neighbor_pressure, neighbor_rho, smoothing_length
-            )
-
-            # compute kernel derivative
-            viscous_force += diff_viscous_kernel(relative_position, v, neighbor_v, neighbor_rho, smoothing_length)
-
-    # sum all forces
-    force = pressure_normalization * pressure_force + viscous_normalization * viscous_force
-
-    # add external potential
-    particle_a[i] = force / rho + wp.vec3(0.0, gravity, 0.0)
-
-
-@wp.kernel
-def apply_bounds(
-    particle_x: wp.array[wp.vec3],
-    particle_v: wp.array[wp.vec3],
-    damping_coef: float,
-    width: float, height: float, length: float,
-):
-    tid = wp.tid()
-
-    # get pos and velocity
-    x = particle_x[tid]
-    v = particle_v[tid]
-
-    # clamp x left
-    if x[0] < 0.0:
-        x = wp.vec3(0.0, x[1], x[2])
-        v = wp.vec3(v[0] * damping_coef, v[1], v[2])
-
-    # clamp x right
-    if x[0] > width:
-        x = wp.vec3(width, x[1], x[2])
-        v = wp.vec3(v[0] * damping_coef, v[1], v[2])
-
-    # clamp y bot
-    if x[1] < 0.0:
-        x = wp.vec3(x[0], 0.0, x[2])
-        v = wp.vec3(v[0], v[1] * damping_coef, v[2])
-
-    # clamp z left
-    if x[2] < 0.0:
-        x = wp.vec3(x[0], x[1], 0.0)
-        v = wp.vec3(v[0], v[1], v[2] * damping_coef)
-
-    # clamp z right
-    if x[2] > length:
-        x = wp.vec3(x[0], x[1], length)
-        v = wp.vec3(v[0], v[1], v[2] * damping_coef)
-
-    # apply clamps
-    particle_x[tid] = x
-    particle_v[tid] = v
-
-
-@wp.kernel
-def kick(particle_v: wp.array[wp.vec3], particle_a: wp.array[wp.vec3], dt: float):
-    tid = wp.tid()
-    v = particle_v[tid]
-    particle_v[tid] = v + particle_a[tid] * dt
-
-
-@wp.kernel
-def drift(particle_x: wp.array[wp.vec3], particle_v: wp.array[wp.vec3], dt: float):
-    tid = wp.tid()
-    x = particle_x[tid]
-    particle_x[tid] = x + particle_v[tid] * dt
+# //////////////////////////////////////////////////////////////////////////////
 
 
 class Example:
@@ -421,7 +269,9 @@ class Example:
         self.verbose = verbose
         self.sim_time = 0.0
 
-        init.initialize(self, config)
+        self.config = config if config is not None else fn.PBFConfig()
+        fn.init_parameters(self)
+        fn.init_device_buffers(self)
         self.renderer = (
             wp.render.UsdRenderer(stage_path)
             if stage_path else None
