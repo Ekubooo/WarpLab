@@ -1,11 +1,11 @@
-import numpy as np
-
 import warp as wp
 import warp.render
 
 if __package__:
+    from . import pbf_init as init
     from .pbf_functions import *
 else:
+    import pbf_init as init
     from pbf_functions import *  # noqa: F403
 
 @wp.kernel
@@ -416,103 +416,16 @@ def drift(particle_x: wp.array[wp.vec3], particle_v: wp.array[wp.vec3], dt: floa
     particle_x[tid] = x + particle_v[tid] * dt
 
 
-@wp.kernel
-def initialize_particles(
-    particle_x: wp.array[wp.vec3],
-    smoothing_length: float,
-    width: float, height: float, length: float
-):
-    tid = wp.tid()
-
-    # particle number per axis
-    nr_x = int(width / 4.0 / smoothing_length)
-    nr_y = int(height / smoothing_length)
-    nr_z = int(length / 4.0 / smoothing_length)
-
-    # calculate particle position
-    z = float(tid % nr_z)
-    y = float((tid // nr_z) % nr_y)
-    x = float((tid // (nr_z * nr_y)) % nr_x)
-    pos = smoothing_length * wp.vec3(x, y, z)
-
-    # add small jitter
-    state = wp.rand_init(123, tid)
-    pos = pos + 0.001 * smoothing_length * wp.vec3(wp.randn(state), wp.randn(state), wp.randn(state))
-
-    # set position
-    particle_x[tid] = pos
-
-
 class Example:
     def __init__(self, stage_path="example_pbf.usd", verbose=False):
         self.verbose = verbose
-
-        # render params
-        fps = 60
-        self.frame_dt = 1.0 / fps
         self.sim_time = 0.0
 
-        # simulation params
-        self.smoothing_length = smoothingLength  # NOTE change this to adjust number of particles
-        self.width = 80.0  # x
-        self.height = 80.0  # y
-        self.length = 80.0  # z
-        self.boundary = wp.vec3(self.width, self.height, self.length)
-        self.isotropic_exp = 20
-        self.base_density = 1.0
-        self.particle_mass = 0.01 * self.smoothing_length**3  # reduce according to smoothing length
-
-        # self.dt = 0.01 * self.smoothing_length  # decrease sim dt by smoothing length
-        self.dt = self.frame_dt / 3.0
-
-        self.dynamic_visc = 0.025
-        self.damping_coef = -0.95
-        self.gravity = -0.1
-        self.n = int(
-            self.height * (self.width / 2.0) * (self.height / 2.0) / (self.smoothing_length**3)
-        )  # number particles (small box in corner)
-        self.sim_step_to_frame_ratio = int(32 / self.smoothing_length)
-        self.substep = 3
-        self.iterations = 5
-
-        # constants
-        self.density_normalization = (315.0 * self.particle_mass) / (
-            64.0 * np.pi * self.smoothing_length**9
-        )  # integrate density kernel
-        self.pressure_normalization = -(45.0 * self.particle_mass) / (np.pi * self.smoothing_length**6)
-        self.viscous_normalization = (45.0 * self.dynamic_visc * self.particle_mass) / (
-            np.pi * self.smoothing_length**6
+        init.initialize(self)
+        self.renderer = (
+            wp.render.UsdRenderer(stage_path)
+            if stage_path else None
         )
-
-        # allocate arrays
-        self.pos = wp.empty(self.n, dtype=wp.vec3)
-        self.pre_Pos = wp.zeros(self.n, dtype=wp.vec3)
-        self.pre_New = wp.zeros(self.n, dtype=wp.vec3)
-        self.delta_Pos = wp.zeros(self.n, dtype=wp.vec3)
-        self.v = wp.zeros(self.n, dtype=wp.vec3)
-
-        self.delta_Vel = wp.zeros(self.n, wp.vec3)
-        self.curl = wp.zeros(self.n, dtype=wp.vec4)
-
-        self.lambda_Opt = wp.zeros(self.n, dtype=float)
-        self.rho = wp.zeros(self.n, dtype=float)
-        self.a = wp.zeros(self.n, dtype=wp.vec3)
-
-        # set random positions
-        wp.launch(
-            kernel=initialize_particles,
-            dim=self.n,
-            inputs=[self.pos, self.smoothing_length, self.width, self.height, self.length],
-        )  # initialize in small area
-
-        # create hash array
-        grid_size = int(self.height / (4.0 * self.smoothing_length))
-        self.grid = wp.HashGrid(128, 128, 128)
-
-        # renderer
-        self.renderer = None
-        if stage_path:
-            self.renderer = wp.render.UsdRenderer(stage_path)
 
     def step(self):
         with wp.ScopedTimer("sub-step", synchronize=True):
