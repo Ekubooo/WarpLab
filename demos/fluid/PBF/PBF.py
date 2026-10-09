@@ -417,11 +417,11 @@ def drift(particle_x: wp.array[wp.vec3], particle_v: wp.array[wp.vec3], dt: floa
 
 
 class Example:
-    def __init__(self, stage_path="example_pbf.usd", verbose=False):
+    def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None):
         self.verbose = verbose
         self.sim_time = 0.0
 
-        init.initialize(self)
+        init.initialize(self, config)
         self.renderer = (
             wp.render.UsdRenderer(stage_path)
             if stage_path else None

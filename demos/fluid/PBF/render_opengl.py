@@ -14,8 +14,10 @@ except ModuleNotFoundError:
     from demos.fluid.common.billboard_renderer import create_billboard_renderer
 
 try:
+    from .pbf_init import PBFConfig
     from .simulation import create_pbf_simulation
 except ImportError:
+    from pbf_init import PBFConfig
     from simulation import create_pbf_simulation
 
 
@@ -35,7 +37,22 @@ def positive_float(value: str) -> float:
     return parsed
 
 
-def parse_args():
+def config_from_args(args):
+    """Use config defaults for every field that was not explicitly overridden."""
+    overrides = {}
+    for name in (
+        "particle_radius", "rest_density", "frame_dt", "lambda_regularization",
+        "substeps", "pressure_iterations", "container_size", "block_start", "block_end",
+    ):
+        if hasattr(args, name):
+            value = getattr(args, name)
+            if name in ("container_size", "block_start", "block_end"):
+                value = tuple(value)
+            overrides[name] = value
+    return PBFConfig(**overrides) if overrides else None
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
@@ -57,7 +74,60 @@ def parse_args():
         help="Particle speed mapped to the white end of the billboard color gradient.",
     )
     parser.add_argument("--verbose", action="store_true", help="Print additional per-kernel timing information.")
-    return parser.parse_args()
+
+    config_options = parser.add_argument_group("PBF configuration")
+    config_options.add_argument(
+        "--particle-radius", type=float, default=argparse.SUPPRESS,
+        help=f"Particle radius in meters (default: {PBFConfig.particle_radius}).",
+    )
+    config_options.add_argument(
+        "--rest-density", type=float, default=argparse.SUPPRESS,
+        help=(
+            "Rest density for derived particle mass; not yet used by the legacy solver "
+            f"(default: {PBFConfig.rest_density})."
+        ),
+    )
+    config_options.add_argument(
+        "--frame-dt", type=float, default=argparse.SUPPRESS,
+        help=f"Physical time per frame in seconds (default: {PBFConfig.frame_dt}).",
+    )
+    config_options.add_argument(
+        "--lambda-regularization", type=float, default=argparse.SUPPRESS,
+        help=(
+            "Dimensionless alpha for derived lambda epsilon; not yet used by the legacy solver "
+            f"(default: {PBFConfig.lambda_regularization})."
+        ),
+    )
+    config_options.add_argument(
+        "--substeps", type=int, default=argparse.SUPPRESS,
+        help=f"Physical substeps per frame (default: {PBFConfig.substeps}).",
+    )
+    config_options.add_argument(
+        "--pressure-iterations", type=int, default=argparse.SUPPRESS,
+        help=f"Pressure iterations per substep (default: {PBFConfig.pressure_iterations}).",
+    )
+    config_options.add_argument(
+        "--container-size", type=float, nargs=3, metavar=("X", "Y", "Z"),
+        default=argparse.SUPPRESS,
+        help=f"Container dimensions in meters (default: {PBFConfig.container_size}).",
+    )
+    config_options.add_argument(
+        "--block-start", type=float, nargs=3, metavar=("X", "Y", "Z"),
+        default=argparse.SUPPRESS,
+        help=f"Fluid block minimum coordinates (default: {PBFConfig.block_start}).",
+    )
+    config_options.add_argument(
+        "--block-end", type=float, nargs=3, metavar=("X", "Y", "Z"),
+        default=argparse.SUPPRESS,
+        help=f"Fluid block maximum coordinates (default: {PBFConfig.block_end}).",
+    )
+
+    args = parser.parse_args(argv)
+    try:
+        args.config = config_from_args(args)
+    except ValueError as error:
+        parser.error(str(error))
+    return args
 
 
 def main():
@@ -67,7 +137,7 @@ def main():
         raise SystemExit("--speed-color-max must be greater than --speed-color-mid")
 
     with wp.ScopedDevice(args.device):
-        simulation = create_pbf_simulation(verbose=args.verbose)
+        simulation = create_pbf_simulation(verbose=args.verbose, config=args.config)
         renderer = create_billboard_renderer(device=wp.get_device(), title="Warp PBF")
         billboard_radius = simulation.smoothing_length
         frame = 0

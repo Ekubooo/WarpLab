@@ -6,6 +6,6 @@ except ImportError:
     from PBF import Example as PBFExample
 
 
-def create_pbf_simulation(verbose: bool = False) -> PBFExample:
-    """Create PBF without the USD renderer used by the standalone example."""
-    return PBFExample(stage_path=None, verbose=verbose)
+def create_pbf_simulation(verbose: bool = False, config=None) -> PBFExample:
+    """Create PBF with optional configuration and no USD output."""
+    return PBFExample(stage_path=None, verbose=verbose, config=config)
