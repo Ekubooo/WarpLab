@@ -271,6 +271,7 @@ def _random_grid_terrain(
 
     # Template box for a grid cell
     template_vertices, template_faces = _create_box((grid_width, grid_width, 1.0))
+    top_vertices = template_vertices[:, 2] > 0
 
     # Create grid with random heights
     all_vertices = []
@@ -290,8 +291,8 @@ def _random_grid_terrain(
             v[:, 1] += y
             v[:, 2] -= 0.5
 
-            # Raise top face vertices (indices 4-7) by random height
-            v[4:8, 2] += h_noise
+            # Move every copy of the top corners, including the side-face vertices.
+            v[top_vertices, 2] += h_noise
 
             all_vertices.append(v)
             all_faces.append(template_faces + vertex_count)

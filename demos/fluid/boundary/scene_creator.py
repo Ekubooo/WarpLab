@@ -6,7 +6,10 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from terrain_generator import create_mesh_terrain
+if __package__:
+    from .terrain_generator import create_mesh_terrain
+else:
+    from terrain_generator import create_mesh_terrain
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
