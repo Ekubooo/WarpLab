@@ -21,9 +21,11 @@ except ModuleNotFoundError:
 
 try:
     from .pbf_helper import PBFConfig
+    from . import config_io
     from .simulation import create_pbf_simulation
 except ImportError:
     from pbf_helper import PBFConfig
+    import config_io
     from simulation import create_pbf_simulation
 
 
@@ -96,7 +98,7 @@ def positive_float(value: str) -> float:
 
 
 def config_from_args(args):
-    """Use config defaults for every field that was not explicitly overridden."""
+    """Apply either JSON or explicit CLI overrides to config defaults."""
     overrides = {}
     for name in (
         "particle_radius", "rest_density", "frame_dt", "lambda_regularization",
@@ -108,6 +110,10 @@ def config_from_args(args):
             if name in ("container_size", "block_start", "block_end"):
                 value = tuple(value)
             overrides[name] = value
+    if args.config_path is not None:
+        if overrides:
+            raise ValueError("--config cannot be combined with PBF configuration arguments")
+        return config_io.load_config(args.config_path)
     return PBFConfig(**overrides) if overrides else None
 
 
@@ -133,6 +139,14 @@ def parse_args(argv=None):
         help="Particle speed mapped to the white end of the billboard color gradient.",
     )
     parser.add_argument("--verbose", action="store_true", help="Print additional per-kernel timing information.")
+    parser.add_argument(
+        "--config", dest="config_path", metavar="PATH",
+        help="Load JSON config instead of PBF configuration arguments.",
+    )
+    parser.add_argument(
+        "--export-config", metavar="NAME", nargs="?", const=config_io.DEFAULT_CONFIG_NAME,
+        help=f"Save config to the demo's config/NAME and exit (default name: {config_io.DEFAULT_CONFIG_NAME}).",
+    )
 
     config_options = parser.add_argument_group("PBF configuration")
     config_options.add_argument(
@@ -196,6 +210,13 @@ def parse_args(argv=None):
 
 def main():
     args = parse_args()
+
+    if args.export_config is not None:
+        try:
+            print(config_io.save_config(args.config or PBFConfig(), args.export_config))
+        except (OSError, ValueError) as error:
+            raise SystemExit(f"Cannot export config: {error}") from error
+        return
 
     if args.speed_color_max <= args.speed_color_mid:
         raise SystemExit("--speed-color-max must be greater than --speed-color-mid")

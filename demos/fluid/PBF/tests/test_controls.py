@@ -1,7 +1,10 @@
 """PBF controls, reset invariants and the signed density constraint."""
 import contextlib
-from dataclasses import replace
+from dataclasses import asdict, replace
 import io
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -84,6 +87,27 @@ class ControlsTest(unittest.TestCase):
         sim.reverse_gravity()
         self.step(sim)
         self.assertGreater(float((sim.pos.numpy() - before)[:, 1].mean()), 0)
+
+    def test_reset_preserves_imported_startup_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "startup.json"
+            path.write_text(json.dumps(asdict(CONFIG)), encoding="utf-8")
+            config = frontend.parse_args(["--config", str(path)]).config
+        sim = self.make_simulation(config)
+        initial = sim.pos.numpy()
+        self.step(sim, 3)
+        expected_pos, expected_vel = sim.pos.numpy(), sim.v.numpy()
+        sim.reverse_gravity()
+        with wp.ScopedDevice(self.device):
+            sim.reset()
+        self.assertIs(sim.config, config)
+        self.assertEqual(sim.config, CONFIG)
+        self.assertEqual(sim.sim_time, 0)
+        self.assertEqual(tuple(sim.gravity), tuple(wp.vec3(*config.gravity)))
+        np.testing.assert_array_equal(sim.pos.numpy(), initial)
+        self.step(sim, 3)
+        np.testing.assert_array_equal(sim.pos.numpy(), expected_pos)
+        np.testing.assert_array_equal(sim.v.numpy(), expected_vel)
 
     def test_clamp_preserves_zero_and_signed_constraint(self):
         sim = self.make_simulation()

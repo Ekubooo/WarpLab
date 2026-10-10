@@ -3,8 +3,10 @@ import warp.render
 
 if __package__:
     from . import pbf_helper as fn
+    from . import config_io
 else:
     import pbf_helper as fn
+    import config_io
 
 @wp.kernel
 def apply_predict(
@@ -407,7 +409,7 @@ class Example:
             self.renderer.end_frame()
 
 
-if __name__ == "__main__":
+def parse_args(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -421,18 +423,50 @@ if __name__ == "__main__":
     parser.add_argument("--num-frames", type=int, default=480, help="Total number of frames.")
     parser.add_argument("--verbose", action="store_true", help="Print out additional status messages during execution.")
     parser.add_argument(
+        "--config", dest="config_path", metavar="PATH",
+        help="Load JSON config instead of PBF configuration arguments.",
+    )
+    parser.add_argument(
+        "--export-config", metavar="NAME", nargs="?", const=config_io.DEFAULT_CONFIG_NAME,
+        help=f"Save config to the demo's config/NAME and exit (default name: {config_io.DEFAULT_CONFIG_NAME}).",
+    )
+    parser.add_argument(
         "--clamp-negative-pressure",
         action=argparse.BooleanOptionalAction,
-        default=fn.PBFConfig.clamp_negative_pressure,
-        help="Clamp negative density constraints to zero.",
+        default=argparse.SUPPRESS,
+        help=f"Clamp negative density constraints to zero (default: {fn.PBFConfig.clamp_negative_pressure}).",
     )
 
-    args = parser.parse_known_args()[0]
+    args = parser.parse_args(argv)
+    try:
+        if args.config_path is not None:
+            if hasattr(args, "clamp_negative_pressure"):
+                raise ValueError("--config cannot be combined with PBF configuration arguments")
+            args.config = config_io.load_config(args.config_path)
+        else:
+            overrides = (
+                {"clamp_negative_pressure": args.clamp_negative_pressure}
+                if hasattr(args, "clamp_negative_pressure") else {}
+            )
+            args.config = fn.PBFConfig(**overrides)
+    except ValueError as error:
+        parser.error(str(error))
+    return args
+
+
+def main():
+    args = parse_args()
+    if args.export_config is not None:
+        try:
+            print(config_io.save_config(args.config, args.export_config))
+        except (OSError, ValueError) as error:
+            raise SystemExit(f"Cannot export config: {error}") from error
+        return
 
     with wp.ScopedDevice(args.device):
         example = Example(
             stage_path=args.stage_path, verbose=args.verbose,
-            config=fn.PBFConfig(clamp_negative_pressure=args.clamp_negative_pressure),
+            config=args.config,
         )
 
         for _ in range(args.num_frames):
@@ -441,3 +475,7 @@ if __name__ == "__main__":
 
         if example.renderer:
             example.renderer.save()
+
+
+if __name__ == "__main__":
+    main()
