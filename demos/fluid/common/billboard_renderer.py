@@ -298,23 +298,30 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
                 color1_resource.unmap()
 
 
-def create_billboard_renderer(device=None, title="Warp Fluid"):
-    """Create a renderer using the camera settings shared by the SPH demo."""
+def create_billboard_renderer(
+    device=None,
+    title="Warp Fluid",
+    *,
+    scaling=0.05,
+    camera_pos=(2.0, 3.0, 10.0),
+    camera_front=(-0.1, -0.1, -1.0),
+):
+    """Create a renderer with optional scene scale and initial camera overrides."""
     # OpenGLRenderer imports Pyglet lazily, so setting PRIME here is early
     # enough to create its GL context on the same NVIDIA GPU as CUDA.
     configure_nvidia_prime_render_offload()
 
     return BillboardRenderer(
         title=title,
-        scaling=0.05,
+        scaling=scaling,
         fps=120,
         up_axis="Y",
         screen_width=1280,
         screen_height=720,
         near_plane=0.1,
         far_plane=100.0,
-        camera_pos=(2.0, 3.0, 10.0),
-        camera_front=(-0.1, -0.1, -1.0),
+        camera_pos=camera_pos,
+        camera_front=camera_front,
         camera_up=(0.0, 1.0, 0.0),
         background_color=(0.0, 0.0, 0.0),
         vsync=True,

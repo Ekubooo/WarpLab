@@ -1,6 +1,7 @@
 """Executable OpenGL billboard frontend for the Warp PBF simulation."""
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -14,10 +15,10 @@ except ModuleNotFoundError:
     from demos.fluid.common.billboard_renderer import create_billboard_renderer
 
 try:
-    from .pbf_functions import PBFConfig
+    from .pbf_helper import PBFConfig
     from .simulation import create_pbf_simulation
 except ImportError:
-    from pbf_functions import PBFConfig
+    from pbf_helper import PBFConfig
     from simulation import create_pbf_simulation
 
 
@@ -64,13 +65,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--speed-color-mid",
         type=positive_float,
-        default=20,
+        default=2.0,
         help="Particle speed mapped to the pale-blue middle of the color map.",
     )
     parser.add_argument(
         "--speed-color-max",
         type=positive_float,
-        default=25,
+        default=PBFConfig.max_speed,
         help="Particle speed mapped to the white end of the billboard color gradient.",
     )
     parser.add_argument("--verbose", action="store_true", help="Print additional per-kernel timing information.")
@@ -83,7 +84,7 @@ def parse_args(argv=None):
     config_options.add_argument(
         "--rest-density", type=float, default=argparse.SUPPRESS,
         help=(
-            "Rest density for derived particle mass; not yet used by the legacy solver "
+            "Rest density for particle mass; cancels in normalized equal-mass fluid constraints "
             f"(default: {PBFConfig.rest_density})."
         ),
     )
@@ -94,7 +95,7 @@ def parse_args(argv=None):
     config_options.add_argument(
         "--lambda-regularization", type=float, default=argparse.SUPPRESS,
         help=(
-            "Dimensionless alpha for derived lambda epsilon; not yet used by the legacy solver "
+            "Dimensionless solver regularization alpha; epsilon = alpha / h^2 "
             f"(default: {PBFConfig.lambda_regularization})."
         ),
     )
@@ -138,8 +139,29 @@ def main():
 
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(verbose=args.verbose, config=args.config)
-        renderer = create_billboard_renderer(device=wp.get_device(), title="Warp PBF")
-        billboard_radius = simulation.smoothing_length
+        # Focus on the fluid near the floor; distance follows the container footprint.
+        camera_azimuth_deg = 35.0
+        camera_elevation_deg = 25.0
+        camera_distance_scale = 1.75
+        camera_target = wp.vec3(0.5 * simulation.width, 0.25 * simulation.width, 0.25 * simulation.length)
+        # camera_target = wp.vec3(0.0, 0.0, 0.0)
+        azimuth = math.radians(camera_azimuth_deg)
+        elevation = math.radians(camera_elevation_deg)
+        camera_offset = wp.vec3(
+            math.cos(elevation) * math.sin(azimuth),
+            math.sin(elevation),
+            math.cos(elevation) * math.cos(azimuth),
+        )
+        camera_distance = camera_distance_scale * max(simulation.width, simulation.length)
+        camera_pos = camera_target + camera_distance * camera_offset
+        renderer = create_billboard_renderer(
+            device=wp.get_device(),
+            title="Warp PBF",
+            scaling=1.0,
+            camera_pos=tuple(camera_pos),
+            camera_front=tuple(-camera_offset),
+        )
+        billboard_radius = simulation.particle_radius
         frame = 0
 
         try:

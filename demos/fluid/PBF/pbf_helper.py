@@ -1,9 +1,8 @@
 """PBF configuration, initialization, and device mathematics.
 
-Parameter relationships follow PBF2WayCoupling; particle state is initialized
-by a Warp kernel on the active device. The legacy solver formulas in
-PBF.py/pbf_functions.py have not yet been migrated. Solver constants are bound
-here before the first solver compilation, for one fixed configuration per process.
+Particle state is initialized by a Warp kernel on the active device.
+Solver coefficients are precomputed here before the first solver compilation,
+for one fixed configuration per process.
 """
 
 from dataclasses import dataclass
@@ -24,6 +23,12 @@ class PBFConfig:
     substeps: int = 3
     pressure_iterations: int = 3
     lambda_regularization: float = 2.0
+    gravity: tuple = (0.0, -9.81, 0.0)
+    viscosity: float = 0.25
+    vorticity_confinement: float = 0.5
+    max_speed: float = 6.0
+    artificial_pressure_strength: float = 0.0025
+    artificial_pressure_q: float = 0.3
 
     # Reference container/block translated by (1.55, 0, 0.8), so the existing
     # zero-origin position constraint can remain unchanged.
@@ -34,7 +39,7 @@ class PBFConfig:
 
     def __post_init__(self):
         for name in (
-            "particle_radius", "rest_density", "frame_dt", "lambda_regularization"
+            "particle_radius", "rest_density", "frame_dt", "lambda_regularization", "max_speed"
         ):
             value = getattr(self, name)
             if not np.isfinite(value) or value <= 0:
@@ -43,7 +48,13 @@ class PBFConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("container_size", "block_start", "block_end", "initial_velocity"):
+        for name in ("viscosity", "vorticity_confinement", "artificial_pressure_strength"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if not np.isfinite(self.artificial_pressure_q) or not 0 < self.artificial_pressure_q < 1:
+            raise ValueError("artificial_pressure_q must be finite and in (0, 1)")
+        for name in ("container_size", "block_start", "block_end", "initial_velocity", "gravity"):
             value = np.asarray(getattr(self, name), dtype=float)
             if value.shape != (3,) or not np.isfinite(value).all():
                 raise ValueError(f"{name} must contain three finite components")
@@ -109,7 +120,7 @@ def compute_hash_grid_dims(container_min, container_max, cell_width):
 
 def init_parameters(sim):
     """Derive all particle scales and grid dimensions from the configuration."""
-    global S_corr_K, S_corr_N, Inv_Rho0, Lamb_Eps, visStrength, vorConfirm, MaxVel
+    global S_corr_K, S_corr_Q, Inv_Rho0, Lamb_Eps, visStrength, vorConfirm, MaxVel, Gravity
     global K_SPow3, K_DSPow3, K_SPoly6, Fluid_Volume, Fluid_Mass
     global Boundary_Restitution, Boundary_Tangential_Retention
     global Boundary_Contact_Eps, Boundary_Disturbance
@@ -126,12 +137,7 @@ def init_parameters(sim):
     fluid_mass = fluid_volume * rest_density
     lambda_epsilon = config.lambda_regularization / sim.support_radius**2
 
-    # Fixed solver settings; keep their existing values.
-    ScorrK = 0.01
-    ScorrN = 4.0
-    viscosityStr = 0.025
-    vorticityCon = 0.5
-    VelLimit = 8.0
+    # Keep the existing box collision settings independent of fluid parameters.
     boundaryRestitution = 0.98
     boundaryTangentialRetention = 1.0
     boundaryContactEpsScale = 1.0e-4
@@ -146,13 +152,15 @@ def init_parameters(sim):
     # Module globals are read directly by wp.func and by the solver via fn.
     Fluid_Volume = wp.constant(fluid_volume)
     Fluid_Mass = wp.constant(fluid_mass)
-    S_corr_K = wp.constant(ScorrK)
-    S_corr_N = wp.constant(ScorrN)
+    # Lambda has units of length squared; scale tensile strength accordingly.
+    S_corr_K = wp.constant(config.artificial_pressure_strength * sim.support_radius**2)
+    S_corr_Q = wp.constant(config.artificial_pressure_q)
     Inv_Rho0 = wp.constant(1.0 / rest_density)
     Lamb_Eps = wp.constant(lambda_epsilon)
-    visStrength = wp.constant(viscosityStr)
-    vorConfirm = wp.constant(vorticityCon)
-    MaxVel = wp.constant(VelLimit)
+    visStrength = wp.constant(config.viscosity)
+    vorConfirm = wp.constant(config.vorticity_confinement)
+    MaxVel = wp.constant(config.max_speed)
+    Gravity = wp.constant(wp.vec3(*config.gravity))
     K_SPow3 = wp.constant(paraPow3)
     K_DSPow3 = wp.constant(3.0 * paraPow3)
     K_SPoly6 = wp.constant(paraPoly6)
@@ -197,6 +205,8 @@ def init_device_buffers(sim):
     sim.pre_New = wp.zeros(sim.n, dtype=wp.vec3)
     sim.delta_Pos = wp.zeros(sim.n, dtype=wp.vec3)
     sim.lambda_Opt = wp.zeros(sim.n, dtype=float)
+    # rho/rho0 at the corrected positions, shared by XSPH and vorticity.
+    sim.density = wp.zeros(sim.n, dtype=float)
 
     sim.delta_Vel = wp.zeros(sim.n, dtype=wp.vec3)
     sim.curl = wp.zeros(sim.n, dtype=wp.vec4)
