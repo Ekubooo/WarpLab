@@ -3,16 +3,21 @@
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 
 import warp as wp
 
 try:
-    from demos.fluid.common.billboard_renderer import create_billboard_renderer
+    from demos.fluid.common.billboard_renderer import (
+        BillboardRenderer, configure_nvidia_prime_render_offload,
+    )
 except ModuleNotFoundError:
     # Support direct execution from the repository root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from demos.fluid.common.billboard_renderer import create_billboard_renderer
+    from demos.fluid.common.billboard_renderer import (
+        BillboardRenderer, configure_nvidia_prime_render_offload,
+    )
 
 try:
     from .pbf_helper import PBFConfig
@@ -20,6 +25,58 @@ try:
 except ImportError:
     from pbf_helper import PBFConfig
     from simulation import create_pbf_simulation
+
+
+class PBFRenderer(BillboardRenderer):
+    """Let the PBF main loop handle pause and deferred reset requests."""
+
+    def begin_frame(self, t=None):
+        super().begin_frame(t)
+        # Warp treats zero as an omitted time; reset must display simulation time zero.
+        if t is not None:
+            self.time = t
+
+    def end_frame(self):
+        self._last_end_frame_time = time.time()
+        if self._add_shape_instances:
+            self.allocate_shape_instances()
+        if self._update_shape_instances:
+            self.update_shape_instances()
+        self.update()
+
+
+def create_pbf_renderer(
+    device=None, title="Warp PBF", *, scaling=0.05,
+    camera_pos=(2.0, 3.0, 10.0), camera_front=(-0.1, -0.1, -1.0),
+):
+    """Keep the shared frontend's view settings with PBF-specific pause handling."""
+    configure_nvidia_prime_render_offload()
+    return PBFRenderer(
+        title=title, scaling=scaling, fps=120, up_axis="Y",
+        screen_width=1280, screen_height=720, near_plane=0.1, far_plane=100.0,
+        camera_pos=camera_pos, camera_front=camera_front, camera_up=(0.0, 1.0, 0.0),
+        background_color=(0.0, 0.0, 0.0), vsync=True, device=device,
+    )
+
+
+def register_keyboard_controls(renderer, *, on_reset, on_reverse_gravity):
+    """Consume PBF shortcuts before Warp applies its default G binding."""
+    import pyglet
+
+    def on_key_press(symbol, _modifiers):
+        if symbol == pyglet.window.key.G:
+            on_reverse_gravity()
+        elif symbol == pyglet.window.key.R:
+            renderer.paused = True
+            on_reset()
+        elif symbol == pyglet.window.key.P:
+            renderer.draw_grid = not renderer.draw_grid
+        else:
+            return None
+        return pyglet.event.EVENT_HANDLED
+
+    renderer.register_key_press_callback(on_key_press)
+    return on_key_press
 
 
 def nonnegative_int(value: str) -> int:
@@ -44,6 +101,7 @@ def config_from_args(args):
     for name in (
         "particle_radius", "rest_density", "frame_dt", "lambda_regularization",
         "substeps", "pressure_iterations", "container_size", "block_start", "block_end",
+        "clamp_negative_pressure",
     ):
         if hasattr(args, name):
             value = getattr(args, name)
@@ -77,6 +135,11 @@ def parse_args(argv=None):
     parser.add_argument("--verbose", action="store_true", help="Print additional per-kernel timing information.")
 
     config_options = parser.add_argument_group("PBF configuration")
+    config_options.add_argument(
+        "--clamp-negative-pressure", action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        help=f"Clamp negative density constraints to zero (default: {PBFConfig.clamp_negative_pressure}).",
+    )
     config_options.add_argument(
         "--particle-radius", type=float, default=argparse.SUPPRESS,
         help=f"Particle radius in meters (default: {PBFConfig.particle_radius}).",
@@ -154,7 +217,7 @@ def main():
         )
         camera_distance = camera_distance_scale * max(simulation.width, simulation.length)
         camera_pos = camera_target + camera_distance * camera_offset
-        renderer = create_billboard_renderer(
+        renderer = create_pbf_renderer(
             device=wp.get_device(),
             title="Warp PBF",
             scaling=1.0,
@@ -163,9 +226,23 @@ def main():
         )
         billboard_radius = simulation.particle_radius
         frame = 0
+        reset_requested = False
+
+        def request_reset():
+            nonlocal reset_requested
+            reset_requested = True
+
+        register_keyboard_controls(
+            renderer, on_reset=request_reset,
+            on_reverse_gravity=simulation.reverse_gravity,
+        )
 
         try:
             while renderer.is_running() and (args.num_frames == 0 or frame < args.num_frames):
+                if reset_requested:
+                    simulation.reset()
+                    reset_requested = False
+                    renderer.paused = True
                 # Render first so the initialized PBF particles are visible.
                 renderer.begin_frame(simulation.sim_time)
                 renderer.render_billboards(
@@ -178,7 +255,8 @@ def main():
                 )
                 renderer.end_frame()
 
-                simulation.step()
+                if not renderer.paused and not reset_requested and renderer.is_running():
+                    simulation.step()
                 frame += 1
         finally:
             renderer.close()

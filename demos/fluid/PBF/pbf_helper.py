@@ -26,9 +26,10 @@ class PBFConfig:
     gravity: tuple = (0.0, -9.81, 0.0)
     viscosity: float = 0.25
     vorticity_confinement: float = 0.5
-    max_speed: float = 6.0
-    artificial_pressure_strength: float = 0.0025
-    artificial_pressure_q: float = 0.3
+    max_speed: float = 7.5
+    artificial_pressure_strength: float = 0.0005
+    artificial_pressure_q: float = 0.1
+    clamp_negative_pressure: bool = True
 
     # Reference container/block translated by (1.55, 0, 0.8), so the existing
     # zero-origin position constraint can remain unchanged.
@@ -38,6 +39,8 @@ class PBFConfig:
     initial_velocity: tuple = (0.0, 0.0, 0.0)
 
     def __post_init__(self):
+        if not isinstance(self.clamp_negative_pressure, bool):
+            raise ValueError("clamp_negative_pressure must be a bool")
         for name in (
             "particle_radius", "rest_density", "frame_dt", "lambda_regularization", "max_speed"
         ):
@@ -121,7 +124,7 @@ def compute_hash_grid_dims(container_min, container_max, cell_width):
 def init_parameters(sim):
     """Derive all particle scales and grid dimensions from the configuration."""
     global S_corr_K, S_corr_Q, Inv_Rho0, Lamb_Eps, visStrength, vorConfirm, MaxVel, Gravity
-    global K_SPow3, K_DSPow3, K_SPoly6, Fluid_Volume, Fluid_Mass
+    global K_SPow3, K_DSPow3, K_SPoly6, Fluid_Mass
     global Boundary_Restitution, Boundary_Tangential_Retention
     global Boundary_Contact_Eps, Boundary_Disturbance
 
@@ -150,7 +153,6 @@ def init_parameters(sim):
     paraPow3 = 15.0 / (wp.pi * wp.pow(sim.smoothing_length, 6.0))
 
     # Module globals are read directly by wp.func and by the solver via fn.
-    Fluid_Volume = wp.constant(fluid_volume)
     Fluid_Mass = wp.constant(fluid_mass)
     # Lambda has units of length squared; scale tensile strength accordingly.
     S_corr_K = wp.constant(config.artificial_pressure_strength * sim.support_radius**2)
@@ -205,15 +207,17 @@ def init_device_buffers(sim):
     sim.pre_New = wp.zeros(sim.n, dtype=wp.vec3)
     sim.delta_Pos = wp.zeros(sim.n, dtype=wp.vec3)
     sim.lambda_Opt = wp.zeros(sim.n, dtype=float)
-    # rho/rho0 at the corrected positions, shared by XSPH and vorticity.
-    sim.density = wp.zeros(sim.n, dtype=float)
 
     sim.delta_Vel = wp.zeros(sim.n, dtype=wp.vec3)
     sim.curl = wp.zeros(sim.n, dtype=wp.vec4)
 
     sim.grid = wp.HashGrid(*sim.hash_grid_dims)
 
-    # init device data
+    init_particles(sim)
+
+
+def init_particles(sim):
+    """Restore the initial lattice without reallocating particle storage."""
     wp.launch(
         kernel=_initialize_particles_kernel,
         dim=sim.n,

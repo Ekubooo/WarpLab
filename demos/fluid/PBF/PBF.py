@@ -32,12 +32,13 @@ def calc_lambda(
     smoothing_length: float,
     pre_Pos: wp.array[wp.vec3],
     pre_New: wp.array[wp.vec3],
-    lambda_Opt: wp.array[float],
-    normalized_density: wp.array[float]
+    clamp_negative_pressure: int,
+    lambda_Opt: wp.array[float]
 ):
     density = float(0.0)
     grad_j = float(0.0)
     grad_i = wp.vec3(0,0,0)
+    pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
     # id of particle that order by hash/bucket/gridIndex(not "grid id")
     tid = wp.tid()
@@ -56,7 +57,7 @@ def calc_lambda(
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
         # Self density is included by the grid query; its zero gradient is harmless.
         density += fn.Fluid_Mass * fn.Poly6(dst2N, smoothing_length)
-        currGrad = dir2N * fn.Fluid_Volume * fn.DPow3(dst2N, smoothing_length)
+        currGrad = dir2N * pressure_scale * fn.DPow3(dst2N, smoothing_length)
 
         grad_i += currGrad
         if index!=i : 
@@ -64,11 +65,11 @@ def calc_lambda(
         # do something.
     
     gradSum = grad_j + wp.dot(grad_i, grad_i)
-    # constraint = wp.max(density*fn.Inv_Rho0 - 1.0, 0.0)
     constraint = density*fn.Inv_Rho0 - 1.0
+    if clamp_negative_pressure != 0:
+        constraint = wp.max(constraint, 0.0)
     lambdaCurr = -constraint / (gradSum + fn.Lamb_Eps)
 
-    normalized_density[i] = density * fn.Inv_Rho0
     lambda_Opt[i] = lambdaCurr
 
 @wp.kernel
@@ -91,6 +92,7 @@ def calc_deltaPos(
     WDeltaQ = fn.Poly6(delta_Q, smoothing_length)
     lambda_i = lambda_Opt[i]
     delta_Movement = wp.vec3(0,0,0)
+    pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
     for index in neighbors:
         if index == i: 
@@ -115,7 +117,7 @@ def calc_deltaPos(
         currGrad = dir2N * fn.DPow3(dst2N, smoothing_length)
         delta_Movement -= lambda_Sum * currGrad
 
-    delta_Pos[i] = delta_Movement * fn.Fluid_Volume
+    delta_Pos[i] = delta_Movement * pressure_scale
 
     # what if fusion？
     # currPos = delta_Pos[tid] + pre_Pos[tid]
@@ -163,7 +165,6 @@ def calc_curl(
     smoothing_length: float,
     pre_Pos: wp.array[wp.vec3],
     vel: wp.array[wp.vec3],
-    normalized_density: wp.array[float],
     curl: wp.array[wp.vec4]
 ):
     tid = wp.tid()
@@ -174,6 +175,7 @@ def calc_curl(
     # data
     currVel = vel[i]
     omega_i = wp.vec3(0,0,0)
+    volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
     for index in neighbors:
         if index == i: 
@@ -189,8 +191,7 @@ def calc_curl(
         # curl
         NVel = vel[index]
         Vel_ij = NVel - currVel
-        neighbor_volume = fn.Fluid_Volume / wp.max(normalized_density[index], 1.0e-6)
-        omega_i += neighbor_volume * wp.cross(Vel_ij, dir2N * fn.DPow3(dst2N, smoothing_length))
+        omega_i += volume_scale * wp.cross(Vel_ij, dir2N * fn.DPow3(dst2N, smoothing_length))
 
     curl[i] = wp.vec4(omega_i[0], omega_i[1], omega_i[2], wp.length(omega_i))
 
@@ -202,7 +203,6 @@ def calc_visvor(
     pre_Pos: wp.array[wp.vec3],
     vel: wp.array[wp.vec3],
     curl: wp.array[wp.vec4],
-    normalized_density: wp.array[float],
     delta_Vel: wp.array[wp.vec3]
 ):
     tid = wp.tid()
@@ -215,6 +215,7 @@ def calc_visvor(
     impulse = wp.vec3(0,0,0)
     etaTotal = wp.vec3(0,0,0)
     vel_corr = wp.vec3(0,0,0)
+    volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
     for index in neighbors:
         if index == i: 
@@ -232,13 +233,12 @@ def calc_visvor(
         Vel_ij = NVel - currVel
         NCurl = curl[index]
         currGrad = fn.DPow3(dst2N, smoothing_length)
-        neighbor_volume = fn.Fluid_Volume / wp.max(normalized_density[index], 1.0e-6)
 
         # voricity
-        etaTotal += -dir2N * currGrad * neighbor_volume * (NCurl[3] - curl[i][3])
+        etaTotal += -volume_scale * dir2N * currGrad * (NCurl[3] - curl[i][3])
 
         # viscosity
-        vel_corr += neighbor_volume * Vel_ij * fn.Poly6(dst2N, smoothing_length)
+        vel_corr += volume_scale * Vel_ij * fn.Poly6(dst2N, smoothing_length)
 
 
     if wp.length(etaTotal) > 1e-8:
@@ -275,12 +275,29 @@ class Example:
         self.sim_time = 0.0
 
         self.config = config if config is not None else fn.PBFConfig()
+        self.gravity = wp.vec3(*self.config.gravity)
         fn.init_parameters(self)
         fn.init_device_buffers(self)
         self.renderer = (
             wp.render.UsdRenderer(stage_path)
             if stage_path else None
         )
+
+    def reverse_gravity(self):
+        """Reverse runtime gravity while preserving the startup configuration."""
+        self.gravity = -self.gravity
+
+    def reset(self):
+        """Restore startup particles, gravity and time using the existing buffers."""
+        fn.init_particles(self)
+        for buffer in (
+            self.v, self.pre_Pos, self.pre_New, self.delta_Pos,
+            self.lambda_Opt, self.delta_Vel, self.curl,
+        ):
+            buffer.zero_()
+        self.gravity = wp.vec3(*self.config.gravity)
+        self.sim_time = 0.0
+        self.grid.build(self.pos, self.smoothing_length)
 
     def step(self):
         with wp.ScopedTimer("sub-step", synchronize=True):
@@ -292,7 +309,7 @@ class Example:
                     wp.launch(
                         kernel=apply_predict,
                         dim=self.n,
-                        inputs=[self.pos, self.dt, fn.Gravity],
+                        inputs=[self.pos, self.dt, self.gravity],
                         outputs= [self.pre_Pos, self.pre_New, self.v]
                     )
                     self.grid.build(self.pre_New, self.smoothing_length)
@@ -308,9 +325,10 @@ class Example:
                                 self.grid.id, 
                                 self.smoothing_length,
                                 self.pre_Pos,
-                                self.pre_New
+                                self.pre_New,
+                                int(self.config.clamp_negative_pressure),
                             ],
-                            outputs=[self.lambda_Opt, self.density]
+                            outputs=[self.lambda_Opt]
                         )
                         wp.launch(
                             kernel=calc_deltaPos, 
@@ -343,13 +361,6 @@ class Example:
                         inputs=[self.dt, self.boundary, self.pre_Pos],
                         outputs=[self.pos, self.v]
                     )
-                    # Refresh density after the final correction, using the rebuilt grid.
-                    wp.launch(
-                        kernel=calc_lambda,
-                        dim=self.n,
-                        inputs=[self.grid.id, self.smoothing_length, self.pre_Pos, self.pre_Pos],
-                        outputs=[self.lambda_Opt, self.density]
-                    )
                     wp.launch(
                         kernel=calc_curl,
                         dim=self.n,
@@ -357,8 +368,7 @@ class Example:
                             self.grid.id,
                             self.smoothing_length,
                             self.pre_Pos,
-                            self.v,
-                            self.density
+                            self.v
                         ],
                         outputs=[self.curl]
                     )
@@ -371,8 +381,7 @@ class Example:
                             self.smoothing_length,
                             self.pre_Pos,
                             self.v,
-                            self.curl,
-                            self.density
+                            self.curl
                         ],
                         outputs=[self.delta_Vel]
                     )
@@ -411,11 +420,20 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num-frames", type=int, default=480, help="Total number of frames.")
     parser.add_argument("--verbose", action="store_true", help="Print out additional status messages during execution.")
+    parser.add_argument(
+        "--clamp-negative-pressure",
+        action=argparse.BooleanOptionalAction,
+        default=fn.PBFConfig.clamp_negative_pressure,
+        help="Clamp negative density constraints to zero.",
+    )
 
     args = parser.parse_known_args()[0]
 
     with wp.ScopedDevice(args.device):
-        example = Example(stage_path=args.stage_path, verbose=args.verbose)
+        example = Example(
+            stage_path=args.stage_path, verbose=args.verbose,
+            config=fn.PBFConfig(clamp_negative_pressure=args.clamp_negative_pressure),
+        )
 
         for _ in range(args.num_frames):
             example.render()
