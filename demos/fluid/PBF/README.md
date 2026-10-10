@@ -1,8 +1,7 @@
-# PBF 参数
-
 ## PBFConfig
+a set of good para for the water effect
 
-| 参数 | 默认值 | 简短说明 |
+| para | value | note |
 | --- | --- | --- |
 | `particle_radius` | `0.0125` | 粒子半径，m |
 | `rest_density` | `1000.0` | 静止密度，kg/m³ |
@@ -24,7 +23,7 @@
 
 ## OpenGL CLI：render_opengl.py
 
-| 参数 | 默认值 | 简短说明 |
+| para | value | note |
 | --- | --- | --- |
 | `-h / --help` | — | 显示帮助并退出 |
 | `--device` | `None` | Warp 设备，如 `cuda:0`、`cpu` |
@@ -60,7 +59,7 @@
 
 ## 命令目录（仓库根目录）
 
-| 操作 | 命令 |
+| operation | cmd |
 | --- | --- |
 | 默认启动 | `conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl --device cuda:0` |
 | 导入 `default_para.json` | `conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl --device cuda:0 --config demos/fluid/PBF/config/default_para.json` |
