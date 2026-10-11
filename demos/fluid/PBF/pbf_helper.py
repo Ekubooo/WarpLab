@@ -33,7 +33,7 @@ class PBFConfig:
 
     # Reference container/block translated by (1.55, 0, 0.8), so the existing
     # zero-origin position constraint can remain unchanged.
-    container_size: tuple = (3.1, 8.0, 1.6)
+    container_size: tuple = (3.1, 5.0, 1.6)
     block_start: tuple = (0.05, 0.0, 0.05)
     block_end: tuple = (1.55, 1.5, 1.55)
     initial_velocity: tuple = (0.0, 0.0, 0.0)
