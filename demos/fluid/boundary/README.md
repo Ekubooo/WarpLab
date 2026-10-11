@@ -28,16 +28,24 @@ python demos/fluid/boundary/creator1.py --terrain all
 python -m demos.fluid.boundary.creator1 --terrain all
 ```
 
-生成默认阶梯与奶牛合成场景：
+生成默认阶梯与兔子合成场景：
 
 ```powershell
 python -m demos.fluid.boundary.scene_creator
 ```
 
-默认阶梯区域为 6×4 米，台阶宽 0.25 米、高度增量 0.05 米，中心平台宽 1 米。奶牛缩放为 0.5，自动放置在中央平台并下沉 0.02 米。默认导出 Y-up 场景：
+默认阶梯区域为 6×4 米，台阶宽 0.5 米、高度增量 0.1 米，中心平台为 1×1 米、顶面高约 0.5 米。默认导入 `bunny_flat_bottom.obj`，按 Y-up 输入，缩放为 5.0，绕竖直轴额外旋转 0°；兔子宽约 0.776 米、深约 0.602 米、高约 0.735 米。
+
+兔子包围盒底部中心自动放在平台中央，并下沉 0.003 米：内部 Z-up 坐标约为 `(3, 2, 0.497)`，默认 Y-up 导出后约为 `(3, 0.497, -2)`。模型完整落在平台范围内，左右各留约 0.112 米，前后各留约 0.199 米。裁平副本的整个底面都位于平台内部，实体布尔并集将其删除，连接处没有兔子底面或内部空腔。默认导出：
 
 - `Assets/output/stairs_scene.obj`：原始拼接对照，保留内部面。
 - `Assets/output/stairs_scene_bool.obj`：实体布尔并集。
+
+`bunny_flat_bottom.obj` 从 `bunny_repaired.obj` 另存而来，原始两份兔子均保留。在输入 Y-up 坐标的 `Y=0.04` 处水平裁切，删除旧凹凸底面，再封上完全共面的底面。裁掉的高度约为缩放后 0.03345 米，主体外形保持不变。平整底面在独立兔子 OBJ 中保留以保证封闭，在场景布尔结果中消失。需要重新生成副本时运行（需本地存在修复版源模型）：
+
+```powershell
+python -m demos.fluid.boundary.flatten_bunny
+```
 
 启用简化并另存 `stairs_scene_bool_simplified.obj`：
 
@@ -88,18 +96,18 @@ python demos/fluid/boundary/creator1.py --terrain heightfield --heightfield heig
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--obj PATH` | `Assets/origin/spot_triangulated_good.obj` | 输入 OBJ 模型。 |
+| `--obj PATH` | `Assets/origin/bunny_flat_bottom.obj` | 输入 OBJ 模型。 |
 | `--output PATH` | `Assets/output/stairs_scene_bool.obj` | 布尔结果 OBJ 路径。 |
 | `--raw-output PATH` | `Assets/output/stairs_scene.obj` | 原始拼接对照 OBJ 路径。 |
 | `--simplify` / `--no-simplify` | 关闭 | 开启或显式关闭简化副本导出。 |
 | `--simplify-tolerance FLOAT` | `0.001` | 简化表面容差，单位米，仅启用简化时生效。 |
 | `--simplified-output PATH` | 与布尔输出同目录，文件名为 `<stem>_simplified.obj` | 简化副本路径，须与 `--simplify` 一起使用。 |
-| `--scale FLOAT` | `0.5` | 输入模型的尺寸倍率，须大于零。 |
+| `--scale FLOAT` | `5.0` | 输入模型的尺寸倍率，须大于零。 |
 | `--yaw FLOAT` | `0.0` | 绕场景竖直 Z 轴旋转的角度，单位度。 |
 | `--obj-up-axis Y\|Z` | `Y` | 输入 OBJ 的向上轴。 |
 | `--up-axis Y\|Z` | `Y` | 输出场景的向上轴。 |
 | `--position X Y Z` | 自动放置 | 指定模型包围盒底部中心，使用 Z-up 坐标，单位米；指定后不再叠加 `--sink`。 |
-| `--sink FLOAT` | `0.02` | 自动放置时下沉的深度，单位米，须非负。 |
+| `--sink FLOAT` | `0.003` | 自动放置时下沉的深度，单位米，须非负。 |
 | `-h` / `--help` | — | 查看完整帮助。 |
 
 表中的默认资产路径相对于本目录；用户传入的相对路径相对于运行命令时的工作目录。输出会覆盖同名文件，输入和各输出路径必须互不相同。
@@ -107,9 +115,9 @@ python demos/fluid/boundary/creator1.py --terrain heightfield --heightfield heig
 自定义模型和输出的示例：
 
 ```powershell
-python -m demos.fluid.boundary.scene_creator --obj demos/fluid/boundary/Assets/origin/bunny_repaired.obj --scale 5 --yaw 30 --up-axis Z --simplify --output outputs/boundary/bunny_scene.obj --raw-output outputs/boundary/bunny_raw.obj
+python -m demos.fluid.boundary.scene_creator --obj demos/fluid/boundary/Assets/origin/bunny_flat_bottom.obj --scale 5 --yaw 30 --up-axis Z --simplify --output outputs/boundary/bunny_scene.obj --raw-output outputs/boundary/bunny_raw.obj
 ```
 
-输入模型必须是封闭、朝向一致的正体积实体；程序会焊接重复顶点，但不会自动补洞。默认奶牛资产需在本地存在，也可用 `--obj` 指定其他模型。
+输入模型必须是封闭、朝向一致的正体积实体；场景合成只焊接重复顶点，不会自动补洞或裁平。默认裁平兔子副本已包含在本目录中，也可用 `--obj` 指定其他模型；其他模型的底面和下沉深度需另行检查。
 
 阶梯尺寸和台阶参数在 `scene_creator.py` 的 `generate_stairs()` 中设置，当前没有对应 CLI 参数。放置计算统一使用 Z-up 坐标，导出时按 `--up-axis` 转换整个场景。

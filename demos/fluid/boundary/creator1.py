@@ -50,12 +50,12 @@ def generate_random_grid(seed=None):
     """随机格子；seed 为整数种子，固定值可复现布局，None 表示不固定。"""
     return create_mesh_terrain(
         grid_size=(1, 1),               # (行数, 列数)：行沿 Y、列沿 X；这里仅生成一块。
-        block_size=(6.0, 4.0),          # 每块在 X、Y 方向的长度，单位：米。
+        block_size=(5.0, 3.5),          # 每块在 X、Y 方向的长度，单位：米。
         terrain_types="random_grid",    # 用不同随机高度的小方格组成地面。
         terrain_params={  # 参数字典的键必须与所选地形名称一致。
             "random_grid": {
                 "grid_width": 0.5,                      # 小方格的边长，米；不能整除的边缘余量会被舍弃。
-                "grid_height_range": (-0.15, 0.15),     # 顶面相对 Z=0 的均匀随机高度范围，米。
+                "grid_height_range": (-0.2, 0.2),     # 顶面相对 Z=0 的均匀随机高度范围，米。
                 "platform_width": None,                 # 预留的平台宽度参数；当前源码未使用，设置无效。
             }
         },

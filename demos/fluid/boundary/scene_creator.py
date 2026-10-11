@@ -15,12 +15,12 @@ else:
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
 ORIGIN_DIR = ASSET_DIR / "origin"  # 导入模型。
 OUTPUT_DIR = ASSET_DIR / "output"  # 合成场景及后续 SDF 结果。
-DEFAULT_OBJ_PATH = ORIGIN_DIR / "spot_triangulated_good.obj"  # 当前奶牛；也可用 --obj 指定其他模型。
+DEFAULT_OBJ_PATH = ORIGIN_DIR / "bunny_flat_bottom.obj"  # 水平裁切并封口的兔子副本；原模型保持不变。
 DEFAULT_OUTPUT_PATH = OUTPUT_DIR / "stairs_scene_bool.obj"  # 布尔结果；重复运行覆盖。
 DEFAULT_RAW_OUTPUT_PATH = OUTPUT_DIR / "stairs_scene.obj"  # 同位置的原始拼接结果，方便对照。
-DEFAULT_OBJ_SCALE = 0.5  # 奶牛缩小到一半：宽约 0.472、深 0.859、高 0.845 米，适合 1×1 米平台。
-DEFAULT_OBJ_UP_AXIS = "Y"  # 当前奶牛是 Y-up；OBJ 不提供统一 up 信息，不同模型需手动指定。
-DEFAULT_OBJ_SINK = 0.02  # 默认向平台下沉 2 厘米，让奶牛四只脚与平台略微相交。
+DEFAULT_OBJ_SCALE = 5.0  # 兔子放大五倍：宽约 0.776、深 0.602、高 0.735 米，适合 1×1 米平台。
+DEFAULT_OBJ_UP_AXIS = "Y"  # 当前兔子是 Y-up；OBJ 不提供统一 up 信息，不同模型需手动指定。
+DEFAULT_OBJ_SINK = 0.003  # 平整底面下沉 3 毫米，完全进入平台内部，布尔并集删除整个兔子底面。
 DEFAULT_SIMPLIFY_TOLERANCE = 0.001  # 简化表面容差，米；默认 1 毫米，只在启用简化分支时使用。
 
 
@@ -43,8 +43,8 @@ def generate_stairs():
         terrain_types="pyramid_stairs",     # 四周低、中心高的同心阶梯。
         terrain_params={
             "pyramid_stairs": {
-                "step_width": 0.25,         # 每圈台阶的水平宽度，米。
-                "step_height": 0.05,        # 每圈高度增量，米；当前源码应使用正值。
+                "step_width": 0.5,         # 每圈台阶的水平宽度，米。
+                "step_height": 0.1,        # 每圈高度增量，米；当前源码应使用正值。
                 "platform_width": 1.0,      # 中心正方形平台的边长，米。
             }
         },
@@ -61,9 +61,9 @@ def load_and_place_obj(obj_path, terrain, scale=DEFAULT_OBJ_SCALE, yaw_deg=0.0,
                        obj_up_axis=DEFAULT_OBJ_UP_AXIS, position=None, sink=DEFAULT_OBJ_SINK):
     """先统一 OBJ 坐标，再把它的底部中心移到指定位置。
 
-    scale：尺寸倍率，当前奶牛默认 0.5；例如厘米模型转米使用 0.01。
+    scale：尺寸倍率，当前兔子默认 5.0；例如厘米模型转米使用 0.01。
     yaw_deg：绕竖直 Z 轴旋转的角度，单位为度。
-    obj_up_axis：原始 OBJ 的向上轴，Y 或 Z；当前奶牛默认 Y。
+    obj_up_axis：原始 OBJ 的向上轴，Y 或 Z；当前兔子默认 Y。
     position：目标底部中心 [x, y, z]，单位为米，采用 Z-up；None 放在阶梯顶端中心。
     sink：自动放置时向下嵌入平台的深度，米；显式 position 不再叠加 sink。
     """
@@ -106,7 +106,7 @@ def load_and_place_obj(obj_path, terrain, scale=DEFAULT_OBJ_SCALE, yaw_deg=0.0,
 
     if position is None:
         # 当前阶梯的最高位置就是中央平台。
-        # 平台顶面约 0.4 米；默认下沉 0.02 米，脚底最低处变成 [3, 2, 约0.38]。
+        # 当前平台顶面约 0.5 米；默认下沉 0.003 米，底部中心变成 [3, 2, 约0.497]。
         ground_min_x, ground_min_y, _ = terrain.bounds[0]
         ground_max_x, ground_max_y, platform_z = terrain.bounds[1]
         target = np.array([
@@ -351,12 +351,12 @@ def main():
                         help="简化表面容差，米；默认 0.001，仅在 --simplify 时使用")
     parser.add_argument("--simplified-output", type=Path,
                         help="简化副本 OBJ 路径；默认由 --output 文件名追加 _simplified，不能覆盖其他输入/输出")
-    parser.add_argument("--scale", type=float, default=DEFAULT_OBJ_SCALE, help="模型尺寸倍率；当前奶牛默认 0.5，厘米转米用 0.01")
+    parser.add_argument("--scale", type=float, default=DEFAULT_OBJ_SCALE, help="模型尺寸倍率；当前兔子默认 5.0，厘米转米用 0.01")
     parser.add_argument("--yaw", type=float, default=0.0, help="模型绕 Z 轴旋转的角度，单位：度")
-    parser.add_argument("--obj-up-axis", type=str.upper, choices=("Y", "Z"), default=DEFAULT_OBJ_UP_AXIS, help="输入 OBJ 的向上轴；当前奶牛默认 Y")
+    parser.add_argument("--obj-up-axis", type=str.upper, choices=("Y", "Z"), default=DEFAULT_OBJ_UP_AXIS, help="输入 OBJ 的向上轴；当前兔子默认 Y")
     parser.add_argument("--up-axis", type=str.upper, choices=("Y", "Z"), default="Y", help="输出场景的向上轴")
     parser.add_argument("--position", type=float, nargs=3, metavar=("X", "Y", "Z"), help="OBJ 底部中心的位置，Z-up、米；显式指定时不叠加 sink")
-    parser.add_argument("--sink", type=float, default=DEFAULT_OBJ_SINK, help="自动放置时下沉深度，米；默认 0.02，让奶牛脚部与平台相交")
+    parser.add_argument("--sink", type=float, default=DEFAULT_OBJ_SINK, help="自动放置时下沉深度，米；默认 0.003，让兔子底部与平台略微相交")
     args = parser.parse_args()
     try:
         output = create_scene(
