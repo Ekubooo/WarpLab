@@ -1,6 +1,6 @@
 # Boundary 场景生成与合成
 
-`creator1.py` 生成并导出七种程序化地形；`scene_creator.py` 自动生成阶梯、放置 OBJ 模型，并导出布尔并集，可选简化副本。两套命令可独立运行，场景合成器会自行生成阶梯。
+`creator1.py` 生成并导出七种程序化地形；`scene_creator.py` 自动生成阶梯、放置 OBJ 模型，并导出布尔并集，可选简化副本。`scene_container_creator.py` 是原合成器的独立副本，生成简化景观和带四墙、顶盖的简化封闭容器。各脚本可独立运行，场景合成器会自行生成阶梯。
 
 以下命令均在项目根目录运行，使用已配置的 Conda 环境：
 
@@ -57,6 +57,72 @@ python -m demos.fluid.boundary.scene_creator --simplify
 
 ```powershell
 python demos/fluid/boundary/scene_creator.py
+```
+
+## 双分支封闭容器合成
+
+新脚本保留当前 OBJ 的轴转换、平台联动缩放、支撑面定位和下沉方式。两个分支共用一次准备好的地形与 OBJ：景观分支只合成地形和模型；容器分支从未简化的地形、模型与四墙、顶盖求整体实体并集，再独立简化。
+
+在项目根目录、Conda `warplab` 环境中无参数运行：
+
+```powershell
+python -m demos.fluid.boundary.scene_container_creator
+```
+
+也可直接运行：
+
+```powershell
+python demos/fluid/boundary/scene_container_creator.py
+```
+
+本脚本没有 CLI 参数，默认始终简化，仅导出两份 Y-up OBJ：
+
+- `Assets/output/stairs_scene_bool_simplified.obj`：仅地形与 OBJ 的景观参考，可用于不显示墙体的渲染。
+- `Assets/output/stairs_container_bool_simplified.obj`：地形、OBJ、四面墙与顶盖的整体封闭碰撞容器，内部保留流体空腔。
+
+不导出拼接或未简化中间结果，也不删除目录中旧脚本先前生成的文件。景观输出与原合成器的默认简化副本同名，重复运行会覆盖；原 `scene_creator.py` 的代码和命令保持不变。当前没有 SDF 烘焙、表面重建或 PBF 接入。
+
+修改 `scene_container_creator.py` 顶部配置，或调用其 Python API：
+
+| 配置 / API 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `DEFAULT_BLOCK_SIZE` | `(3.1, 1.6)` | 地形内部 Z-up 坐标中的 X 长、Y 宽，米。 |
+| `DEFAULT_STEP_WIDTH` / `step_width` | `0.15` | 同时控制台阶宽与墙厚 `w`，米。 |
+| `DEFAULT_STEP_HEIGHT` | `0.1` | 每级台阶的高度增量，米。 |
+| `DEFAULT_PLATFORM_WIDTH` | `0.7` | 中央平台边长，米。 |
+| `DEFAULT_CONTAINER_HEIGHT` / `container_height` | `1.5` | 内顶面绝对 Z 坐标，米；不自动取包围盒高度，须高于地形和放置后的 OBJ。 |
+| `DEFAULT_OVERLAP_DEPTH` / `overlap_depth` | `None` | 相交量 `δ`；`None` 自动取墙厚的一半，当前为 `0.075` 米；手动设置须满足 `0 < δ < w`。 |
+| `DEFAULT_SIMPLIFY_TOLERANCE` / `simplify_tolerance` | `0.001` | 两份输出共同的简化表面容差，米；不表示目标面数。 |
+| `DEFAULT_OBJ_PATH` / `obj_path` | `Assets/origin/bunny_flat_bottom.obj` | 原输入 OBJ，须为封闭实体。模型缩放等参数沿用原合成器。 |
+| `output_path` / `container_output_path` | 上述两份默认输出 | 允许分别指定路径，须为 `.obj` 且不覆盖输入或彼此。 |
+| `up_axis` | `"Y"` | 两份输出统一使用的向上轴，可设为 `"Z"`。 |
+
+四面墙和顶盖使用统一外边界。墙厚为 `w`、向地形内侧进入 `δ` 时，每侧向外增加的尺寸为 `w-δ`，所以外部水平尺寸为 `L+2(w-δ)`、`W+2(w-δ)`。两面长墙横跨完整外长度；两面短墙的目标长度为 `W+δ`，若超过统一外宽度则截到该外边界。墙角交叠发生在同一外轮廓内部，不再额外加长墙头。顶盖使用相同外边界，整体外观为长方体。
+
+墙底位于地形最低高度；墙顶比内顶面高 `δ`。顶盖厚度为 `w`，与墙顶产生实体重叠。改变相交量时，墙、盖的外尺寸同步重算，不能仅独立修改某一面墙的长度。
+
+当前内部水平空间约为 `2.95×1.45` 米，顶盖覆盖范围约为 `3.25×1.75` 米，内顶面 `Z=1.5` 米、外顶面 `Z=1.65` 米。底面最低 `Z=-0.1` 米，因此整体外尺寸约为 `3.25×1.75×1.75` 米。生成后检查简化前后的封闭性、唯一流体空腔，以及外表面是否全部位于统一长方体的六个外平面；外表面与内腔表面不共享顶点是正常结构，不代表墙体没有融合。
+
+Python 调用示例（位置、容器高度均采用内部 Z-up，米）：
+
+```python
+from demos.fluid.boundary.scene_container_creator import create_scene
+
+landscape_path, container_path = create_scene(
+    container_height=1.5,
+    step_width=0.15,          # 台阶宽与墙厚同步改变
+    overlap_depth=None,      # 使用 step_width / 2
+    simplify_tolerance=0.001,
+    up_axis="Y",
+)
+```
+
+输入和两份输出路径在导出前检查。几何构造或简化检查失败时不开始导出；不会保留本次未简化结果。墙体尺寸与模型尺寸均应在修改配置后重新检查。
+
+运行边界回归检查：
+
+```powershell
+python -m unittest demos.fluid.boundary.test_boundary demos.fluid.boundary.test_scene_container -v
 ```
 
 ## 地形生成 CLI 参数
@@ -164,6 +230,7 @@ vertices, indices = create_mesh_terrain(
             "step_height": 0.1,        # 每圈高度增量，米；当前源码应使用正值。
             "platform_width": 1.0,      # 中心正方形平台的边长，米。
         }
+    }
 )
 ```
 SDF烘焙目测采用0.02或0.01(三角形尺寸的一半)
