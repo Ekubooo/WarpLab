@@ -52,9 +52,9 @@ class ContainerTests(unittest.TestCase):
         floor = make_floor()
         parts = creator.build_container_parts(floor)
         long0, long1, short0, short1, lid = parts
-        np.testing.assert_allclose(long0.extents, [3.25, 0.15, 1.775])
-        np.testing.assert_allclose(short0.extents, [0.15, 1.675, 1.775])
-        np.testing.assert_allclose(lid.bounds, [[-0.075, -0.075, 1.5], [3.175, 1.675, 1.65]])
+        np.testing.assert_allclose(long0.extents, [3.45, 0.25, 1.775])
+        np.testing.assert_allclose(short0.extents, [0.25, 1.675, 1.775])
+        np.testing.assert_allclose(lid.bounds, [[-0.175, -0.175, 1.5], [3.275, 1.775, 1.75]])
         for wall in parts[:4]:
             overlap = trimesh.boolean.intersection([floor, wall], engine="manifold")
             self.assertGreater(overlap.volume, 0)
@@ -79,14 +79,14 @@ class ContainerTests(unittest.TestCase):
             walls = creator.build_container_parts(terrain, wall_thickness=width)
             self.assertAlmostEqual(walls[0].extents[1], width)
             self.assertAlmostEqual(walls[2].extents[0], width)
-            self.assertAlmostEqual(walls[2].bounds[1, 0] - terrain.bounds[0, 0], width / 2)
+            self.assertAlmostEqual(walls[2].bounds[1, 0] - terrain.bounds[0, 0], 0.075)
             # 台阶外圈的内边缘随同一个宽度变化。
             self.assertTrue(np.any(np.isclose(terrain.vertices[:, 0], width, atol=1e-7)))
         before = creator.build_container_parts(floor, overlap_depth=0.04)
         after = creator.build_container_parts(shifted, container_height=3.5, overlap_depth=0.04)
         for a, b in zip(before, after):
             np.testing.assert_allclose(b.vertices, a.vertices + (7, -3, 2))
-        np.testing.assert_allclose(before[0].extents[:2], [3.32, 0.15])
+        np.testing.assert_allclose(before[0].extents[:2], [3.52, 0.25])
 
     def test_outer_contour_is_cuboid_for_different_overlap_ratios_and_sizes(self):
         for length, width, w, ratio in ((3.1, 1.6, 0.15, 0.1), (3.1, 1.6, 0.15, 0.5),
@@ -117,7 +117,7 @@ class ContainerTests(unittest.TestCase):
         for index in (0, 1, 4):
             bounds = parts[index].bounds
             extents = parts[index].extents.copy()
-            extents[0] = 3.475  # 旧公式 L+2w+δ，复现凸出的长墙和顶盖。
+            extents[0] = floor.extents[0] + 2 * creator.DEFAULT_STEP_WIDTH + creator.DEFAULT_OVERLAP_DEPTH
             parts[index] = trimesh.creation.box(extents=extents)
             parts[index].apply_translation(bounds.mean(axis=0))
         with contextlib.redirect_stdout(io.StringIO()):
@@ -131,7 +131,7 @@ class ContainerTests(unittest.TestCase):
             container = creator.boolean_union_meshes([floor, *creator.build_container_parts(floor)], "test")
             simplified = creator.simplify_mesh_manifold(container)
         # 整体为外长方体减内空腔；凸出墙头即使封闭，也无法满足这个独立体积关系。
-        expected_solid = 3.25 * 1.75 * 1.85 - 2.95 * 1.45 * 1.5
+        expected_solid = 3.45 * 1.95 * 1.95 - 2.95 * 1.45 * 1.5
         probes = [((1.55, 0.8, 0.75), False),  # 空腔
                   ((1.55, 0.8, -0.1), True),  # 地板
                   ((0, 0.8, -0.1), True),     # 墙与底座接缝
@@ -146,7 +146,7 @@ class ContainerTests(unittest.TestCase):
             np.testing.assert_allclose(mesh.volume, expected_solid, rtol=0, atol=2e-6)
             surfaces = mesh.split(only_watertight=False, repair=False)
             self.assertEqual(len(surfaces), 2)
-            self.assert_cuboid_exterior(mesh, np.array([[-0.075, -0.075, -0.2], [3.175, 1.675, 1.65]]))
+            self.assert_cuboid_exterior(mesh, np.array([[-0.175, -0.175, -0.2], [3.275, 1.775, 1.75]]))
             cavity = [surface for surface in surfaces if surface.volume < 0][0]
             np.testing.assert_allclose(-cavity.volume, 2.95 * 1.45 * 1.5, rtol=0, atol=2e-6)
             for center, solid in probes:
@@ -160,9 +160,9 @@ class ContainerTests(unittest.TestCase):
 
     def test_invalid_geometry_parameters(self):
         for options in ({"wall_thickness": 0}, {"wall_thickness": float("nan")},
-                        {"overlap_depth": 0}, {"overlap_depth": 0.15},
+                        {"overlap_depth": 0}, {"overlap_depth": 0.25},
                         {"overlap_depth": float("inf")}, {"container_height": 0},
-                        {"container_height": float("nan")}, {"wall_thickness": 2}):
+                        {"container_height": float("nan")}, {"wall_thickness": 0.05}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 creator.build_container_parts(make_floor(), **options)
 
@@ -207,13 +207,16 @@ class ContainerTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     creator.validate_container_mesh(container, "exported")
                 bounds = np.array([
-                    [*(solid_terrain.bounds[0, :2] - 0.075), solid_terrain.bounds[0, 2]],
-                    [*(solid_terrain.bounds[1, :2] + 0.075), 1.65],
+                    [*(solid_terrain.bounds[0, :2] - 0.175), solid_terrain.bounds[0, 2] - 0.1],
+                    [*(solid_terrain.bounds[1, :2] + 0.175), 1.75],
                 ])
                 self.assert_cuboid_exterior(container, bounds)
                 cavity = [part for part in container.split(only_watertight=False, repair=False)
                           if part.volume < 0][0]
                 self.assertAlmostEqual(cavity.bounds[1, 2], 1.5, places=7)
+                self.assertAlmostEqual(cavity.bounds[0, 2], 0.0, places=7)
+                # 原坑底厚 0.10；墙厚从 0.15 增到 0.25，外底面同步外移 0.10。
+                self.assertAlmostEqual(cavity.bounds[0, 2] - container.bounds[0, 2], 0.2, places=7)
                 if actual_z is None:
                     actual_z = sorted_triangles(container)
                 else:

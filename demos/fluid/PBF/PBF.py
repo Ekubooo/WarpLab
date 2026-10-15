@@ -274,42 +274,20 @@ def update_velocity(
 
 
 class Example:
-    def __init__(
-        self, stage_path="example_pbf.usd", verbose=False, config=None, *,
-        boundary_obj=None, sdf_voxel_size=boundary_model.DEFAULT_VOXEL_SIZE,
-        sdf_force_rebuild=False,
-    ):
+    def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None):
         self.verbose = verbose
         self.sim_time = 0.0
 
         self.config = config if config is not None else fn.PBFConfig()
-        self.static_boundary = boundary_model.load_static_boundary(
-            boundary_obj, sdf_voxel_size=sdf_voxel_size,
-            sdf_force_rebuild=sdf_force_rebuild, device=wp.get_device(),
-        ) if boundary_obj is not None else None
         self.gravity = wp.vec3(*self.config.gravity)
         fn.init_parameters(self)
+        # Own the full GPU Volume; the current solver does not query it yet.
+        self.static_sdf = boundary_model.load_static_sdf(device=wp.get_device())
         fn.init_device_buffers(self)
         self.renderer = (
             wp.render.UsdRenderer(stage_path)
             if stage_path else None
         )
-
-    def reverse_gravity(self):
-        """Reverse runtime gravity while preserving the startup configuration."""
-        self.gravity = -self.gravity
-
-    def reset(self):
-        """Restore startup particles, gravity and time using the existing buffers."""
-        fn.init_particles(self)
-        for buffer in (
-            self.v, self.pre_Pos, self.pre_New, self.delta_Pos,
-            self.lambda_Opt, self.delta_Vel, self.curl,
-        ):
-            buffer.zero_()
-        self.gravity = wp.vec3(*self.config.gravity)
-        self.sim_time = 0.0
-        self.grid.build(self.pos, self.smoothing_length)
 
     def step(self):
         with wp.ScopedTimer("sub-step", synchronize=True):
@@ -447,7 +425,6 @@ def parse_args(argv=None):
         help=f"Clamp negative density constraints to zero (default: {fn.PBFConfig.clamp_negative_pressure}).",
     )
 
-    boundary_model.add_sdf_arguments(parser)
     args = parser.parse_args(argv)
     try:
         if args.config_path is not None:
@@ -478,7 +455,6 @@ def main():
         example = Example(
             stage_path=args.stage_path, verbose=args.verbose,
             config=args.config,
-            **boundary_model.boundary_arguments(args),
         )
 
         for _ in range(args.num_frames):

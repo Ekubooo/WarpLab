@@ -67,39 +67,82 @@ a set of good para for the water effect
 | 指定导出 `water.json` | `conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl --export-config water.json` |
 | 导入 `water.json` | `conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl --device cuda:0 --config demos/fluid/PBF/config/water.json` |
 
-## 静态容器 SDF：烘焙、缓存与读取
+## 启动时读取静态 SDF
 
-两个入口均支持以下参数，可与 `--config` 一起使用；它们不写入 PBF 物理参数 JSON。
+SDF 路径在 `boundary_model.py` 顶部固定设置，相对于代码文件确定，不随工作目录变化：
+
+```python
+STATIC_SDF_PATH = BOUNDARY_DIR / "stairs_container_bool_simplified.nvdb"
+```
+
+两个入口选定 CUDA 设备后创建仿真实例，由 `Example.__init__()` 调用 `load_static_sdf()`，读取这个已有的 float32 NanoVDB。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有，随仿真实例存活；`reset()` 不重新加载。入口不再单独加载。启动时不读取 OBJ、不自动烘焙，也不比较源模型或烘焙参数；文件缺失、损坏或类型错误会明确报错。
+
+在仓库根目录、Conda `warplab` 环境中启动，无需 SDF CLI 参数：
+
+```powershell
+conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl --device cuda:0
+```
+
+仅验证读取、不启动窗口或导出 USD：
+
+```powershell
+conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device cuda:0 --stage-path None --num-frames 0
+```
+
+直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，这些参数由下方独立烘焙命令提供。要换文件，修改 `STATIC_SDF_PATH`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
+
+`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 均保留原参数，无需额外绑定步骤。每次创建实例都会读取固定路径 SDF 并分配 GPU Volume。**当前求解仍使用原箱体边界；SDF 仅加载到显存，不参与碰撞、粒子初始化或场景渲染。** 设备采样辅助函数仍独立保留，供后续接入。
+
+当前文件的体素间距为 0.0075 米。墙厚 0.25 米、坑底厚 0.20 米的容器，Volume 本体约 **140.88 MiB 显存**，文件约 **147.72 MB**；Warp 1.15 加载期间网格缓冲临时约 **281.75 MiB**，不含 PBF 与 CUDA 资源。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
+
+## 独立烘焙命令
+
+在仓库根目录、Conda `warplab` 环境中运行，成功后输出结果路径并退出，不创建仿真：
+
+```powershell
+conda run -n warplab --no-capture-output python -m demos.fluid.PBF.bake_sdf --boundary-obj stairs_container_bool_simplified.obj
+```
+
+直接脚本运行也支持：
+
+```powershell
+conda run -n warplab --no-capture-output python demos/fluid/PBF/bake_sdf.py --boundary-obj stairs_container_bool_simplified.obj
+```
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--boundary-obj PATH` | 无 | 指定封闭容器 OBJ；不指定时按原流程运行。 |
-| `--sdf-voxel-size METERS` | `0.0075` | 首次烘焙的体素间距，米。 |
-| `--sdf-force-rebuild` | 关闭 | 重新检查 OBJ、烘焙并替换同名缓存。 |
+| `--boundary-obj PATH` | 必填 | 容器 OBJ；裸文件名从 `PBF/Assets/Container` 解析 |
+| `--sdf-voxel-size` | `0.0075` | 烘焙体素间距，米，仅在烘焙时使用 |
+| `--sdf-force-rebuild` | 关闭 | 忽略同名缓存，重新检查与烘焙，成功后替换 |
+| `--device` | `cuda:0` | 仅支持 CUDA |
 
-将 `boundary/scene_container_creator.py` 生成的容器 OBJ 放入本目录的 `Assets/Container/`，然后在仓库根目录运行：
-
-```powershell
-conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl --device cuda:0 --boundary-obj stairs_container_bool_simplified.obj
-```
-
-仅验证烘焙与读入、不启动窗口或导出 USD：
+包含目录的相对路径（包括 `./room.obj`）按工作目录解析，绝对路径直接使用。输出固定为 `PBF/Assets/Boundary/<OBJ文件名去扩展名>.nvdb`，默认目录根据脚本位置确定。同名缓存存在则直接读取，跳过 OBJ 检查与参数比较；损坏缓存明确报错，不静默重建。修改 OBJ 或体素间距后，显式添加 `--sdf-force-rebuild`：
 
 ```powershell
-conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device cuda:0 --stage-path None --num-frames 0 --boundary-obj stairs_container_bool_simplified.obj
+conda run -n warplab --no-capture-output python -m demos.fluid.PBF.bake_sdf --boundary-obj stairs_container_bool_simplified.obj --sdf-force-rebuild
 ```
 
-也支持直接执行 `python demos/fluid/PBF/PBF.py ...` 或 `python demos/fluid/PBF/render_opengl.py ...`。裸文件名从 `Assets/Container/` 读取；含目录的相对路径相对于当前工作目录，绝对路径保持原意。默认目录依据代码位置确定。
+烘焙命令不修改 `STATIC_SDF_PATH`。默认同名文件烘焙后可直接启动仿真；其他文件名需先在 `boundary_model.py` 中修改该路径，再单独启动仿真。烘焙失败不会覆盖已有有效缓存。
 
-缓存统一位于 `Assets/Boundary/<OBJ文件名去扩展名>.nvdb`。**先检查缓存，命中后直接加载，不读取或检查源 OBJ，也不核对源内容和体素参数。** 修改网格或间距后须显式加 `--sdf-force-rebuild`；不同路径的同名 OBJ 共用同一缓存名。坏缓存会报错，不自动覆盖。缓存缺失时才检查、烘焙并原子保存；首次烘焙的 GPU Volume 直接保留使用。无需额外元数据文件。
+## 离线烘焙与缓存 API
 
-本轮要求 CUDA。SDF 为 float32 全覆盖 NanoVDB，每侧预留 3 个体素；保持 OBJ 的原始坐标和单位，不做缩放或向上轴转换。实体内为负，流体空腔及容器外为正。当前容器在 0.0075 米间距下，Volume 本体约 **110.81 MiB 显存**，未压缩缓存约 **116.19 MB**；加载期间网格缓冲临时约 **221.62 MiB**，不含 PBF、CUDA 和烘焙临时资源。
+网格检查和烘焙继续由 `boundary/mesh_validation.py`、`boundary/sdf_baker.py` 提供，独立 CLI 复用该 API，与启动加载分开。也可通过 Python API 更新文件，再启动 PBF：
 
-代码职责：`boundary/mesh_validation.py` 检查输入，`boundary/sdf_baker.py` 负责 Warp DSL 烘焙与缓存；`boundary_model.py` 管理 PBF 路径、参数及 Volume 生命周期。`Example.static_boundary` 持有 Volume 与设备数据，`sample_boundary_sdf(data, position)` 可在 Warp kernel 中采样距离及世界坐标梯度。超出已分配网格时返回 NanoVDB 背景值，不代表真实表面距离。
+```python
+from pathlib import Path
+from demos.fluid.boundary.sdf_baker import SDFOptions, load_or_bake_sdf
 
-**本轮仅加载 GPU SDF，没有接入碰撞、位置投影或场景渲染；现有箱体边界继续生效。** SDF 与粒子区域的尺寸、位置对齐仍需后续配置。
+# 示例路径相对于仓库根目录；输入默认约定为 PBF/Assets/Container。
+assets = Path("demos/fluid/PBF/Assets")
+result = load_or_bake_sdf(
+    assets / "Container/stairs_container_bool_simplified.obj",
+    cache_dir=assets / "Boundary",
+    options=SDFOptions(voxel_size=0.0075, force_rebuild=True),
+    device="cuda:0",
+)
+```
 
-输入简单检查要求：一个闭合正向外壳、一个闭合反向空腔、总体积为正；拒绝非有限坐标、非法索引、重复面、退化面、非流形及绕序错误，也检查 float32 转换后的塌缩。仅在副本中合并完全相同的坐标，不自动修补或翻转内腔。细长但非退化的三角形仅告警；此次不认证全局自交、壳包含关系或薄特征能否被网格解析。
+离线 API 保留原缓存逻辑：同名 `.nvdb` 存在且未强制重建时直接读取，不解析 OBJ、不核对参数/哈希；缺失或强制重建才检查、烘焙并原子保存。烘焙保持 OBJ 坐标、float32 全覆盖场、每侧 padding 3 体素；实体负、空腔和外部正。网格检查不自动修补、翻转或认证全局自交；瘦长但非退化三角形仅告警。
 
 ## 测试
 

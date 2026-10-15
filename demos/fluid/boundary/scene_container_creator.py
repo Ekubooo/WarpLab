@@ -23,11 +23,11 @@ DEFAULT_OBJ_PATH = ORIGIN_DIR / "bunny_flat_bottom.obj"  # 水平裁切并封口
 DEFAULT_OUTPUT_PATH = OUTPUT_DIR / "stairs_scene_bool_simplified.obj"
 DEFAULT_CONTAINER_OUTPUT_PATH = OUTPUT_DIR / "stairs_container_bool_simplified.obj"
 DEFAULT_BLOCK_SIZE = (3.1, 1.6)  # X 长、Y 宽，米；尺寸仅用于地形生成。
-DEFAULT_STEP_WIDTH = 0.15  # 同时控制台阶宽和墙厚 w，米。
+DEFAULT_STEP_WIDTH = 0.15  # 台阶宽度，米；墙体增厚不改变地形。
 DEFAULT_STEP_HEIGHT = 0.1
 DEFAULT_PLATFORM_WIDTH = 0.7
 DEFAULT_CONTAINER_HEIGHT = 1.5  # 内顶面绝对 Z 坐标，米；不随场景高度变化。
-DEFAULT_OVERLAP_DEPTH = None  # None 使用墙厚的一半；也可指定相交量 δ，米。
+DEFAULT_OVERLAP_DEPTH = 0.075  # 保持原内腔边界；增厚部分只向外扩展。None 仍可取墙厚的一半。
 REFERENCE_PLATFORM_WIDTH = 1.0  # 尺寸标定基准，米；固定保留，不随当前地形参数改变。
 DEFAULT_OBJ_SCALE = 0.95 / 0.15515922  # 当前兔子原始宽度为 0.15515922；在 1 米平台上标定为宽占 95%。
 DEFAULT_OBJ_UP_AXIS = "Y"  # 当前兔子是 Y-up；OBJ 不提供统一 up 信息，不同模型需手动指定。
@@ -54,7 +54,7 @@ def generate_stairs(step_width=DEFAULT_STEP_WIDTH):
         terrain_types="pyramid_stairs",     # 四周低、中心高的同心阶梯。
         terrain_params={
             "pyramid_stairs": {
-                "step_width": step_width,  # 与容器墙厚共用同一个数值。
+                "step_width": step_width,  # 仅控制台阶水平宽度。
                 "step_height": DEFAULT_STEP_HEIGHT,
                 "platform_width": DEFAULT_PLATFORM_WIDTH,
             }
@@ -392,8 +392,8 @@ def resolve_overlap_depth(wall_thickness, overlap_depth=None):
     return float(depth)
 
 
-def build_container_parts(terrain, wall_thickness=DEFAULT_STEP_WIDTH,
-                          container_height=DEFAULT_CONTAINER_HEIGHT, overlap_depth=None):
+def build_container_parts(terrain, wall_thickness=0.25,
+                          container_height=DEFAULT_CONTAINER_HEIGHT, overlap_depth=DEFAULT_OVERLAP_DEPTH):
     """返回四面墙和顶盖的五个封闭箱体；没有另加平整底板。
 
     地形 X 范围为 L，Y 范围为 W；墙内侧进入地形 δ，外侧只增加 w-δ。
@@ -480,7 +480,8 @@ def create_scene(obj_path=DEFAULT_OBJ_PATH, output_path=DEFAULT_OUTPUT_PATH,
                  overlap_depth=DEFAULT_OVERLAP_DEPTH):
     """两个分支独立 Boolean 和简化，仅导出简化 OBJ，返回 (景观路径, 容器路径)。
 
-    step_width 同时控制台阶宽与墙厚；overlap_depth=None 使用 step_width/2。
+    step_width 仅控制台阶宽；墙厚为 0.25 米，默认相交量固定为 0.075。
+    显式 overlap_depth=None 使用墙厚的一半。
     container_height 是内部 Z-up 的内顶面绝对高度，不是场景包围盒高度。
     simplify_tolerance 是两份输出共同的简化容差；没有关闭简化的分支。
     """
@@ -492,7 +493,8 @@ def create_scene(obj_path=DEFAULT_OBJ_PATH, output_path=DEFAULT_OUTPUT_PATH,
     container_output_path = Path(container_output_path)
     validate_output_paths(obj_path, output_path, container_output_path)
     validate_simplify_tolerance(simplify_tolerance)
-    depth = resolve_overlap_depth(step_width, overlap_depth)
+    wall_thickness = 0.25
+    depth = resolve_overlap_depth(wall_thickness, overlap_depth)
 
     terrain = generate_stairs(step_width=step_width)
     obj = load_and_place_obj(
@@ -516,19 +518,26 @@ def create_scene(obj_path=DEFAULT_OBJ_PATH, output_path=DEFAULT_OUTPUT_PATH,
           f"平台联动={'开启' if scale_with_platform else '关闭'}", flush=True)
     obj = prepare_solid(obj)
     solid_terrain = union_stair_boxes(terrain)
-    parts = build_container_parts(solid_terrain, step_width, container_height, depth)
+    parts = build_container_parts(solid_terrain, wall_thickness, container_height, depth)
     lid_bounds = parts[-1].bounds
+    # 相对原单墙厚 0.15 米，外底面也向外增加同样的距离；原地形表面保持不变。
+    outward_growth = max(wall_thickness - 0.15, 0.0)
     outer_bounds = np.array([
-        [*lid_bounds[0, :2], solid_terrain.bounds[0, 2]], lid_bounds[1],
+        [*lid_bounds[0, :2], solid_terrain.bounds[0, 2] - outward_growth], lid_bounds[1],
     ])
+    # 扩展段上端进入原底座，保证并集重叠；厚度由外移增量决定。
+    base_extension = trimesh.creation.box(
+        extents=(*tuple(lid_bounds[1, :2] - lid_bounds[0, :2]), outward_growth + depth))
+    base_extension.apply_translation([
+        *tuple(lid_bounds.mean(axis=0)[:2]), solid_terrain.bounds[0, 2] + (depth - outward_growth) / 2])
     if obj.bounds[1, 2] >= container_height:
         raise ValueError("内顶面必须高于放置后的 OBJ，避免模型与顶盖相交")
-    print(f"容器：墙厚={step_width:g} m，相交量={depth:g} m，内顶面 Z={container_height:g} m，"
+    print(f"容器：墙厚={wall_thickness:g} m，相交量={depth:g} m，内顶面 Z={container_height:g} m，"
           f"外尺寸={np.array2string(outer_bounds[1] - outer_bounds[0], precision=6)} m",
           flush=True)
     scene = boolean_union_meshes([solid_terrain, obj], "场景并集")
     # 直接从未简化资源求容器并集，不使用上面的景观结果或任何简化结果。
-    container = boolean_union_meshes([solid_terrain, obj, *parts], "容器并集")
+    container = boolean_union_meshes([solid_terrain, obj, *parts, base_extension], "容器并集")
     validate_container_mesh(container, "原容器并集", outer_bounds=outer_bounds)
     simplified_scene = simplify_mesh_manifold(scene, simplify_tolerance)
     simplified_container = simplify_mesh_manifold(container, simplify_tolerance)

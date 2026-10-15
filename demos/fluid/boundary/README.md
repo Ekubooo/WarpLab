@@ -87,11 +87,11 @@ python demos/fluid/boundary/scene_container_creator.py
 | 配置 / API 参数 | 默认值 | 含义 |
 | --- | --- | --- |
 | `DEFAULT_BLOCK_SIZE` | `(3.1, 1.6)` | 地形内部 Z-up 坐标中的 X 长、Y 宽，米。 |
-| `DEFAULT_STEP_WIDTH` / `step_width` | `0.15` | 同时控制台阶宽与墙厚 `w`，米。 |
+| `DEFAULT_STEP_WIDTH` / `step_width` | `0.15` | 仅控制台阶宽，米。 |
 | `DEFAULT_STEP_HEIGHT` | `0.1` | 每级台阶的高度增量，米。 |
 | `DEFAULT_PLATFORM_WIDTH` | `0.7` | 中央平台边长，米。 |
 | `DEFAULT_CONTAINER_HEIGHT` / `container_height` | `1.5` | 内顶面绝对 Z 坐标，米；不自动取包围盒高度，须高于地形和放置后的 OBJ。 |
-| `DEFAULT_OVERLAP_DEPTH` / `overlap_depth` | `None` | 相交量 `δ`；`None` 自动取墙厚的一半，当前为 `0.075` 米；手动设置须满足 `0 < δ < w`。 |
+| `DEFAULT_OVERLAP_DEPTH` / `overlap_depth` | `0.075` | 相交量 `δ`，固定原内腔水平边界；须满足 `0 < δ < w`。显式传入 `None` 才自动取墙厚的一半。 |
 | `DEFAULT_SIMPLIFY_TOLERANCE` / `simplify_tolerance` | `0.001` | 两份输出共同的简化表面容差，米；不表示目标面数。 |
 | `DEFAULT_OBJ_PATH` / `obj_path` | `Assets/origin/bunny_flat_bottom.obj` | 原输入 OBJ，须为封闭实体。模型缩放等参数沿用原合成器。 |
 | `output_path` / `container_output_path` | 上述两份默认输出 | 允许分别指定路径，须为 `.obj` 且不覆盖输入或彼此。 |
@@ -101,7 +101,7 @@ python demos/fluid/boundary/scene_container_creator.py
 
 墙底位于地形最低高度；墙顶比内顶面高 `δ`。顶盖厚度为 `w`，与墙顶产生实体重叠。改变相交量时，墙、盖的外尺寸同步重算，不能仅独立修改某一面墙的长度。
 
-当前内部水平空间约为 `2.95×1.45` 米，顶盖覆盖范围约为 `3.25×1.75` 米，内顶面 `Z=1.5` 米、外顶面 `Z=1.65` 米。底面最低 `Z=-0.1` 米，因此整体外尺寸约为 `3.25×1.75×1.75` 米。生成后检查简化前后的封闭性、唯一流体空腔，以及外表面是否全部位于统一长方体的六个外平面；外表面与内腔表面不共享顶点是正常结构，不代表墙体没有融合。
+墙厚指单墙面对应内外表面的间距，当前为 0.25 米，内腔水平范围约为 `2.95×1.45` 米，内顶面仍为 `Z=1.5` 米。相对原单墙厚 0.15 米，外壳各面向外增加 0.10 米：侧墙和顶盖厚 0.25 米，外底面从原 `Z=-0.1` 下移到 `Z=-0.2` 米，坑底上表面仍为 `Z=0`，因此坑底最薄处被动增至 0.20 米。底座扩展段仅在容器分支参与并集；台阶宽仍为 0.15 米、平台高度仍为 0.5 米，景观分支不变。最终外尺寸约为 `3.45×1.95×1.95` 米（长×宽×高）。生成后检查简化前后的封闭性、唯一流体空腔，以及外表面是否全部位于统一长方体的六个外平面；外表面与内腔表面不共享顶点是正常结构，不代表墙体没有融合。
 
 Python 调用示例（位置、容器高度均采用内部 Z-up，米）：
 
@@ -110,8 +110,8 @@ from demos.fluid.boundary.scene_container_creator import create_scene
 
 landscape_path, container_path = create_scene(
     container_height=1.5,
-    step_width=0.15,          # 台阶宽与墙厚同步改变
-    overlap_depth=None,      # 使用 step_width / 2
+    step_width=0.15,          # 仅控制台阶宽，地形保持原尺寸
+    overlap_depth=0.075,     # 保持原内腔边界，加厚部分向外扩展
     simplify_tolerance=0.001,
     up_axis="Y",
 )
@@ -233,7 +233,7 @@ vertices, indices = create_mesh_terrain(
     }
 )
 ```
-SDF 烘焙当前默认体素间距为 `0.0075` 米，可通过 PBF 入口的 `--sdf-voxel-size` 调整。
+SDF 离线烘焙默认体素间距为 `0.0075` 米，可通过 `SDFOptions(voxel_size=...)` 调整。
 
 ## 容器检查与 SDF 烘焙
 
@@ -241,4 +241,4 @@ SDF 烘焙当前默认体素间距为 `0.0075` 米，可通过 PBF 入口的 `--
 `load_or_bake_sdf(obj_path, cache_dir=..., options=SDFOptions(...), device="cuda:0")`。
 烘焙使用 Warp DSL 的最近三角面查询和绕数符号，保存可由 Warp 直接读取的 float32 NanoVDB；两模块不依赖 PBF。
 
-PBF 启动时调用这些 API，默认输入目录为 `PBF/Assets/Container`，缓存输出目录为 `PBF/Assets/Boundary`。将容器结果复制到输入目录后，参见 [PBF 使用说明](../PBF/README.md#静态容器-sdf烘焙缓存与读取)。缓存仅按文件名复用；修改输入或烘焙间距后显式强制重建。本轮不实现 SDF 碰撞。
+这些 API 用于离线烘焙，输入目录约定为 `PBF/Assets/Container`，缓存输出目录为 `PBF/Assets/Boundary`。独立命令 `python -m demos.fluid.PBF.bake_sdf --boundary-obj stairs_container_bool_simplified.obj` 复用这些 API，参数与运行方式见 [PBF 使用说明](../PBF/README.md#独立烘焙命令)。PBF 启动时只从 `boundary_model.py` 的 `STATIC_SDF_PATH` 读取预先烘焙的 `.nvdb`，不接受烘焙参数或自动烘焙。离线缓存仅按文件名复用，修改模型或间距后通过 CLI 的 `--sdf-force-rebuild` 或 `SDFOptions(force_rebuild=True)` 更新。当前不实现 SDF 碰撞。

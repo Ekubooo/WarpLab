@@ -22,13 +22,11 @@ except ModuleNotFoundError:
 try:
     from .pbf_helper import PBFConfig
     from . import config_io
-    from . import boundary_model
-    from .simulation import create_pbf_simulation
+    from .simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 except ImportError:
     from pbf_helper import PBFConfig
     import config_io
-    import boundary_model
-    from simulation import create_pbf_simulation
+    from simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 
 
 class PBFRenderer(BillboardRenderer):
@@ -202,7 +200,6 @@ def parse_args(argv=None):
         help=f"Fluid block maximum coordinates (default: {PBFConfig.block_end}).",
     )
 
-    boundary_model.add_sdf_arguments(parser)
     args = parser.parse_args(argv)
     try:
         args.config = config_from_args(args)
@@ -227,7 +224,6 @@ def main():
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
             verbose=args.verbose, config=args.config,
-            **boundary_model.boundary_arguments(args),
         )
         # Focus on the fluid near the floor; distance follows the container footprint.
         camera_azimuth_deg = 35.0
@@ -261,13 +257,13 @@ def main():
 
         register_keyboard_controls(
             renderer, on_reset=request_reset,
-            on_reverse_gravity=simulation.reverse_gravity,
+            on_reverse_gravity=lambda: reverse_gravity(simulation),
         )
 
         try:
             while renderer.is_running() and (args.num_frames == 0 or frame < args.num_frames):
                 if reset_requested:
-                    simulation.reset()
+                    reset_simulation(simulation)
                     reset_requested = False
                     renderer.paused = True
                 # Render first so the initialized PBF particles are visible.

@@ -14,6 +14,7 @@ import warp as wp
 from demos.fluid.PBF import PBF as solver
 from demos.fluid.PBF import render_opengl as frontend
 from demos.fluid.PBF.pbf_helper import PBFConfig
+from demos.fluid.PBF.simulation import reset_simulation, reverse_gravity
 
 
 CONFIG = PBFConfig(
@@ -29,7 +30,8 @@ class ControlsTest(unittest.TestCase):
         cls.device = "cuda:0" if wp.is_cuda_available() else "cpu"
 
     def make_simulation(self, config=CONFIG):
-        with wp.ScopedDevice(self.device):
+        with wp.ScopedDevice(self.device), \
+                patch.object(solver.boundary_model, "load_static_sdf", return_value=object()):
             return solver.Example(stage_path=None, config=config)
 
     def step(self, sim, count=1):
@@ -52,24 +54,36 @@ class ControlsTest(unittest.TestCase):
         sim = self.make_simulation()
         initial = sim.pos.numpy()
         gravity = tuple(sim.gravity)
-        buffers = (sim.pos, sim.v, sim.pre_Pos, sim.pre_New, sim.delta_Pos,
-                   sim.lambda_Opt, sim.delta_Vel, sim.curl)
+        buffer_names = ("pos", "v", "pre_Pos", "pre_New", "delta_Pos",
+                        "lambda_Opt", "delta_Vel", "curl")
+        buffers = tuple(getattr(sim, name) for name in buffer_names)
         pointers = tuple(buffer.ptr for buffer in buffers)
-        sim.reverse_gravity()
+        grid, sdf = sim.grid, sim.static_sdf
+        sim.renderer = renderer = object()
+        reverse_gravity(sim)
         self.assertEqual(tuple(sim.gravity), tuple(-value for value in gravity))
         np.testing.assert_array_equal(sim.pos.numpy(), initial)
         np.testing.assert_array_equal(sim.v.numpy(), 0)
-        sim.reverse_gravity()
+        reverse_gravity(sim)
         self.assertEqual(tuple(sim.gravity), gravity)
         self.step(sim, 5)
         expected_pos, expected_vel = sim.pos.numpy(), sim.v.numpy()
-        sim.reverse_gravity()
-        with wp.ScopedDevice(self.device):
-            sim.reset()
+        reverse_gravity(sim)
+        np.testing.assert_array_equal(sim.pos.numpy(), expected_pos)
+        np.testing.assert_array_equal(sim.v.numpy(), expected_vel)
+        with wp.ScopedDevice("cpu"), \
+                patch.object(solver.boundary_model, "load_static_sdf",
+                             side_effect=AssertionError("Reset reloaded SDF")):
+            reset_simulation(sim)
+            reset_simulation(sim)
+            self.assertEqual(wp.get_device(), wp.get_device("cpu"))
         self.assertIs(sim.config, CONFIG)
         self.assertEqual(sim.sim_time, 0)
         self.assertEqual(tuple(sim.gravity), gravity)
-        self.assertEqual(tuple(buffer.ptr for buffer in buffers), pointers)
+        self.assertEqual(tuple(getattr(sim, name).ptr for name in buffer_names), pointers)
+        self.assertIs(sim.grid, grid)
+        self.assertIs(sim.static_sdf, sdf)
+        self.assertIs(sim.renderer, renderer)
         np.testing.assert_array_equal(sim.pos.numpy(), initial)
         for buffer in buffers[1:]:
             np.testing.assert_array_equal(buffer.numpy(), 0)
@@ -84,7 +98,7 @@ class ControlsTest(unittest.TestCase):
     def test_reversed_gravity_affects_prediction(self):
         sim = self.make_simulation()
         before = sim.pos.numpy()
-        sim.reverse_gravity()
+        reverse_gravity(sim)
         self.step(sim)
         self.assertGreater(float((sim.pos.numpy() - before)[:, 1].mean()), 0)
 
@@ -97,9 +111,8 @@ class ControlsTest(unittest.TestCase):
         initial = sim.pos.numpy()
         self.step(sim, 3)
         expected_pos, expected_vel = sim.pos.numpy(), sim.v.numpy()
-        sim.reverse_gravity()
-        with wp.ScopedDevice(self.device):
-            sim.reset()
+        reverse_gravity(sim)
+        reset_simulation(sim)
         self.assertIs(sim.config, config)
         self.assertEqual(sim.config, CONFIG)
         self.assertEqual(sim.sim_time, 0)
