@@ -11,9 +11,9 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from .. import PBF as solver
-from .. import render_opengl as frontend
-from ..pbf_helper import PBFConfig
+from demos.fluid.PBF import PBF as solver
+from demos.fluid.PBF import render_opengl as frontend
+from demos.fluid.PBF.pbf_helper import PBFConfig
 
 
 CONFIG = PBFConfig(

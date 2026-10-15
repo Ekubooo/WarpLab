@@ -4,6 +4,7 @@
 
 import inspect
 import math
+from pathlib import Path
 import sys
 import unittest
 from types import SimpleNamespace
@@ -12,13 +13,13 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-wp.config.kernel_cache_dir = "/tmp/warp-mmpbf-tests"
+wp.config.kernel_cache_dir = str(Path(__file__).resolve().parents[3] / ".warp_cache")
 
-from . import MMPBF as solver
-from . import mmpbf_functions as functions
-from . import mmpbf_initialization as initialization
-from .MMPBF import Example, MMPBFConfig
-from .render_opengl import (
+from demos.fluid.MMPBF import MMPBF as solver
+from demos.fluid.MMPBF import mmpbf_functions as functions
+from demos.fluid.MMPBF import mmpbf_initialization as initialization
+from demos.fluid.MMPBF.MMPBF import Example, MMPBFConfig
+from demos.fluid.MMPBF.render_opengl import (
     MMPBF_CAMERA_FRONT,
     MMPBF_CAMERA_POS,
     MMPBF_GRAVITY_ROTATION_STEP,

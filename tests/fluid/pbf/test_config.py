@@ -12,10 +12,10 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from .. import config_io
-from .. import PBF as solver
-from .. import render_opengl as frontend
-from ..pbf_helper import PBFConfig
+from demos.fluid.PBF import config_io
+from demos.fluid.PBF import PBF as solver
+from demos.fluid.PBF import render_opengl as frontend
+from demos.fluid.PBF.pbf_helper import PBFConfig
 
 
 class ConfigTest(unittest.TestCase):

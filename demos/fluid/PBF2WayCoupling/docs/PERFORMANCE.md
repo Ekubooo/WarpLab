@@ -29,7 +29,7 @@
 新的默认关闭结果位于 `outputs/pbf2way/artificial-pressure-default-off/`。复现：
 
 ```powershell
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_wall_clamp demos.fluid.PBF2WayCoupling.tests.test_rendering -q
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf2waycoupling.test_coupling tests.fluid.pbf2waycoupling.test_wall_clamp tests.fluid.pbf2waycoupling.test_rendering -q
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --device cuda:0 --output outputs/pbf2way/artificial-pressure-default-off/acceptance
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.015625 --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/artificial-pressure-default-off/100k/dam-break
 nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-default-off/nsys/default-short --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.05 --warmup-seconds 0.1 --steps 12 --capture --output outputs/pbf2way/artificial-pressure-default-off/nsys/default-short.json
@@ -53,7 +53,7 @@ nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cud
 原始结果位于 `outputs/pbf2way/artificial-pressure-vorticity/`。复现：
 
 ```powershell
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_wall_clamp demos.fluid.PBF2WayCoupling.tests.test_rendering -q
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf2waycoupling.test_coupling tests.fluid.pbf2waycoupling.test_wall_clamp tests.fluid.pbf2waycoupling.test_rendering -q
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.simulation --device cuda:0 --particle-radius 0.0075 --artificial-pressure --seconds 10 --diagnostic-interval 1 --output outputs/pbf2way/artificial-pressure-vorticity/r0075/dam-break
 nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --output=outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected --export=sqlite .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --particle-radius 0.015625 --artificial-pressure --warmup-seconds 8 --steps 120 --capture --output outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.json
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.verify_profile outputs/pbf2way/artificial-pressure-vorticity/late-100k-corrected.sqlite --steps 120
@@ -189,7 +189,7 @@ RTX 5070、Warp 1.15.0，十秒仿真共 600 step / 1800 子步，耗时 **13.64
 复现：
 
 ```powershell
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_wall_clamp demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_rendering -q
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf2waycoupling.test_wall_clamp tests.fluid.pbf2waycoupling.test_coupling tests.fluid.pbf2waycoupling.test_rendering -q
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --interactions --output outputs/pbf2way/wall-clamp/acceptance
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.profile_simulation --device cuda:0 --warmup-seconds 0 --steps 600 --output outputs/pbf2way/wall-clamp/after.json
 
@@ -275,7 +275,7 @@ nsys profile --trace=cuda --sample=none --cpuctxsw=none --capture-range=cudaProf
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.benchmark_contacts --output outputs/pbf2way/fixed-step/contact_benchmark.json
 
 # 数值/调度/GL，以及三个十秒场景
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling demos.fluid.PBF2WayCoupling.tests.test_rendering -q
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf2waycoupling.test_coupling tests.fluid.pbf2waycoupling.test_rendering -q
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate --output outputs/pbf2way/fixed-step/acceptance
 ```
 

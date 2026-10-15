@@ -122,7 +122,7 @@ landscape_path, container_path = create_scene(
 运行边界回归检查：
 
 ```powershell
-python -m unittest demos.fluid.boundary.test_boundary demos.fluid.boundary.test_scene_container -v
+conda run -n warplab --no-capture-output python -m unittest discover -s tests/fluid/boundary -t . -v
 ```
 
 ## 地形生成 CLI 参数
@@ -233,4 +233,12 @@ vertices, indices = create_mesh_terrain(
     }
 )
 ```
-SDF烘焙目测采用0.02或0.01(三角形尺寸的一半)
+SDF 烘焙当前默认体素间距为 `0.0075` 米，可通过 PBF 入口的 `--sdf-voxel-size` 调整。
+
+## 容器检查与 SDF 烘焙
+
+`mesh_validation.py` 提供 `load_validate_container_obj(path)`；`sdf_baker.py` 提供
+`load_or_bake_sdf(obj_path, cache_dir=..., options=SDFOptions(...), device="cuda:0")`。
+烘焙使用 Warp DSL 的最近三角面查询和绕数符号，保存可由 Warp 直接读取的 float32 NanoVDB；两模块不依赖 PBF。
+
+PBF 启动时调用这些 API，默认输入目录为 `PBF/Assets/Container`，缓存输出目录为 `PBF/Assets/Boundary`。将容器结果复制到输入目录后，参见 [PBF 使用说明](../PBF/README.md#静态容器-sdf烘焙缓存与读取)。缓存仅按文件名复用；修改输入或烘焙间距后显式强制重建。本轮不实现 SDF 碰撞。

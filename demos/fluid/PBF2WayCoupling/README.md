@@ -192,13 +192,13 @@ simulation.step()  # 推进 1/90 秒：3 个子步，每子步 3 轮压力迭代
 
 ```powershell
 # 数值测试；CPU 公式检查，有 CUDA 时增加短程对照
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_coupling -v
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf2waycoupling.test_coupling -v
 
 # 容器六面/棱角、反弹衰减、粘度后再次检查及非有限值测试
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_wall_clamp -v
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf2waycoupling.test_wall_clamp -v
 
 # 独立隐藏窗口 OpenGL 测试，需要 NVIDIA CUDA/OpenGL
-.venv/Scripts/python.exe -m unittest demos.fluid.PBF2WayCoupling.tests.test_rendering -v
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf2waycoupling.test_rendering -v
 
 # 三个场景各运行至少 10 秒，输出逐秒诊断、最终状态及汇总
 .venv/Scripts/python.exe -m demos.fluid.PBF2WayCoupling.tools.validate

@@ -22,10 +22,12 @@ except ModuleNotFoundError:
 try:
     from .pbf_helper import PBFConfig
     from . import config_io
+    from . import boundary_model
     from .simulation import create_pbf_simulation
 except ImportError:
     from pbf_helper import PBFConfig
     import config_io
+    import boundary_model
     from simulation import create_pbf_simulation
 
 
@@ -200,6 +202,7 @@ def parse_args(argv=None):
         help=f"Fluid block maximum coordinates (default: {PBFConfig.block_end}).",
     )
 
+    boundary_model.add_sdf_arguments(parser)
     args = parser.parse_args(argv)
     try:
         args.config = config_from_args(args)
@@ -222,7 +225,10 @@ def main():
         raise SystemExit("--speed-color-max must be greater than --speed-color-mid")
 
     with wp.ScopedDevice(args.device):
-        simulation = create_pbf_simulation(verbose=args.verbose, config=args.config)
+        simulation = create_pbf_simulation(
+            verbose=args.verbose, config=args.config,
+            **boundary_model.boundary_arguments(args),
+        )
         # Focus on the fluid near the floor; distance follows the container footprint.
         camera_azimuth_deg = 35.0
         camera_elevation_deg = 25.0

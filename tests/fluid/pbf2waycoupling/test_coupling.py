@@ -11,10 +11,10 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from .. import PBF2WayCoupling as solver
-from .. import coupling_initialization as init
-from .. import coupling_functions as fn
-from ..simulation import add_simulation_arguments, config_from_args, diagnostics
+from demos.fluid.PBF2WayCoupling import PBF2WayCoupling as solver
+from demos.fluid.PBF2WayCoupling import coupling_initialization as init
+from demos.fluid.PBF2WayCoupling import coupling_functions as fn
+from demos.fluid.PBF2WayCoupling.simulation import add_simulation_arguments, config_from_args, diagnostics
 
 
 @wp.kernel
@@ -409,7 +409,7 @@ class CouplingTest(unittest.TestCase):
                 np.testing.assert_array_equal(results[0][1], results[1][1])
 
     def make_fluid_pair(self, radius, q, device):
-        wp.config.kernel_cache_dir = str(Path(__file__).resolve().parents[4] / ".warp_cache")
+        wp.config.kernel_cache_dir = str(Path(__file__).resolve().parents[3] / ".warp_cache")
         wp.init()
         h, volume = 4 * radius, 0.8 * (2 * radius) ** 3
         x = wp.array([[0, 0, 0], [q * h, 0, 0]], dtype=wp.vec3, device=device)

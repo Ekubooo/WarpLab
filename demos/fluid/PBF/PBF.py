@@ -4,9 +4,11 @@ import warp.render
 if __package__:
     from . import pbf_helper as fn
     from . import config_io
+    from . import boundary_model
 else:
     import pbf_helper as fn
     import config_io
+    import boundary_model
 
 @wp.kernel
 def apply_predict(
@@ -272,11 +274,19 @@ def update_velocity(
 
 
 class Example:
-    def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None):
+    def __init__(
+        self, stage_path="example_pbf.usd", verbose=False, config=None, *,
+        boundary_obj=None, sdf_voxel_size=boundary_model.DEFAULT_VOXEL_SIZE,
+        sdf_force_rebuild=False,
+    ):
         self.verbose = verbose
         self.sim_time = 0.0
 
         self.config = config if config is not None else fn.PBFConfig()
+        self.static_boundary = boundary_model.load_static_boundary(
+            boundary_obj, sdf_voxel_size=sdf_voxel_size,
+            sdf_force_rebuild=sdf_force_rebuild, device=wp.get_device(),
+        ) if boundary_obj is not None else None
         self.gravity = wp.vec3(*self.config.gravity)
         fn.init_parameters(self)
         fn.init_device_buffers(self)
@@ -437,6 +447,7 @@ def parse_args(argv=None):
         help=f"Clamp negative density constraints to zero (default: {fn.PBFConfig.clamp_negative_pressure}).",
     )
 
+    boundary_model.add_sdf_arguments(parser)
     args = parser.parse_args(argv)
     try:
         if args.config_path is not None:
@@ -467,6 +478,7 @@ def main():
         example = Example(
             stage_path=args.stage_path, verbose=args.verbose,
             config=args.config,
+            **boundary_model.boundary_arguments(args),
         )
 
         for _ in range(args.num_frames):

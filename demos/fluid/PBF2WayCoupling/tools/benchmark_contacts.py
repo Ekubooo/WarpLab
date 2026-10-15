@@ -22,7 +22,7 @@ from ..PBF2WayCoupling import (
     score_contact_manifold_slot,
     solve_contacts,
 )
-from ..tests.test_contact_reference import reference_contact_sweep
+from tests.fluid.pbf2waycoupling.test_contact_reference import reference_contact_sweep
 
 
 def main():

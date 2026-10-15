@@ -98,7 +98,7 @@ For a bounded render run, add `--num-frames N`. For the CPU parity and behavior
 suite:
 
 ```bash
-.venv/bin/python -m unittest demos.fluid.MMPBF.test_mmpbf
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.mmpbf.test_mmpbf
 ```
 
 The OpenGL billboard renderer is only a frontend. It is not part of the
