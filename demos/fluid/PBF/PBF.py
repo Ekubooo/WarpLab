@@ -131,12 +131,16 @@ def calc_deltaPos(
 def update_prePos(
     boundary: wp.vec3,
     delta_Pos: wp.array[wp.vec3],
+    smoothing_radius: float,
+    volume_id: wp.uint64,
     pre_Pos: wp.array[wp.vec3]
+
 ):
     # can this kernel fusion into last kernel?
     tid = wp.tid()
     currPos = delta_Pos[tid] + pre_Pos[tid]
-    pre_Pos[tid] = fn.apply_boundary(currPos, boundary, tid)
+    # pre_Pos[tid] = fn.apply_boundary(currPos, boundary, tid)
+    pre_Pos[tid] = fn.apply_SDF(volume_id, currPos, smoothing_radius)
 
 @wp.kernel
 def update_position(
@@ -151,9 +155,10 @@ def update_position(
     currPos = pos[tid]
     incomingVel = vel[tid]
     reconstructedVel = (pPos - currPos) / dt
-    reconstructedVel = fn.apply_boundary_collision_velocity(
-        pPos, boundary, reconstructedVel, incomingVel
-    )
+    # reconstructedVel = fn.apply_boundary_collision_velocity(
+    #     pPos, boundary, reconstructedVel, incomingVel
+    # )
+
     # Limit reconstruction before it becomes input to XSPH/vorticity.
     speed_squared = wp.dot(reconstructedVel, reconstructedVel)
     if speed_squared > fn.MaxVel * fn.MaxVel:
@@ -281,7 +286,7 @@ class Example:
         self.config = config if config is not None else fn.PBFConfig()
         self.gravity = wp.vec3(*self.config.gravity)
         fn.init_parameters(self)
-        # Own the full GPU Volume; the current solver does not query it yet.
+        # Keep the GPU Volume alive while the solver queries its SDF.
         self.static_sdf = boundary_model.load_static_sdf(device=wp.get_device())
         fn.init_device_buffers(self)
         self.renderer = (
@@ -337,7 +342,9 @@ class Example:
                             dim=self.n,
                             inputs=[
                                 self.boundary,
-                                self.delta_Pos
+                                self.delta_Pos,
+                                self.particle_radius,
+                                self.static_sdf.id
                             ],
                             outputs=[self.pre_Pos]
                         )

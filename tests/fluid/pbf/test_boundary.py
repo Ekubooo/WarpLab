@@ -1,4 +1,4 @@
-"""Fixed-path SDF loading, entry lifetime and unchanged solver behavior."""
+"""Fixed-path SDF loading, resource lifetime and world-space collision projection."""
 
 import contextlib
 from dataclasses import replace
@@ -176,7 +176,7 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
             raise unittest.SkipTest("CUDA is required for NanoVDB")
         cls.device = "cuda:0"
 
-    def test_load_prebaked_volume_and_sample_without_changing_solver(self):
+    def test_load_prebaked_volume_and_project_in_world_coordinates(self):
         import trimesh
         from demos.fluid.boundary import sdf_baker
 
@@ -201,9 +201,6 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                 volume_ref = weakref.ref(sim.static_sdf)
                 self.assertIsInstance(sim.static_sdf, wp.Volume)
                 self.assertAlmostEqual(sim.static_sdf.get_voxel_size()[0], 0.05, places=6)
-                # A placeholder resource gives the original solver trajectory baseline.
-                with patch.object(boundary, "load_static_sdf", return_value=object()):
-                    original = create_pbf_simulation(config=config)
                 with patch.object(boundary, "load_static_sdf", side_effect=AssertionError("Reset reloaded SDF")):
                     reset_simulation(sim)
                 gc.collect()
@@ -217,11 +214,17 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                 wp.launch(probe_sdf, dim=3, inputs=[data, points, distances, gradients])
                 np.testing.assert_allclose(distances.numpy(), [0.4, -0.1, 0.04], atol=0.015)
                 np.testing.assert_allclose(gradients.numpy()[0], [-1, 0, 0], atol=0.02)
+                # These world coordinates must project against the unshifted Volume.
+                projected = wp.array([[0.79, 0.1, 0.2], [0.82, 0.1, 0.2], [-0.82, 0.1, 0.2]], dtype=wp.vec3)
+                wp.launch(solver.update_prePos, dim=3,
+                          inputs=[sim.boundary, wp.zeros(3, dtype=wp.vec3), sim.particle_radius, volume.id],
+                          outputs=[projected])
+                np.testing.assert_allclose(projected.numpy(),
+                                           [[0.75, 0.1, 0.2], [0.75, 0.1, 0.2], [-0.75, 0.1, 0.2]], atol=2e-5)
                 for _ in range(2):
                     sim.step()
-                    original.step()
-                np.testing.assert_array_equal(sim.pos.numpy(), original.pos.numpy())
-                np.testing.assert_array_equal(sim.v.numpy(), original.v.numpy())
+                self.assertTrue(np.isfinite(sim.pos.numpy()).all())
+                self.assertTrue(np.isfinite(sim.v.numpy()).all())
 
 
 if __name__ == "__main__":

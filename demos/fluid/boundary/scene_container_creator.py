@@ -1,7 +1,8 @@
 """从 scene_creator.py 复制：输出简化景观和封闭容器，不烘焙 SDF。
 
 直接运行或作为模块运行，无 CLI 参数。修改本文件顶部的配置，或调用 create_scene()。
-所有构造采用 Z-up；输出默认统一转为 Y-up。原 scene_creator.py 保持独立。
+地形生成器返回后立即转为 Y-up，后续构造及默认输出均采用 Y-up。
+原 scene_creator.py 与 terrain_generator.py 保持独立、不修改。
 """
 
 import sys
@@ -22,11 +23,11 @@ OUTPUT_DIR = ASSET_DIR / "output"  # 合成场景及后续 SDF 结果。
 DEFAULT_OBJ_PATH = ORIGIN_DIR / "bunny_flat_bottom.obj"  # 水平裁切并封口的兔子副本；原模型保持不变。
 DEFAULT_OUTPUT_PATH = OUTPUT_DIR / "stairs_scene_bool_simplified.obj"
 DEFAULT_CONTAINER_OUTPUT_PATH = OUTPUT_DIR / "stairs_container_bool_simplified.obj"
-DEFAULT_BLOCK_SIZE = (3.1, 1.6)  # X 长、Y 宽，米；尺寸仅用于地形生成。
+DEFAULT_BLOCK_SIZE = (3.1, 1.6)  # X 长、Z 宽，米；底层生成器使用同尺寸的 XY 平面。
 DEFAULT_STEP_WIDTH = 0.15  # 台阶宽度，米；墙体增厚不改变地形。
 DEFAULT_STEP_HEIGHT = 0.1
 DEFAULT_PLATFORM_WIDTH = 0.7
-DEFAULT_CONTAINER_HEIGHT = 1.5  # 内顶面绝对 Z 坐标，米；不随场景高度变化。
+DEFAULT_CONTAINER_HEIGHT = 3.0  # 内顶面绝对 Y 坐标，米；不随场景高度变化。
 DEFAULT_OVERLAP_DEPTH = 0.075  # 保持原内腔边界；增厚部分只向外扩展。None 仍可取墙厚的一半。
 REFERENCE_PLATFORM_WIDTH = 1.0  # 尺寸标定基准，米；固定保留，不随当前地形参数改变。
 DEFAULT_OBJ_SCALE = 0.95 / 0.15515922  # 当前兔子原始宽度为 0.15515922；在 1 米平台上标定为宽占 95%。
@@ -47,7 +48,7 @@ def check_boolean_backend():
 
 
 def generate_stairs(step_width=DEFAULT_STEP_WIDTH):
-    """生成一块 Z-up 阶梯；在本函数中修改阶梯尺寸和参数。"""
+    """将底层 Z-up 阶梯转为 Y-up，水平范围保持正 X、正 Z。"""
     vertices, indices = create_mesh_terrain(
         grid_size=(1, 1),                   # (行数, 列数)，这里生成一块。
         block_size=DEFAULT_BLOCK_SIZE,
@@ -61,6 +62,12 @@ def generate_stairs(step_width=DEFAULT_STEP_WIDTH):
         },
     )
 
+    # Rigid rotation plus an origin change: (x, y, z) -> (x, z, W-y).
+    # W comes from the generated terrain, so no runtime SDF offset is needed.
+    source = np.asarray(vertices, dtype=np.float64)
+    width = float(source[:, 1].max())
+    vertices = np.column_stack((source[:, 0], source[:, 2], width - source[:, 1]))
+
     # vertices 是 (N, 3) 数组：N 个顶点，每一行是一个 [x, y, z]。
     # indices 是一维数组，如 [0, 1, 2, 2, 3, 0]：每三个数字表示一个三角形。
     # reshape(-1, 3) 将它变成 [[0, 1, 2], [2, 3, 0]]；-1 表示自动计算行数。
@@ -69,20 +76,20 @@ def generate_stairs(step_width=DEFAULT_STEP_WIDTH):
 
 
 def get_platform_bounds(terrain):
-    """读取 Z-up 地形最高处向上的水平三角面，返回平台的 (2, 3) 包围盒。"""
+    """读取 Y-up 地形最高处向上的水平三角面，返回平台的 (2, 3) 包围盒。"""
     if (len(terrain.vertices) == 0 or len(terrain.faces) == 0
             or not np.isfinite(terrain.vertices).all()):
         raise ValueError("无法识别有效水平平台：地形缺少有限的顶点或三角面")
-    top_z = terrain.bounds[1, 2]
+    top_y = terrain.bounds[1, 1]
     triangles = terrain.triangles
-    top_faces = (np.all(np.isclose(triangles[:, :, 2], top_z, atol=1e-7, rtol=0), axis=1)
-                 & (terrain.face_normals[:, 2] > 1.0 - 1e-7)
+    top_faces = (np.all(np.isclose(triangles[:, :, 1], top_y, atol=1e-7, rtol=0), axis=1)
+                 & (terrain.face_normals[:, 1] > 1.0 - 1e-7)
                  & (terrain.area_faces > 0))
     if not top_faces.any():
         raise ValueError("无法识别有效水平平台：地形最高处没有向上的水平面")
     points = triangles[top_faces].reshape(-1, 3)
     bounds = np.array([points.min(axis=0), points.max(axis=0)])
-    if np.any(bounds[1, :2] - bounds[0, :2] <= 0):
+    if np.any(bounds[1, [0, 2]] - bounds[0, [0, 2]] <= 0):
         raise ValueError("无法识别有效水平平台：平台宽度和深度必须大于零")
     return bounds
 
@@ -94,7 +101,7 @@ def _effective_obj_scale(scale, platform_bounds=None):
     if platform_bounds is not None:
         if not np.isfinite(REFERENCE_PLATFORM_WIDTH) or REFERENCE_PLATFORM_WIDTH <= 0:
             raise ValueError("REFERENCE_PLATFORM_WIDTH 必须是大于零的有限数值，单位为米")
-        width = np.min(platform_bounds[1, :2] - platform_bounds[0, :2])
+        width = np.min(platform_bounds[1, [0, 2]] - platform_bounds[0, [0, 2]])
         scale = scale * width / REFERENCE_PLATFORM_WIDTH
     if not np.isfinite(scale) or scale <= 0:
         raise ValueError("OBJ 实际倍率必须是大于零的有限数值")
@@ -102,44 +109,46 @@ def _effective_obj_scale(scale, platform_bounds=None):
 
 
 def get_support_center(mesh, contact_depth=0.0):
-    """返回 Z-up 支撑中心 [x, y, 最低Z]；优先使用平底的面积重心。
+    """返回 Y-up 支撑中心 [x, 最低Y, z]；优先使用平底的面积重心。
 
     无平底时，尝试最低点上方 contact_depth 处截面的面积重心；没有有效截面则取
     最低接触顶点的范围中心。计算不参考身体、耳朵等上部几何的投影包围盒。
     """
     if not np.isfinite(contact_depth) or contact_depth < 0:
         raise ValueError("contact_depth 必须是大于或等于零的有限数值")
-    z_min = mesh.bounds[0, 2]
-    bottom_faces = (np.all(np.isclose(mesh.triangles[:, :, 2], z_min, atol=1e-9, rtol=0), axis=1)
+    y_min = mesh.bounds[0, 1]
+    bottom_faces = (np.all(np.isclose(mesh.triangles[:, :, 1], y_min, atol=1e-9, rtol=0), axis=1)
                     & (mesh.area_faces > 0))
     if bottom_faces.any():
-        center = np.average(mesh.triangles_center[bottom_faces, :2], axis=0,
+        center = np.average(mesh.triangles_center[bottom_faces][:, [0, 2]], axis=0,
                             weights=mesh.area_faces[bottom_faces])
-        return np.r_[center, z_min]
+        return np.array([center[0], y_min, center[1]])
 
     if contact_depth > 0:
         solid = prepare_solid(mesh)
         if solid.is_volume:
             segments, face_ids = trimesh.intersections.mesh_plane(
-                solid, [0, 0, 1], [0, 0, z_min + contact_depth], return_faces=True,
+                solid, [0, 1, 0], [0, y_min + contact_depth, 0], return_faces=True,
             )
             if len(segments):
                 # 用外法线统一线段方向；外轮廓为逆时针，孔洞为顺时针，不依赖 Shapely。
-                tangents = np.cross([0, 0, 1], solid.face_normals[face_ids])
+                tangents = np.cross([0, 1, 0], solid.face_normals[face_ids])
                 reverse = np.einsum("ij,ij->i", segments[:, 1] - segments[:, 0], tangents) < 0
                 segments[reverse] = segments[reverse, ::-1]
-                xy = segments[:, :, :2]
-                origin = xy.reshape(-1, 2).mean(axis=0)
-                a, b = xy[:, 0] - origin, xy[:, 1] - origin
+                # (Z, X) is right-handed around +Y; preserve signed hole areas.
+                zx = segments[:, :, [2, 0]]
+                origin = zx.reshape(-1, 2).mean(axis=0)
+                a, b = zx[:, 0] - origin, zx[:, 1] - origin
                 cross = a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
                 twice_area = cross.sum()
-                tolerance = np.finfo(float).eps * max(float(np.max(solid.extents[:2])) ** 2, 1e-20) * 32
+                tolerance = np.finfo(float).eps * max(float(np.max(solid.extents[[0, 2]])) ** 2, 1e-20) * 32
                 if twice_area > tolerance:
                     center = ((a + b) * cross[:, None]).sum(axis=0) / (3 * twice_area) + origin
-                    return np.r_[center, z_min]
+                    return np.array([center[1], y_min, center[0]])
 
-    lowest = mesh.vertices[np.isclose(mesh.vertices[:, 2], z_min, atol=1e-9, rtol=0), :2]
-    return np.r_[(lowest.min(axis=0) + lowest.max(axis=0)) / 2, z_min]
+    lowest = mesh.vertices[np.isclose(mesh.vertices[:, 1], y_min, atol=1e-9, rtol=0)][:, [0, 2]]
+    center = (lowest.min(axis=0) + lowest.max(axis=0)) / 2
+    return np.array([center[0], y_min, center[1]])
 
 
 def load_and_place_obj(obj_path, terrain, scale=DEFAULT_OBJ_SCALE, yaw_deg=0.0,
@@ -150,9 +159,9 @@ def load_and_place_obj(obj_path, terrain, scale=DEFAULT_OBJ_SCALE, yaw_deg=0.0,
     scale：在 1 米基准平台上的标定倍率，当前兔子默认约 6.12274，宽占平台 95%。
     scale_with_platform：默认 True，实际倍率 = scale × 平台短边 / REFERENCE_PLATFORM_WIDTH。
         False 保留固定倍率；只改变 OBJ，绝不缩放或修改 terrain。
-    yaw_deg：绕竖直 Z 轴旋转的角度，单位为度。
+    yaw_deg：绕竖直 Y 轴旋转的角度，单位为度。
     obj_up_axis：原始 OBJ 的向上轴，Y 或 Z；当前兔子默认 Y。
-    position：目标底面支撑中心 [x, y, z]，单位为米，采用 Z-up；None 放在平台中心。
+    position：目标底面支撑中心 [x, 高度y, z]，单位为米，采用 Y-up；None 放在平台中心。
     sink：自动放置时向下嵌入平台的深度，米；显式 position 不再叠加 sink。
     """
     obj_path = Path(obj_path)
@@ -183,13 +192,12 @@ def load_and_place_obj(obj_path, terrain, scale=DEFAULT_OBJ_SCALE, yaw_deg=0.0,
     if len(obj.vertices) == 0 or len(obj.faces) == 0 or not np.isfinite(obj.vertices).all():
         raise ValueError("OBJ 必须包含有效的顶点和三角面")
 
-    # 整个放置过程统一使用 Z-up：X、Y 在地面上，Z 表示高度。
-    # 按指定轴转换：如果原始 OBJ 为 Y-up，绕 X 轴 +90° 转为 Z-up。
-    if obj_up_axis == "Y":
-        obj.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
+    # Y-up OBJ is already aligned. Convert only explicitly declared Z-up inputs.
+    if obj_up_axis == "Z":
+        obj.apply_transform(trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0]))
     obj.apply_scale(effective_scale)
     obj.apply_transform(
-        trimesh.transformations.rotation_matrix(np.deg2rad(yaw_deg), [0, 0, 1])
+        trimesh.transformations.rotation_matrix(np.deg2rad(yaw_deg), [0, 1, 0])
     )
 
     # 缩放和旋转之后按实际支撑面定位；按面积加权，不受顶点密度或耳朵伸出影响。
@@ -197,17 +205,17 @@ def load_and_place_obj(obj_path, terrain, scale=DEFAULT_OBJ_SCALE, yaw_deg=0.0,
     bottom_center = get_support_center(obj, contact_depth=sink if position is None else 0.0)
 
     if position is None:
-        # 读取实际平台中心；当前约 [1.55, 0.8, 0.5]，下沉量仍为绝对米制值。
+        # 读取实际平台中心；当前约 [1.55, 0.5, 0.8]，下沉量仍为绝对米制值。
         placement_bounds = platform_bounds if platform_bounds is not None else terrain.bounds
-        ground_min_x, ground_min_y, _ = placement_bounds[0]
-        ground_max_x, ground_max_y, platform_z = placement_bounds[1]
+        ground_min_x, _, ground_min_z = placement_bounds[0]
+        ground_max_x, platform_y, ground_max_z = placement_bounds[1]
         target = np.array([
             (ground_min_x + ground_max_x) / 2,
-            (ground_min_y + ground_max_y) / 2,
-            platform_z - sink,
+            platform_y - sink,
+            (ground_min_z + ground_max_z) / 2,
         ])
     else:
-        # 例如 [1.0, 2.0, 0.1]；自选位置时，Z 要按该处台阶高度填写。
+        # 自选位置时，Y 要按该处台阶高度填写。
         target = np.asarray(position, dtype=np.float64)
         if target.shape != (3,) or not np.isfinite(target).all():
             raise ValueError("position 必须是三个有限数值 [x, y, z]")
@@ -372,11 +380,13 @@ def union_stair_boxes(terrain):
     return result
 
 
-def export_scene_mesh(mesh, output_path, up_axis):
-    """对整个场景统一转换向上轴并导出，保留用于布尔计算的 Z-up 原件。"""
+def export_scene_mesh(mesh, output_path, up_axis, *, terrain_width=DEFAULT_BLOCK_SIZE[1]):
+    """默认直接导出 Y-up；Z-up 输出使用地形入口变换的逆变换。"""
     mesh = mesh.copy()
-    if up_axis == "Y":
-        mesh.apply_transform(trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0]))
+    if up_axis == "Z":
+        mesh.apply_transform(np.array([
+            [1, 0, 0, 0], [0, 0, -1, terrain_width], [0, 1, 0, 0], [0, 0, 0, 1],
+        ], dtype=np.float64))
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(output_path)
@@ -396,10 +406,10 @@ def build_container_parts(terrain, wall_thickness=0.25,
                           container_height=DEFAULT_CONTAINER_HEIGHT, overlap_depth=DEFAULT_OVERLAP_DEPTH):
     """返回四面墙和顶盖的五个封闭箱体；没有另加平整底板。
 
-    地形 X 范围为 L，Y 范围为 W；墙内侧进入地形 δ，外侧只增加 w-δ。
+    地形 X 范围为 L，Z 范围为 W；墙内侧进入地形 δ，外侧只增加 w-δ。
     统一外尺寸为 L+2(w-δ)、W+2(w-δ)，长墙横跨完整外长度。
     短墙目标长度 W+δ，但不得超过统一外宽度；相交余量留在外轮廓内。
-    墙内侧进入地形 δ；顶盖底面 Z=container_height，墙顶比它高 δ。
+    墙内侧进入地形 δ；顶盖底面 Y=container_height，墙顶比它高 δ。
     顶盖与四墙使用同一外边界，避免墙头和顶盖额外伸出。
     """
     depth = resolve_overlap_depth(wall_thickness, overlap_depth)
@@ -407,21 +417,21 @@ def build_container_parts(terrain, wall_thickness=0.25,
             or not np.isfinite(terrain.vertices).all()):
         raise ValueError("构造容器需要具有有限坐标的地形")
     minimum, maximum = terrain.bounds
-    length, width = maximum[:2] - minimum[:2]
+    length, width = maximum[[0, 2]] - minimum[[0, 2]]
     if min(length, width) <= 2 * depth:
         raise ValueError("地形水平尺寸必须大于两倍相交深度，以保留流体内部空间")
-    if not np.isfinite(container_height) or container_height <= maximum[2]:
-        raise ValueError("container_height 是内顶面绝对 Z 坐标，必须高于地形最高点")
+    if not np.isfinite(container_height) or container_height <= maximum[1]:
+        raise ValueError("container_height 是内顶面绝对 Y 坐标，必须高于地形最高点")
     w = wall_thickness
-    outer_min = minimum[:2] - (w - depth)
-    outer_max = maximum[:2] + (w - depth)
+    outer_min = minimum[[0, 2]] - (w - depth)
+    outer_max = maximum[[0, 2]] + (w - depth)
     outer_size = outer_max - outer_min
-    cx, cy = (outer_min + outer_max) / 2
+    cx, cz = (outer_min + outer_max) / 2
     # 当 δ 较大时 W+δ 可能比完整外宽度还大，截到外边界；不要撑大容器。
     short_length = min(width + depth, outer_size[1])
-    bottom = minimum[2]
+    bottom = minimum[1]
     top = container_height + depth
-    height, cz = top - bottom, (top + bottom) / 2
+    height, cy = top - bottom, (top + bottom) / 2
 
     def box(extents, center):
         mesh = trimesh.creation.box(extents=extents)
@@ -429,17 +439,17 @@ def build_container_parts(terrain, wall_thickness=0.25,
         return mesh
 
     walls = [
-        box((outer_size[0], w, height),
-            (cx, outer_min[1] + w / 2, cz)),
-        box((outer_size[0], w, height),
-            (cx, outer_max[1] - w / 2, cz)),
-        box((w, short_length, height),
+        box((outer_size[0], height, w),
+            (cx, cy, outer_min[1] + w / 2)),
+        box((outer_size[0], height, w),
+            (cx, cy, outer_max[1] - w / 2)),
+        box((w, height, short_length),
             (outer_min[0] + w / 2, cy, cz)),
-        box((w, short_length, height),
+        box((w, height, short_length),
             (outer_max[0] - w / 2, cy, cz)),
     ]
-    lid = box((*tuple(outer_size), w),
-              (*tuple((outer_min + outer_max) / 2), container_height + w / 2))
+    lid = box((outer_size[0], w, outer_size[1]),
+              (cx, container_height + w / 2, cz))
     return [*walls, lid]
 
 
@@ -482,7 +492,7 @@ def create_scene(obj_path=DEFAULT_OBJ_PATH, output_path=DEFAULT_OUTPUT_PATH,
 
     step_width 仅控制台阶宽；墙厚为 0.25 米，默认相交量固定为 0.075。
     显式 overlap_depth=None 使用墙厚的一半。
-    container_height 是内部 Z-up 的内顶面绝对高度，不是场景包围盒高度。
+    container_height 是内部 Y-up 的内顶面绝对高度，不是场景包围盒高度。
     simplify_tolerance 是两份输出共同的简化容差；没有关闭简化的分支。
     """
     check_boolean_backend()
@@ -505,7 +515,7 @@ def create_scene(obj_path=DEFAULT_OBJ_PATH, output_path=DEFAULT_OUTPUT_PATH,
     # generate_stairs 的最高水平面就是中央平台；显示实际尺寸，方便修改参数后核对。
     try:
         platform_bounds = get_platform_bounds(terrain)
-        platform_size = platform_bounds[1, :2] - platform_bounds[0, :2]
+        platform_size = platform_bounds[1, [0, 2]] - platform_bounds[0, [0, 2]]
         platform_text = f"{platform_size[0]:g}×{platform_size[1]:g} m"
     except ValueError:
         if scale_with_platform:
@@ -523,16 +533,18 @@ def create_scene(obj_path=DEFAULT_OBJ_PATH, output_path=DEFAULT_OUTPUT_PATH,
     # 相对原单墙厚 0.15 米，外底面也向外增加同样的距离；原地形表面保持不变。
     outward_growth = max(wall_thickness - 0.15, 0.0)
     outer_bounds = np.array([
-        [*lid_bounds[0, :2], solid_terrain.bounds[0, 2] - outward_growth], lid_bounds[1],
+        [lid_bounds[0, 0], solid_terrain.bounds[0, 1] - outward_growth, lid_bounds[0, 2]], lid_bounds[1],
     ])
     # 扩展段上端进入原底座，保证并集重叠；厚度由外移增量决定。
     base_extension = trimesh.creation.box(
-        extents=(*tuple(lid_bounds[1, :2] - lid_bounds[0, :2]), outward_growth + depth))
+        extents=(lid_bounds[1, 0] - lid_bounds[0, 0], outward_growth + depth,
+                 lid_bounds[1, 2] - lid_bounds[0, 2]))
     base_extension.apply_translation([
-        *tuple(lid_bounds.mean(axis=0)[:2]), solid_terrain.bounds[0, 2] + (depth - outward_growth) / 2])
-    if obj.bounds[1, 2] >= container_height:
+        lid_bounds.mean(axis=0)[0], solid_terrain.bounds[0, 1] + (depth - outward_growth) / 2,
+        lid_bounds.mean(axis=0)[2]])
+    if obj.bounds[1, 1] >= container_height:
         raise ValueError("内顶面必须高于放置后的 OBJ，避免模型与顶盖相交")
-    print(f"容器：墙厚={wall_thickness:g} m，相交量={depth:g} m，内顶面 Z={container_height:g} m，"
+    print(f"容器：墙厚={wall_thickness:g} m，相交量={depth:g} m，内顶面 Y={container_height:g} m，"
           f"外尺寸={np.array2string(outer_bounds[1] - outer_bounds[0], precision=6)} m",
           flush=True)
     scene = boolean_union_meshes([solid_terrain, obj], "场景并集")
@@ -548,8 +560,9 @@ def create_scene(obj_path=DEFAULT_OBJ_PATH, output_path=DEFAULT_OUTPUT_PATH,
     print("容器分支：", flush=True)
     report_simplification(container, simplified_container, simplify_tolerance)
     # 两个分支均计算并检查成功后才开始导出；不保存未简化中间 mesh。
-    export_scene_mesh(simplified_scene, output_path, up_axis)
-    export_scene_mesh(simplified_container, container_output_path, up_axis)
+    terrain_width = float(terrain.bounds[1, 2])
+    export_scene_mesh(simplified_scene, output_path, up_axis, terrain_width=terrain_width)
+    export_scene_mesh(simplified_container, container_output_path, up_axis, terrain_width=terrain_width)
     return output_path, container_output_path
 
 

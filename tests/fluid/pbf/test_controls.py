@@ -30,9 +30,14 @@ class ControlsTest(unittest.TestCase):
         cls.device = "cuda:0" if wp.is_cuda_available() else "cpu"
 
     def make_simulation(self, config=CONFIG):
-        with wp.ScopedDevice(self.device), \
-                patch.object(solver.boundary_model, "load_static_sdf", return_value=object()):
-            return solver.Example(stage_path=None, config=config)
+        if self.device == "cpu":
+            self.skipTest("The solver's NanoVDB boundary requires CUDA")
+        with wp.ScopedDevice(self.device):
+            # Keep controls tests independent of the scene while providing a valid SDF id.
+            empty_sdf = wp.Volume.allocate([0, 0, 0], [0, 0, 0], 1.0, bg_value=10.0,
+                                           translation=(100.0, 100.0, 100.0), device=self.device)
+            with patch.object(solver.boundary_model, "load_static_sdf", return_value=empty_sdf):
+                return solver.Example(stage_path=None, config=config)
 
     def step(self, sim, count=1):
         with wp.ScopedDevice(self.device), contextlib.redirect_stdout(io.StringIO()):

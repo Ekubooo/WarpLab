@@ -91,9 +91,9 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device 
 
 直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，这些参数由下方独立烘焙命令提供。要换文件，修改 `STATIC_SDF_PATH`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
 
-`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 均保留原参数，无需额外绑定步骤。每次创建实例都会读取固定路径 SDF 并分配 GPU Volume。**当前求解仍使用原箱体边界；SDF 仅加载到显存，不参与碰撞、粒子初始化或场景渲染。** 设备采样辅助函数仍独立保留，供后续接入。
+`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 均保留原参数，无需额外绑定步骤。每次创建实例都会读取固定路径 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选，容器也未加入渲染。
 
-当前文件的体素间距为 0.0075 米。墙厚 0.25 米、坑底厚 0.20 米的容器，Volume 本体约 **140.88 MiB 显存**，文件约 **147.72 MB**；Warp 1.15 加载期间网格缓冲临时约 **281.75 MiB**，不含 PBF 与 CUDA 资源。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
+当前文件的体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=3.0 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,3.0,1.525)`，内部仍有台阶和模型。全覆盖体素场的显存和文件大小随高度增长，加载时另有临时缓冲。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
 
 ## 独立烘焙命令
 

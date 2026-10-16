@@ -10,14 +10,15 @@ from unittest import mock
 
 import numpy as np
 import trimesh
+from scipy.spatial import cKDTree
 
 from demos.fluid.boundary import scene_container_creator as creator
 from demos.fluid.boundary import scene_creator as original
 
 
 def make_floor(length=3.1, width=1.6, depth=0.2):
-    mesh = trimesh.creation.box(extents=(length, width, depth))
-    mesh.apply_translation((length / 2, width / 2, -depth / 2))
+    mesh = trimesh.creation.box(extents=(length, depth, width))
+    mesh.apply_translation((length / 2, -depth / 2, width / 2))
     return mesh
 
 
@@ -32,6 +33,49 @@ def sorted_triangles(mesh):
 
 
 class ContainerTests(unittest.TestCase):
+    def test_terrain_is_rigidly_converted_without_changing_generator(self):
+        old = original.generate_stairs()
+        terrain = creator.generate_stairs()
+        width = old.bounds[1, 1]
+        expected = np.column_stack((old.vertices[:, 0], old.vertices[:, 2], width - old.vertices[:, 1]))
+        np.testing.assert_allclose(terrain.vertices, expected, atol=1e-12)
+        np.testing.assert_array_equal(terrain.faces, old.faces)
+        np.testing.assert_allclose(creator.get_platform_bounds(terrain).mean(axis=0), [1.55, 0.5, 0.8], atol=1e-7)
+
+    @unittest.skipUnless(creator.DEFAULT_OBJ_PATH.is_file(), "Default OBJ asset not installed")
+    def test_model_scale_support_and_yaw_match_previous_geometry(self):
+        terrain = creator.generate_stairs()
+        old_terrain = original.generate_stairs()
+        width = old_terrain.bounds[1, 1]
+        for yaw in (0, 37, 90):
+            for linked in (True, False):
+                old = original.load_and_place_obj(original.DEFAULT_OBJ_PATH, old_terrain,
+                                                   yaw_deg=yaw, scale_with_platform=linked)
+                new = creator.load_and_place_obj(creator.DEFAULT_OBJ_PATH, terrain,
+                                                  yaw_deg=yaw, scale_with_platform=linked)
+                expected = np.column_stack((old.vertices[:, 0], old.vertices[:, 2], width - old.vertices[:, 1]))
+                np.testing.assert_allclose(new.vertices, expected, atol=1e-8)
+                np.testing.assert_allclose(creator.get_support_center(new), [1.55, 0.497, 0.8], atol=1e-7)
+        with tempfile.TemporaryDirectory() as directory:
+            source = trimesh.load(creator.DEFAULT_OBJ_PATH, force="mesh", process=False)
+            source.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
+            path = Path(directory) / "z-up.obj"
+            source.export(path)
+            z_input = creator.load_and_place_obj(path, terrain, obj_up_axis="Z", position=(7, 8, 9))
+            y_input = creator.load_and_place_obj(creator.DEFAULT_OBJ_PATH, terrain, position=(7, 8, 9))
+            np.testing.assert_allclose(z_input.vertices, y_input.vertices, atol=1e-7)
+            np.testing.assert_allclose(creator.get_support_center(z_input), [7, 8, 9], atol=1e-8)
+
+    def test_support_section_centroid_and_lowest_contact_in_y_up(self):
+        # A nonplanar bottom exercises the signed (Z, X) section integration.
+        mesh = trimesh.convex.convex_hull([[0, 0, 0], [1, 2, 0], [3, 2, 0], [1, 2, -2]])
+        np.testing.assert_allclose(creator.get_support_center(mesh, contact_depth=0.5),
+                                   [5 / 12, 0, -1 / 6], atol=1e-10)
+        np.testing.assert_allclose(creator.get_support_center(mesh), [0, 0, 0], atol=1e-10)
+        mesh.apply_translation([3, 5, -2])
+        np.testing.assert_allclose(creator.get_support_center(mesh, contact_depth=0.5),
+                                   [3 + 5 / 12, 5, -2 - 1 / 6], atol=1e-10)
+
     def assert_cuboid_exterior(self, mesh, bounds):
         """检查真实外表面，不能只用整个模型的 AABB 证明外观为长方体。"""
         exteriors = [surface for surface in mesh.split(only_watertight=False, repair=False)
@@ -52,41 +96,41 @@ class ContainerTests(unittest.TestCase):
         floor = make_floor()
         parts = creator.build_container_parts(floor)
         long0, long1, short0, short1, lid = parts
-        np.testing.assert_allclose(long0.extents, [3.45, 0.25, 1.775])
-        np.testing.assert_allclose(short0.extents, [0.25, 1.675, 1.775])
-        np.testing.assert_allclose(lid.bounds, [[-0.175, -0.175, 1.5], [3.275, 1.775, 1.75]])
+        np.testing.assert_allclose(long0.extents, [3.45, 3.275, 0.25])
+        np.testing.assert_allclose(short0.extents, [0.25, 3.275, 1.675])
+        np.testing.assert_allclose(lid.bounds, [[-0.175, 3.0, -0.175], [3.275, 3.25, 1.775]])
         for wall in parts[:4]:
             overlap = trimesh.boolean.intersection([floor, wall], engine="manifold")
             self.assertGreater(overlap.volume, 0)
             overlap = trimesh.boolean.intersection([wall, lid], engine="manifold")
             self.assertGreater(overlap.volume, 0)
-            self.assertAlmostEqual(wall.bounds[0, 2], floor.bounds[0, 2])
+            self.assertAlmostEqual(wall.bounds[0, 1], floor.bounds[0, 1])
         for long_wall in (long0, long1):
             for short_wall in (short0, short1):
                 self.assertGreater(trimesh.boolean.intersection(
                     [long_wall, short_wall], engine="manifold").volume, 0)
         np.testing.assert_allclose(short0.bounds[1, 0], 0.075)
         np.testing.assert_allclose(short1.bounds[0, 0], 3.1 - 0.075)
-        np.testing.assert_allclose(long0.bounds[1, 1], 0.075)
-        np.testing.assert_allclose(long1.bounds[0, 1], 1.6 - 0.075)
+        np.testing.assert_allclose(long0.bounds[1, 2], 0.075)
+        np.testing.assert_allclose(long1.bounds[0, 2], 1.6 - 0.075)
 
     def test_configuration_linkage_and_translated_terrain(self):
         floor = make_floor()
         shifted = floor.copy()
-        shifted.apply_translation((7, -3, 2))
+        shifted.apply_translation((7, 2, -3))
         for width in (0.1, 0.2):
             terrain = creator.generate_stairs(step_width=width)
             walls = creator.build_container_parts(terrain, wall_thickness=width)
-            self.assertAlmostEqual(walls[0].extents[1], width)
+            self.assertAlmostEqual(walls[0].extents[2], width)
             self.assertAlmostEqual(walls[2].extents[0], width)
             self.assertAlmostEqual(walls[2].bounds[1, 0] - terrain.bounds[0, 0], 0.075)
             # 台阶外圈的内边缘随同一个宽度变化。
             self.assertTrue(np.any(np.isclose(terrain.vertices[:, 0], width, atol=1e-7)))
         before = creator.build_container_parts(floor, overlap_depth=0.04)
-        after = creator.build_container_parts(shifted, container_height=3.5, overlap_depth=0.04)
+        after = creator.build_container_parts(shifted, container_height=5.0, overlap_depth=0.04)
         for a, b in zip(before, after):
-            np.testing.assert_allclose(b.vertices, a.vertices + (7, -3, 2))
-        np.testing.assert_allclose(before[0].extents[:2], [3.52, 0.25])
+            np.testing.assert_allclose(b.vertices, a.vertices + (7, 2, -3))
+        np.testing.assert_allclose(before[0].extents[[0, 2]], [3.52, 0.25])
 
     def test_outer_contour_is_cuboid_for_different_overlap_ratios_and_sizes(self):
         for length, width, w, ratio in ((3.1, 1.6, 0.15, 0.1), (3.1, 1.6, 0.15, 0.5),
@@ -96,11 +140,11 @@ class ContainerTests(unittest.TestCase):
                 floor = make_floor(length, width)
                 depth = w * ratio
                 parts = creator.build_container_parts(floor, w, overlap_depth=depth)
-                expected = np.array([[-(w - depth), -(w - depth), -0.2],
-                                     [length + w - depth, width + w - depth, 1.5 + w]])
+                expected = np.array([[-(w - depth), -0.2, -(w - depth)],
+                                     [length + w - depth, 3.0 + w, width + w - depth]])
                 for part in parts:
-                    self.assertTrue(np.all(part.bounds[0, :2] >= expected[0, :2] - 1e-10))
-                    self.assertTrue(np.all(part.bounds[1, :2] <= expected[1, :2] + 1e-10))
+                    self.assertTrue(np.all(part.bounds[0, [0, 2]] >= expected[0, [0, 2]] - 1e-10))
+                    self.assertTrue(np.all(part.bounds[1, [0, 2]] <= expected[1, [0, 2]] + 1e-10))
                 # 长墙端面、短墙外侧、顶盖边缘都对齐同一对 X 外平面。
                 self.assertAlmostEqual(parts[0].bounds[0, 0], parts[2].bounds[0, 0])
                 self.assertAlmostEqual(parts[1].bounds[1, 0], parts[3].bounds[1, 0])
@@ -131,14 +175,14 @@ class ContainerTests(unittest.TestCase):
             container = creator.boolean_union_meshes([floor, *creator.build_container_parts(floor)], "test")
             simplified = creator.simplify_mesh_manifold(container)
         # 整体为外长方体减内空腔；凸出墙头即使封闭，也无法满足这个独立体积关系。
-        expected_solid = 3.45 * 1.95 * 1.95 - 2.95 * 1.45 * 1.5
-        probes = [((1.55, 0.8, 0.75), False),  # 空腔
-                  ((1.55, 0.8, -0.1), True),  # 地板
-                  ((0, 0.8, -0.1), True),     # 墙与底座接缝
-                  ((0.02, 0.8, 0.75), True),  # 侧墙
-                  ((0.02, 0.02, 0.75), True), # 墙角
-                  ((1.55, 0.8, 1.575), True), # 顶盖
-                  ((1.55, 0.8, 1.8), False)] # 容器外
+        expected_solid = 3.45 * 1.95 * 3.45 - 2.95 * 1.45 * 3.0
+        probes = [((1.55, 0.75, 0.8), False),  # 空腔
+                  ((1.55, -0.1, 0.8), True),  # 地板
+                  ((0, -0.1, 0.8), True),     # 墙与底座接缝
+                  ((0.02, 2.5, 0.8), True),   # 加高后的侧墙
+                  ((0.02, 0.75, 0.02), True), # 墙角
+                  ((1.55, 3.125, 0.8), True), # 顶盖
+                  ((1.55, 3.3, 0.8), False)] # 容器外
         for mesh in (container, simplified):
             with contextlib.redirect_stdout(io.StringIO()):
                 creator.validate_container_mesh(mesh, "test")
@@ -146,9 +190,9 @@ class ContainerTests(unittest.TestCase):
             np.testing.assert_allclose(mesh.volume, expected_solid, rtol=0, atol=2e-6)
             surfaces = mesh.split(only_watertight=False, repair=False)
             self.assertEqual(len(surfaces), 2)
-            self.assert_cuboid_exterior(mesh, np.array([[-0.175, -0.175, -0.2], [3.275, 1.775, 1.75]]))
+            self.assert_cuboid_exterior(mesh, np.array([[-0.175, -0.2, -0.175], [3.275, 3.25, 1.775]]))
             cavity = [surface for surface in surfaces if surface.volume < 0][0]
-            np.testing.assert_allclose(-cavity.volume, 2.95 * 1.45 * 1.5, rtol=0, atol=2e-6)
+            np.testing.assert_allclose(-cavity.volume, 2.95 * 1.45 * 3.0, rtol=0, atol=2e-6)
             for center, solid in probes:
                 probe = trimesh.creation.box(extents=(0.01, 0.01, 0.01))
                 probe.apply_translation(center)
@@ -200,27 +244,35 @@ class ContainerTests(unittest.TestCase):
                 landscape = trimesh.load(scene_path, force="mesh", process=False)
                 container = trimesh.load(container_path, force="mesh", process=False)
                 if axis == "Y":
-                    rotation = trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0])
-                    landscape.apply_transform(rotation)
-                    container.apply_transform(rotation)
-                np.testing.assert_allclose(sorted_triangles(landscape), sorted_triangles(expected), atol=1e-8)
+                    inverse = np.array([[1, 0, 0, 0], [0, 0, -1, terrain.bounds[1, 1]],
+                                        [0, 1, 0, 0], [0, 0, 0, 1]])
+                    landscape.apply_transform(inverse)
+                    container.apply_transform(inverse)
+                # Boolean triangulation can change after a rotation; compare surfaces.
+                for a, b in ((landscape, expected), (expected, landscape)):
+                    for start in range(0, len(a.vertices), 64):
+                        _, distances, _ = trimesh.proximity.closest_point_naive(b, a.vertices[start:start + 64])
+                        self.assertLess(distances.max(), 0.0011)
+                self.assertAlmostEqual(landscape.volume, expected.volume, delta=2e-5)
                 with contextlib.redirect_stdout(io.StringIO()):
                     creator.validate_container_mesh(container, "exported")
                 bounds = np.array([
                     [*(solid_terrain.bounds[0, :2] - 0.175), solid_terrain.bounds[0, 2] - 0.1],
-                    [*(solid_terrain.bounds[1, :2] + 0.175), 1.75],
+                    [*(solid_terrain.bounds[1, :2] + 0.175), 3.25],
                 ])
                 self.assert_cuboid_exterior(container, bounds)
                 cavity = [part for part in container.split(only_watertight=False, repair=False)
                           if part.volume < 0][0]
-                self.assertAlmostEqual(cavity.bounds[1, 2], 1.5, places=7)
+                self.assertAlmostEqual(cavity.bounds[1, 2], 3.0, places=7)
                 self.assertAlmostEqual(cavity.bounds[0, 2], 0.0, places=7)
                 # 原坑底厚 0.10；墙厚从 0.15 增到 0.25，外底面同步外移 0.10。
                 self.assertAlmostEqual(cavity.bounds[0, 2] - container.bounds[0, 2], 0.2, places=7)
                 if actual_z is None:
                     actual_z = sorted_triangles(container)
                 else:
-                    np.testing.assert_allclose(sorted_triangles(container), actual_z, atol=1e-8)
+                    # Both exports represent the same already-built geometry.
+                    for a, b in ((sorted_triangles(container), actual_z), (actual_z, sorted_triangles(container))):
+                        self.assertLess(cKDTree(b.reshape(-1, 3)).query(a.reshape(-1, 3))[0].max(), 1e-7)
 
     def test_invalid_requests_do_not_export_and_main_has_no_cli(self):
         with tempfile.TemporaryDirectory() as directory:

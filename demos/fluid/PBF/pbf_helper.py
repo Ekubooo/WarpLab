@@ -34,8 +34,8 @@ class PBFConfig:
     # Reference container/block translated by (1.55, 0, 0.8), so the existing
     # zero-origin position constraint can remain unchanged.
     container_size: tuple = (3.0, 5.0, 2.0)
-    block_start: tuple = (0.1, 0.0, 0.1)
-    block_end: tuple = (1.5, 1.25, 1.9)
+    block_start: tuple = (0.1, 0.5, 0.1)
+    block_end: tuple = (1.5, 2.5, 1.25)
     initial_velocity: tuple = (0.0, 0.0, 0.0)
 
     def __post_init__(self):
@@ -393,3 +393,15 @@ def apply_boundary(pos: wp.vec3, boundary: wp.vec3, tid: int):
 
     return pos
  
+@wp.func
+def apply_SDF(volume_id:wp.uint64, pos:wp.vec3, radius:wp.float32):
+    queryCoord = wp.volume_world_to_index(volume_id, pos)
+
+    grad = wp.vec3()
+    d = wp.volume_sample_grad_f(volume_id, queryCoord, wp.Volume.LINEAR, grad)
+    grad = wp.volume_index_to_world_dir(volume_id, grad)
+    
+    if d < radius :
+        pos -= wp.normalize(grad) * (d - radius)
+
+    return pos

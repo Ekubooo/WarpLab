@@ -80,17 +80,19 @@ python demos/fluid/boundary/scene_container_creator.py
 - `Assets/output/stairs_scene_bool_simplified.obj`：仅地形与 OBJ 的景观参考，可用于不显示墙体的渲染。
 - `Assets/output/stairs_container_bool_simplified.obj`：地形、OBJ、四面墙与顶盖的整体封闭碰撞容器，内部保留流体空腔。
 
-不导出拼接或未简化中间结果，也不删除目录中旧脚本先前生成的文件。景观输出与原合成器的默认简化副本同名，重复运行会覆盖；原 `scene_creator.py` 的代码和命令保持不变。当前没有 SDF 烘焙、表面重建或 PBF 接入。
+不导出拼接或未简化中间结果，也不删除目录中旧脚本先前生成的文件。景观输出与原合成器的默认简化副本同名，重复运行会覆盖；原 `scene_creator.py` 的代码和命令保持不变。本生成器只导出 OBJ，SDF 由独立烘焙工具生成。
+
+内部统一采用 Y-up：XZ 为地面、Y 为高度。底层 `terrain_generator.py` 保持原有 Z-up 实现，返回后立即按 `(x,y,z) -> (x,z,W-y)` 转换，`W` 取原地形 Y 最大值。默认地形水平范围为 `(0,0)` 至 `(3.1,1.6)`；Y-up OBJ 直接导入，只有声明为 Z-up 的 OBJ 才旋转。平台识别、模型支撑中心、缩放、yaw、放置及墙体均使用 Y-up；`position` 表示 `(X,高度Y,Z)`。Y-up 输出直接保存，Z-up 输出应用入口变换的逆变换；PBF 查询 SDF 无需额外位移。
 
 修改 `scene_container_creator.py` 顶部配置，或调用其 Python API：
 
 | 配置 / API 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `DEFAULT_BLOCK_SIZE` | `(3.1, 1.6)` | 地形内部 Z-up 坐标中的 X 长、Y 宽，米。 |
+| `DEFAULT_BLOCK_SIZE` | `(3.1, 1.6)` | 地形内部 Y-up 坐标中的 X 长、Z 宽，米。 |
 | `DEFAULT_STEP_WIDTH` / `step_width` | `0.15` | 仅控制台阶宽，米。 |
 | `DEFAULT_STEP_HEIGHT` | `0.1` | 每级台阶的高度增量，米。 |
 | `DEFAULT_PLATFORM_WIDTH` | `0.7` | 中央平台边长，米。 |
-| `DEFAULT_CONTAINER_HEIGHT` / `container_height` | `1.5` | 内顶面绝对 Z 坐标，米；不自动取包围盒高度，须高于地形和放置后的 OBJ。 |
+| `DEFAULT_CONTAINER_HEIGHT` / `container_height` | `3.0` | 内顶面绝对 Y 坐标，米；不自动取包围盒高度，须高于地形和放置后的 OBJ。 |
 | `DEFAULT_OVERLAP_DEPTH` / `overlap_depth` | `0.075` | 相交量 `δ`，固定原内腔水平边界；须满足 `0 < δ < w`。显式传入 `None` 才自动取墙厚的一半。 |
 | `DEFAULT_SIMPLIFY_TOLERANCE` / `simplify_tolerance` | `0.001` | 两份输出共同的简化表面容差，米；不表示目标面数。 |
 | `DEFAULT_OBJ_PATH` / `obj_path` | `Assets/origin/bunny_flat_bottom.obj` | 原输入 OBJ，须为封闭实体。模型缩放等参数沿用原合成器。 |
@@ -101,15 +103,15 @@ python demos/fluid/boundary/scene_container_creator.py
 
 墙底位于地形最低高度；墙顶比内顶面高 `δ`。顶盖厚度为 `w`，与墙顶产生实体重叠。改变相交量时，墙、盖的外尺寸同步重算，不能仅独立修改某一面墙的长度。
 
-墙厚指单墙面对应内外表面的间距，当前为 0.25 米，内腔水平范围约为 `2.95×1.45` 米，内顶面仍为 `Z=1.5` 米。相对原单墙厚 0.15 米，外壳各面向外增加 0.10 米：侧墙和顶盖厚 0.25 米，外底面从原 `Z=-0.1` 下移到 `Z=-0.2` 米，坑底上表面仍为 `Z=0`，因此坑底最薄处被动增至 0.20 米。底座扩展段仅在容器分支参与并集；台阶宽仍为 0.15 米、平台高度仍为 0.5 米，景观分支不变。最终外尺寸约为 `3.45×1.95×1.95` 米（长×宽×高）。生成后检查简化前后的封闭性、唯一流体空腔，以及外表面是否全部位于统一长方体的六个外平面；外表面与内腔表面不共享顶点是正常结构，不代表墙体没有融合。
+墙厚指单墙面对应内外表面的间距，当前为 0.25 米，内腔水平范围约为 `2.95×1.45` 米，内顶面从 1.5 米加高至 `Y=3.0` 米。相对原单墙厚 0.15 米，外壳各面向外增加 0.10 米：侧墙和顶盖厚 0.25 米，外底面从原 `Y=-0.1` 下移到 `Y=-0.2` 米，坑底上表面仍为 `Y=0`，因此坑底最薄处被动增至 0.20 米。底座扩展段仅在容器分支参与并集；台阶宽仍为 0.15 米、平台高度仍为 0.5 米，模型仍按平台短边联动缩放、按底面支撑中心居中并下沉 0.003 米。最终外尺寸约为 `3.45×1.95×3.45` 米（长×宽×高），外轮廓为 `(-0.175,-0.2,-0.175)` 至 `(3.275,3.25,1.775)`，空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,3.0,1.525)`。生成后检查简化前后的封闭性、唯一流体空腔，以及外表面是否全部位于统一长方体的六个外平面；外表面与内腔表面不共享顶点是正常结构，不代表墙体没有融合。
 
-Python 调用示例（位置、容器高度均采用内部 Z-up，米）：
+Python 调用示例（位置、容器高度均采用内部 Y-up，米）：
 
 ```python
 from demos.fluid.boundary.scene_container_creator import create_scene
 
 landscape_path, container_path = create_scene(
-    container_height=1.5,
+    container_height=3.0,
     step_width=0.15,          # 仅控制台阶宽，地形保持原尺寸
     overlap_depth=0.075,     # 保持原内腔边界，加厚部分向外扩展
     simplify_tolerance=0.001,
