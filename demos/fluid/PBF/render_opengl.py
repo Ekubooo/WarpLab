@@ -24,17 +24,19 @@ try:
     from .pbf_helper import PBFConfig
     from . import config_io
     from . import boundary_model
+    from . import PBF as pbf
     from .simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 except ImportError:
     from pbf_helper import PBFConfig
     import config_io
     import boundary_model
+    import PBF as pbf
     from simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 
 
-def load_static_scene(sdf_filename=None):
+def load_static_scene():
     """Load the wall-free Y-up mesh once, independently of the working directory."""
-    path = boundary_model.resolve_scene_path(sdf_filename)
+    path = boundary_model.resolve_scene_path(pbf.SDF_FILENAME)
     if not path.is_file():
         raise FileNotFoundError(f"Static scene not found: {path}; generate the container assets first")
     try:
@@ -143,7 +145,6 @@ def config_from_args(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    boundary_model.add_sdf_argument(parser)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
         "--num-frames",
@@ -246,11 +247,11 @@ def main():
     if args.speed_color_max <= args.speed_color_mid:
         raise SystemExit("--speed-color-max must be greater than --speed-color-mid")
 
-    scene_points, scene_indices = load_static_scene(args.sdf_filename)
+    scene_points, scene_indices = load_static_scene()
 
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
-            verbose=args.verbose, config=args.config, sdf_filename=args.sdf_filename,
+            verbose=args.verbose, config=args.config,
         )
         # Focus on the fluid near the floor; distance follows the container footprint.
         camera_azimuth_deg = 35.0

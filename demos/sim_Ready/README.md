@@ -86,10 +86,11 @@ result = build_assets(
 
 ```powershell
 python -m demos.fluid.PBF.render_opengl --device cuda:0
-python -m demos.fluid.PBF.render_opengl --device cuda:0 --sdf-file stairs_spot.nvdb
+# 使用 Spot 时，先在 PBF.py 中设置 SDF_FILENAME = "stairs_spot.nvdb"
+python -m demos.fluid.PBF.render_opengl --device cuda:0
 ```
 
-PBF 仅从自身 `Assets` 根目录读取资源。默认选择 `stairs_scene.nvdb`；OpenGL 同时加载 `stairs_scene.obj`，切换 NVDB 时按同名主体切换 OBJ。USD 入口只要求 NVDB。渲染保持默认灰色、平面法线、单位变换；粒子初始化和物理配置保持原状。
+PBF 仅从自身 `Assets` 根目录读取资源。由 `PBF.py` 模块级常量 `SDF_FILENAME = "stairs_scene.nvdb"` 选择资源；OpenGL 使用同一常量加载同名 OBJ。PBF 启动 CLI 不接受 SDF 文件名，加载仍在仿真构造函数内执行。USD 入口只要求 NVDB。渲染保持默认灰色、平面法线、单位变换；粒子初始化和物理配置保持原状。
 
 旧 Boundary 目录和 PBF 的 `Assets/Boundary`、`Assets/Container` 保留为归档，不回退读取。新管线不导入任何归档模块；只有 `terrain_generator.py` 原样复制，保留其许可证与版权信息。
 

@@ -7,7 +7,7 @@
 ```text
 tests/fluid/
 ├── boundary/          # 地形与容器生成、网格检查、SDF 烘焙与独立 CLI
-├── pbf/               # PBF 配置、控制、SDF 文件名选择与资源接入
+├── pbf/               # PBF 配置、控制、静态资产选择与资源接入
 ├── mmpbf/             # MMPBF 公式与行为
 └── pbf2waycoupling/   # 双向耦合、墙体钳制、渲染与接触参考实现
 ```

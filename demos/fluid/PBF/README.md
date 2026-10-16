@@ -31,7 +31,6 @@ a set of good para for the water effect
 | --- | --- | --- |
 | `-h / --help` | — | 显示帮助并退出 |
 | `--device` | `None` | Warp 设备，如 `cuda:0`、`cpu` |
-| `--sdf-file NAME.nvdb` | `stairs_scene.nvdb` | 仅文件名，从 `PBF/Assets` 根目录读取；OpenGL 同时选择同名 OBJ |
 | `--num-frames` | `0` | 最大显示帧数，0 不限 |
 | `--speed-color-mid` | `2.0` | 速度配色中点，m/s |
 | `--speed-color-max` | `7.5` | 速度配色上限，须大于中点 |
@@ -55,7 +54,6 @@ a set of good para for the water effect
 | --- | --- | --- |
 | `-h / --help` | — | 显示帮助并退出 |
 | `--device` | `None` | Warp 设备 |
-| `--sdf-file NAME.nvdb` | `stairs_scene.nvdb` | 仅文件名，从 `PBF/Assets` 根目录读取；OpenGL 同时选择同名 OBJ |
 | `--stage-path` | `example_pbf.usd` | USD 输出路径，`None` 禁用输出 |
 | `--num-frames` | `480` | 仿真帧数 |
 | `--verbose` | `False` | 输出各 kernel 耗时 |
@@ -75,14 +73,14 @@ a set of good para for the water effect
 
 ## 启动时读取静态 SDF
 
-SDF 的目录、默认文件名、CLI 文件名校验和 GPU 读取全部由 `boundary_model.py` 管理，不随工作目录变化：
+资产选择由 `PBF.py` 的模块级常量控制；固定目录、文件名校验、路径解析和 GPU 读取由 `boundary_model.py` 管理，不随工作目录变化：
 
 ```python
-ASSET_DIR = Path(__file__).resolve().parent / "Assets"
-DEFAULT_SDF_FILENAME = "stairs_scene.nvdb"
+# PBF.py：修改这里即可切换碰撞与配对景观
+SDF_FILENAME = "stairs_scene.nvdb"
 ```
 
-两个入口均支持 `--sdf-file NAME.nvdb`，只接受带 `.nvdb` 扩展名的裸文件名，不接受绝对路径、目录、盘符或路径穿越。该选项与 `--config` 可同时使用，不写入物理参数 JSON。选定 CUDA 设备后创建仿真实例，由 `Example.__init__()` 调用 `load_static_sdf(sdf_filename, device=...)`，读取已有的 float32 NanoVDB。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有，随仿真实例存活；`reset()` 不重新加载。入口不再单独加载。SDF 加载不读取 OBJ、不自动烘焙，也不比较源模型或烘焙参数；文件缺失、损坏或类型错误会报告完整路径。
+两个入口均不提供 SDF 文件选择 CLI。选定 CUDA 设备后创建仿真实例，由 `Example.__init__()` 调用 `boundary_model.load_static_sdf(SDF_FILENAME, device=...)`，读取已有的 float32 NanoVDB。加载逻辑仍在构造函数中，文件名不进入构造或创建函数的参数列表。OpenGL 从同一 `PBF.SDF_FILENAME` 解析配对 OBJ；USD 只读取 NVDB。物理 JSON 不包含资产选择。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有；重置不会重新加载。文件缺失、损坏或类型错误会报告完整路径，不自动烘焙。
 
 在仓库根目录、Conda `warplab` 环境中启动，无需 SDF CLI 参数：
 
@@ -96,17 +94,13 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl
 conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device cuda:0 --stage-path None --num-frames 0
 ```
 
-直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，新资产由独立的 sim_Ready 管线准备。要换文件，通过 `--sdf-file` 指定；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
+直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，新资产由独立的 sim_Ready 管线准备。要换文件，修改 `PBF.py` 的 `SDF_FILENAME`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
 
-`Example(stage_path="example_pbf.usd", verbose=False, config=None, *, sdf_filename=None)` 和 `create_pbf_simulation(verbose=False, config=None, *, sdf_filename=None)` 仅增加一个可选关键字参数，不指定则加载默认文件。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
+`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 无需接收资产参数。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
 
 当前文件的体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=4.5 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,4.5,1.525)`，内部仍有台阶和模型。全覆盖体素场的显存和文件大小随高度增长，加载时另有临时缓冲。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
 
-选择其他已烘焙文件：
-
-```powershell
-python -m demos.fluid.PBF.render_opengl --device cuda:0 --sdf-file other.nvdb
-```
+选择其他已烘焙文件时，在 `PBF.py` 中设置 `SDF_FILENAME = "other.nvdb"`；OpenGL 将读取 `Assets/other.obj`。
 
 原 `Assets/Boundary` 与 `Assets/Container` 完整保留为归档，不参与加载，也不作为缺失文件的回退路径。OpenGL 按 NVDB 文件名选择同名 OBJ，USD 入口只要求 NVDB。PBF 不导入资产生成程序，生成程序也不导入 PBF。
 
@@ -117,8 +111,10 @@ python -m demos.fluid.PBF.render_opengl --device cuda:0 --sdf-file other.nvdb
 ```powershell
 python -m demos.sim_Ready --obj bunny_flat_bottom.obj --name stairs_scene --device cuda:0
 python -m demos.sim_Ready --obj spot_triangulated_good.obj --name stairs_spot --device cuda:0
-python -m demos.fluid.PBF.render_opengl --device cuda:0 --sdf-file stairs_spot.nvdb
+python -m demos.fluid.PBF.render_opengl --device cuda:0
 ```
+
+上例生成 Spot 后，若要在 PBF 使用它，先将 `PBF.py` 的 `SDF_FILENAME` 改为 `"stairs_spot.nvdb"`。
 
 裸 OBJ 文件名从 `sim_Ready/Assets` 读取；新管线每次重新计算，不使用旧缓存。默认体素间距 `0.0075 m`、padding 三个体素，实体为负、空腔和外部为正。输出同名的无墙景观 OBJ 与封闭容器 NVDB，不保存容器 OBJ。完整说明见 [sim_Ready](../../sim_Ready/README.md)。Boundary 的旧生成和烘焙工具仍完整保留，但属于归档流程，不用于当前资源发布。
 

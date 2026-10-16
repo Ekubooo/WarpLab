@@ -1,4 +1,4 @@
-"""Select and load offline NanoVDB boundaries for PBF."""
+"""Resolve, validate and load offline NanoVDB assets selected by PBF."""
 
 from pathlib import Path
 
@@ -6,7 +6,6 @@ import warp as wp
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
-DEFAULT_SDF_FILENAME = "stairs_scene.nvdb"
 
 
 def validate_sdf_filename(filename):
@@ -19,21 +18,12 @@ def validate_sdf_filename(filename):
     return filename
 
 
-def add_sdf_argument(parser):
-    """Share the runtime CLI option between the OpenGL and USD entry points."""
-    parser.add_argument(
-        "--sdf-file", dest="sdf_filename", metavar="NAME.nvdb",
-        type=validate_sdf_filename, default=DEFAULT_SDF_FILENAME,
-        help=f"Offline SDF filename in {ASSET_DIR}; OpenGL loads its matching OBJ. Paths are not accepted.",
-    )
-
-
-def resolve_sdf_path(filename=None):
-    name = validate_sdf_filename(DEFAULT_SDF_FILENAME if filename is None else filename)
+def resolve_sdf_path(filename):
+    name = validate_sdf_filename(filename)
     return (Path(ASSET_DIR) / name).resolve()
 
 
-def resolve_scene_path(filename=None):
+def resolve_scene_path(filename):
     """The renderer consumes the OBJ paired with the selected NanoVDB stem."""
     return resolve_sdf_path(filename).with_suffix(".obj")
 
@@ -58,7 +48,7 @@ def sample_boundary_sdf(boundary: SDFDeviceData, position: wp.vec3):
     return distance, world_gradient
 
 
-def load_static_sdf(filename=None, *, device=None) -> wp.Volume:
+def load_static_sdf(filename, *, device=None) -> wp.Volume:
     """Read an offline SDF from ASSET_DIR; the caller must retain the Volume.
 
     This startup operation neither reads an OBJ nor invokes the offline baker.
