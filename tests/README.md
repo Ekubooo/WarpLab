@@ -2,6 +2,8 @@
 
 仓库测试集中在本目录，按功能分组。仿真、渲染、场景生成和烘焙功能模块仍位于 `demos/`。
 
+`tests/sim_ready/` 验证新离线资产管线：模型适配与放置、容器搭接和拓扑、独立 CLI、失败回滚、CUDA 烘焙。运行 `python -m unittest discover -s tests/sim_ready -t . -v`。原 `tests/fluid/boundary/` 保留归档流程的回归检查。
+
 ```text
 tests/fluid/
 ├── boundary/          # 地形与容器生成、网格检查、SDF 烘焙与独立 CLI

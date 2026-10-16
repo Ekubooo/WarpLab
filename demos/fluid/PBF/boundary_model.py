@@ -6,8 +6,7 @@ import warp as wp
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
-CONTAINER_DIR = ASSET_DIR / "Container"
-DEFAULT_SDF_FILENAME = "stairs_container_bool_simplified.nvdb"
+DEFAULT_SDF_FILENAME = "stairs_scene.nvdb"
 
 
 def validate_sdf_filename(filename):
@@ -25,13 +24,18 @@ def add_sdf_argument(parser):
     parser.add_argument(
         "--sdf-file", dest="sdf_filename", metavar="NAME.nvdb",
         type=validate_sdf_filename, default=DEFAULT_SDF_FILENAME,
-        help=f"Offline SDF filename in {CONTAINER_DIR}; directory paths are not accepted.",
+        help=f"Offline SDF filename in {ASSET_DIR}; OpenGL loads its matching OBJ. Paths are not accepted.",
     )
 
 
 def resolve_sdf_path(filename=None):
     name = validate_sdf_filename(DEFAULT_SDF_FILENAME if filename is None else filename)
-    return (Path(CONTAINER_DIR) / name).resolve()
+    return (Path(ASSET_DIR) / name).resolve()
+
+
+def resolve_scene_path(filename=None):
+    """The renderer consumes the OBJ paired with the selected NanoVDB stem."""
+    return resolve_sdf_path(filename).with_suffix(".obj")
 
 
 @wp.struct
@@ -55,13 +59,13 @@ def sample_boundary_sdf(boundary: SDFDeviceData, position: wp.vec3):
 
 
 def load_static_sdf(filename=None, *, device=None) -> wp.Volume:
-    """Read an offline SDF from CONTAINER_DIR; the caller must retain the Volume.
+    """Read an offline SDF from ASSET_DIR; the caller must retain the Volume.
 
     This startup operation neither reads an OBJ nor invokes the offline baker.
     """
     path = resolve_sdf_path(filename)
     if not path.is_file():
-        raise FileNotFoundError(f"Static SDF not found: {path}; bake it with demos.fluid.boundary.bake_sdf first")
+        raise FileNotFoundError(f"Static SDF not found: {path}; generate it with python -m demos.sim_Ready first")
     selected = wp.get_device(device)
     if not selected.is_cuda:
         raise ValueError(f"Static NanoVDB SDF loading requires a CUDA device: {path}")

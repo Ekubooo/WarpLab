@@ -23,7 +23,7 @@ a set of good para for the water effect
 
 ## OpenGL CLI：render_opengl.py
 
-启动时会读取 `boundary/Assets/output/stairs_scene_bool_simplified.obj`，绘制底座、台阶和兔子，围墙与顶盖保持不可见。该景观由 `scene_container_creator.py` 生成，采用与 SDF 相同的 Y-up 世界坐标，无需位移或缩放。路径根据脚本位置确定，不依赖工作目录；缺失或无法读取时会报告完整路径。更新边界时应同步重新生成景观文件。
+启动时从 `PBF/Assets` 根目录读取所选 NVDB 的同名景观 OBJ：默认 `stairs_scene.nvdb` 对应 `stairs_scene.obj`，绘制底座、台阶和模型，围墙与顶盖保持不可见。资产由独立的 `sim_Ready` 管线生成，统一采用 Y-up 世界坐标。路径根据脚本位置确定，不依赖工作目录；缺失或损坏时报告完整路径。
 
 景观仅在启动时加载、注册一次，使用 Warp 默认网格着色器、灰色 `(0.55, 0.55, 0.55)` 和 `smooth_shading=False`；暂停或重置不会重新加载。粒子仍使用原有按速度着色的 billboard。`--help` 和 `--export-config` 不加载景观。
 
@@ -31,7 +31,7 @@ a set of good para for the water effect
 | --- | --- | --- |
 | `-h / --help` | — | 显示帮助并退出 |
 | `--device` | `None` | Warp 设备，如 `cuda:0`、`cpu` |
-| `--sdf-file NAME.nvdb` | `stairs_container_bool_simplified.nvdb` | 仅文件名，从 `PBF/Assets/Container` 读取离线 SDF |
+| `--sdf-file NAME.nvdb` | `stairs_scene.nvdb` | 仅文件名，从 `PBF/Assets` 根目录读取；OpenGL 同时选择同名 OBJ |
 | `--num-frames` | `0` | 最大显示帧数，0 不限 |
 | `--speed-color-mid` | `2.0` | 速度配色中点，m/s |
 | `--speed-color-max` | `7.5` | 速度配色上限，须大于中点 |
@@ -55,7 +55,7 @@ a set of good para for the water effect
 | --- | --- | --- |
 | `-h / --help` | — | 显示帮助并退出 |
 | `--device` | `None` | Warp 设备 |
-| `--sdf-file NAME.nvdb` | `stairs_container_bool_simplified.nvdb` | 仅文件名，从 `PBF/Assets/Container` 读取离线 SDF |
+| `--sdf-file NAME.nvdb` | `stairs_scene.nvdb` | 仅文件名，从 `PBF/Assets` 根目录读取；OpenGL 同时选择同名 OBJ |
 | `--stage-path` | `example_pbf.usd` | USD 输出路径，`None` 禁用输出 |
 | `--num-frames` | `480` | 仿真帧数 |
 | `--verbose` | `False` | 输出各 kernel 耗时 |
@@ -78,8 +78,8 @@ a set of good para for the water effect
 SDF 的目录、默认文件名、CLI 文件名校验和 GPU 读取全部由 `boundary_model.py` 管理，不随工作目录变化：
 
 ```python
-CONTAINER_DIR = ASSET_DIR / "Container"
-DEFAULT_SDF_FILENAME = "stairs_container_bool_simplified.nvdb"
+ASSET_DIR = Path(__file__).resolve().parent / "Assets"
+DEFAULT_SDF_FILENAME = "stairs_scene.nvdb"
 ```
 
 两个入口均支持 `--sdf-file NAME.nvdb`，只接受带 `.nvdb` 扩展名的裸文件名，不接受绝对路径、目录、盘符或路径穿越。该选项与 `--config` 可同时使用，不写入物理参数 JSON。选定 CUDA 设备后创建仿真实例，由 `Example.__init__()` 调用 `load_static_sdf(sdf_filename, device=...)`，读取已有的 float32 NanoVDB。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有，随仿真实例存活；`reset()` 不重新加载。入口不再单独加载。SDF 加载不读取 OBJ、不自动烘焙，也不比较源模型或烘焙参数；文件缺失、损坏或类型错误会报告完整路径。
@@ -96,7 +96,7 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF.render_opengl
 conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device cuda:0 --stage-path None --num-frames 0
 ```
 
-直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，这些参数由 boundary 的独立烘焙命令提供。要换文件，通过 `--sdf-file` 指定；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
+直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，新资产由独立的 sim_Ready 管线准备。要换文件，通过 `--sdf-file` 指定；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
 
 `Example(stage_path="example_pbf.usd", verbose=False, config=None, *, sdf_filename=None)` 和 `create_pbf_simulation(verbose=False, config=None, *, sdf_filename=None)` 仅增加一个可选关键字参数，不指定则加载默认文件。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
 
@@ -108,60 +108,23 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device 
 python -m demos.fluid.PBF.render_opengl --device cuda:0 --sdf-file other.nvdb
 ```
 
-原 `Assets/Boundary` 中的文件暂留作备份，不参与加载，也不会作为缺失文件的回退路径。切换 NVDB 不自动切换无墙景观 OBJ；景观仍由 OpenGL 入口按原固定路径读取。
+原 `Assets/Boundary` 与 `Assets/Container` 完整保留为归档，不参与加载，也不作为缺失文件的回退路径。OpenGL 按 NVDB 文件名选择同名 OBJ，USD 入口只要求 NVDB。PBF 不导入资产生成程序，生成程序也不导入 PBF。
 
-## 独立烘焙命令
+## 独立资产准备
 
-在仓库根目录、Conda `warplab` 环境中运行，成功后输出结果路径并退出，不创建仿真：
-
-```powershell
-conda run -n warplab --no-capture-output python -m demos.fluid.boundary.bake_sdf --boundary-obj stairs_container_bool_simplified.obj
-```
-
-直接脚本运行也支持：
+从仓库根目录运行，生成、检查、烘焙并发布到 `PBF/Assets`：
 
 ```powershell
-conda run -n warplab --no-capture-output python demos/fluid/boundary/bake_sdf.py --boundary-obj stairs_container_bool_simplified.obj
+python -m demos.sim_Ready --obj bunny_flat_bottom.obj --name stairs_scene --device cuda:0
+python -m demos.sim_Ready --obj spot_triangulated_good.obj --name stairs_spot --device cuda:0
+python -m demos.fluid.PBF.render_opengl --device cuda:0 --sdf-file stairs_spot.nvdb
 ```
 
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--boundary-obj PATH` | 必填 | 容器 OBJ；裸文件名从 `boundary/Assets/output` 解析 |
-| `--sdf-voxel-size` | `0.0075` | 烘焙体素间距，米，仅在烘焙时使用 |
-| `--sdf-force-rebuild` | 关闭 | 忽略同名缓存，重新检查与烘焙，成功后替换 |
-| `--device` | `cuda:0` | 仅支持 CUDA |
-
-包含目录的相对路径（包括 `./room.obj`）按工作目录解析，绝对路径直接使用。输出固定为 `PBF/Assets/Container/<OBJ文件名去扩展名>.nvdb`，默认目录根据脚本位置确定。同名缓存存在则直接读取，跳过 OBJ 检查与参数比较；损坏缓存明确报错，不静默重建。修改 OBJ 或体素间距后，显式添加 `--sdf-force-rebuild`：
-
-```powershell
-conda run -n warplab --no-capture-output python -m demos.fluid.boundary.bake_sdf --boundary-obj stairs_container_bool_simplified.obj --sdf-force-rebuild
-```
-
-烘焙工具不导入 PBF、仿真或渲染模块。默认同名文件烘焙后可直接启动仿真；其他文件名通过 `--sdf-file NAME.nvdb` 选择。烘焙失败不会覆盖已有有效缓存。
-
-## 离线烘焙与缓存 API
-
-网格检查和烘焙继续由 `boundary/mesh_validation.py`、`boundary/sdf_baker.py` 提供，独立 CLI 复用该 API，与启动加载分开。也可通过 Python API 更新文件，再启动 PBF：
-
-```python
-from pathlib import Path
-from demos.fluid.boundary.sdf_baker import SDFOptions, load_or_bake_sdf
-
-# 示例路径相对于仓库根目录；OBJ 来自生成器输出。
-assets = Path("demos/fluid/PBF/Assets")
-result = load_or_bake_sdf(
-    Path("demos/fluid/boundary/Assets/output/stairs_container_bool_simplified.obj"),
-    cache_dir=assets / "Container",
-    options=SDFOptions(voxel_size=0.0075, force_rebuild=True),
-    device="cuda:0",
-)
-```
-
-离线 API 保留原缓存逻辑：同名 `.nvdb` 存在且未强制重建时直接读取，不解析 OBJ、不核对参数/哈希；缺失或强制重建才检查、烘焙并原子保存。烘焙保持 OBJ 坐标、float32 全覆盖场、每侧 padding 3 体素；实体负、空腔和外部正。网格检查不自动修补、翻转或认证全局自交；瘦长但非退化三角形仅告警。
+裸 OBJ 文件名从 `sim_Ready/Assets` 读取；新管线每次重新计算，不使用旧缓存。默认体素间距 `0.0075 m`、padding 三个体素，实体为负、空腔和外部为正。输出同名的无墙景观 OBJ 与封闭容器 NVDB，不保存容器 OBJ。完整说明见 [sim_Ready](../../sim_Ready/README.md)。Boundary 的旧生成和烘焙工具仍完整保留，但属于归档流程，不用于当前资源发布。
 
 ## 测试
 
-PBF 测试位于仓库根目录 `tests/fluid/pbf/`，独立烘焙 CLI 测试位于 `tests/fluid/boundary/test_bake_sdf.py`，完整命令参见 [测试说明](../../../tests/README.md)。在仓库根目录运行：
+PBF 测试位于仓库根目录 `tests/fluid/pbf/`，新资产管线测试位于 `tests/sim_ready/`；旧烘焙测试仍位于 `tests/fluid/boundary/`，完整命令参见 [测试说明](../../../tests/README.md)。在仓库根目录运行：
 
 ```powershell
 conda run -n warplab --no-capture-output python -m unittest discover -s tests/fluid/pbf -t . -v

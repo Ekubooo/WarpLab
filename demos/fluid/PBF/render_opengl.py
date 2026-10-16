@@ -32,15 +32,9 @@ except ImportError:
     from simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 
 
-STATIC_SCENE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "boundary" / "Assets" / "output" / "stairs_scene_bool_simplified.obj"
-)
-
-
-def load_static_scene():
+def load_static_scene(sdf_filename=None):
     """Load the wall-free Y-up mesh once, independently of the working directory."""
-    path = Path(STATIC_SCENE_PATH).resolve()
+    path = boundary_model.resolve_scene_path(sdf_filename)
     if not path.is_file():
         raise FileNotFoundError(f"Static scene not found: {path}; generate the container assets first")
     try:
@@ -252,7 +246,7 @@ def main():
     if args.speed_color_max <= args.speed_color_mid:
         raise SystemExit("--speed-color-max must be greater than --speed-color-mid")
 
-    scene_points, scene_indices = load_static_scene()
+    scene_points, scene_indices = load_static_scene(args.sdf_filename)
 
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
