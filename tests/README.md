@@ -4,8 +4,8 @@
 
 ```text
 tests/fluid/
-├── boundary/          # 地形与容器生成、网格检查、SDF 烘焙
-├── pbf/               # PBF 配置、控制、独立烘焙 CLI 与 SDF 资源接入
+├── boundary/          # 地形与容器生成、网格检查、SDF 烘焙与独立 CLI
+├── pbf/               # PBF 配置、控制、SDF 文件名选择与资源接入
 ├── mmpbf/             # MMPBF 公式与行为
 └── pbf2waycoupling/   # 双向耦合、墙体钳制、渲染与接触参考实现
 ```
@@ -27,7 +27,7 @@ conda run -n warplab --no-capture-output python -m unittest discover -s tests/fl
 
 ```powershell
 conda run -n warplab --no-capture-output python -m unittest tests.fluid.boundary.test_sdf_baker -v
-conda run -n warplab --no-capture-output python -m unittest tests.fluid.pbf.test_bake_sdf -v
+conda run -n warplab --no-capture-output python -m unittest tests.fluid.boundary.test_bake_sdf -v
 ```
 
 NanoVDB 测试需要 CUDA，无 CUDA 时跳过；双向耦合的渲染测试需要 CUDA 和可用的 OpenGL 上下文。渲染测试的截图保存在 `outputs/pbf2way/render-check/`。`test_contact_reference.py` 是供等价性测试和接触性能基准调用的参考 kernel。

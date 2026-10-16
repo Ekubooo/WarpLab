@@ -243,4 +243,6 @@ SDF 离线烘焙默认体素间距为 `0.0075` 米，可通过 `SDFOptions(voxel
 `load_or_bake_sdf(obj_path, cache_dir=..., options=SDFOptions(...), device="cuda:0")`。
 烘焙使用 Warp DSL 的最近三角面查询和绕数符号，保存可由 Warp 直接读取的 float32 NanoVDB；两模块不依赖 PBF。
 
-这些 API 用于离线烘焙，输入目录约定为 `PBF/Assets/Container`，缓存输出目录为 `PBF/Assets/Boundary`。独立命令 `python -m demos.fluid.PBF.bake_sdf --boundary-obj stairs_container_bool_simplified.obj` 复用这些 API，参数与运行方式见 [PBF 使用说明](../PBF/README.md#独立烘焙命令)。PBF 启动时只从 `boundary_model.py` 的 `STATIC_SDF_PATH` 读取预先烘焙的 `.nvdb`，不接受烘焙参数或自动烘焙。离线缓存仅按文件名复用，修改模型或间距后通过 CLI 的 `--sdf-force-rebuild` 或 `SDFOptions(force_rebuild=True)` 更新。当前不实现 SDF 碰撞。
+独立入口 `python -m demos.fluid.boundary.bake_sdf --boundary-obj stairs_container_bool_simplified.obj` 属于 boundary 几何资产工具，不导入 PBF 或渲染模块。裸 OBJ 文件名从 `boundary/Assets/output` 读取，含目录的相对路径按工作目录解析，也支持绝对路径。NVDB 输出暂固定到 `PBF/Assets/Container/<stem>.nvdb`，此目录根据脚本位置确定。原 `PBF/bake_sdf.py` 已删除。
+
+参数保持为必填 `--boundary-obj PATH`、默认 `--sdf-voxel-size 0.0075`、可选 `--sdf-force-rebuild` 和默认 `--device cuda:0`；模块运行及直接运行 `python demos/fluid/boundary/bake_sdf.py ...` 均支持。同名缓存直接复用，不比较内容或参数；修改模型或间距后显式强制重建，失败不会覆盖有效缓存。PBF 仅按 `--sdf-file NAME.nvdb` 加载离线文件，不接受烘焙参数或自动烘焙；SDF 文件路径与加载均集中于 `boundary_model.py`。

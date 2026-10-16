@@ -23,10 +23,12 @@ except ModuleNotFoundError:
 try:
     from .pbf_helper import PBFConfig
     from . import config_io
+    from . import boundary_model
     from .simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 except ImportError:
     from pbf_helper import PBFConfig
     import config_io
+    import boundary_model
     from simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 
 
@@ -147,6 +149,7 @@ def config_from_args(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    boundary_model.add_sdf_argument(parser)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
         "--num-frames",
@@ -253,7 +256,7 @@ def main():
 
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
-            verbose=args.verbose, config=args.config,
+            verbose=args.verbose, config=args.config, sdf_filename=args.sdf_filename,
         )
         # Focus on the fluid near the floor; distance follows the container footprint.
         camera_azimuth_deg = 35.0

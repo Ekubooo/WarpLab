@@ -10,9 +10,9 @@ except ImportError:
     import pbf_helper as fn
 
 
-def create_pbf_simulation(verbose: bool = False, config=None) -> PBFExample:
+def create_pbf_simulation(verbose: bool = False, config=None, *, sdf_filename=None) -> PBFExample:
     """Create PBF with optional configuration and no USD output."""
-    return PBFExample(stage_path=None, verbose=verbose, config=config)
+    return PBFExample(stage_path=None, verbose=verbose, config=config, sdf_filename=sdf_filename)
 
 
 def reverse_gravity(sim: PBFExample) -> None:

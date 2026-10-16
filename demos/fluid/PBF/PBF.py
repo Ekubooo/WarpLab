@@ -279,7 +279,7 @@ def update_velocity(
 
 
 class Example:
-    def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None):
+    def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None, *, sdf_filename=None):
         self.verbose = verbose
         self.sim_time = 0.0
 
@@ -287,7 +287,7 @@ class Example:
         self.gravity = wp.vec3(*self.config.gravity)
         fn.init_parameters(self)
         # Keep the GPU Volume alive while the solver queries its SDF.
-        self.static_sdf = boundary_model.load_static_sdf(device=wp.get_device())
+        self.static_sdf = boundary_model.load_static_sdf(sdf_filename, device=wp.get_device())
         fn.init_device_buffers(self)
         self.renderer = (
             wp.render.UsdRenderer(stage_path)
@@ -408,6 +408,7 @@ def parse_args(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    boundary_model.add_sdf_argument(parser)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
         "--stage-path",
@@ -461,7 +462,7 @@ def main():
     with wp.ScopedDevice(args.device):
         example = Example(
             stage_path=args.stage_path, verbose=args.verbose,
-            config=args.config,
+            config=args.config, sdf_filename=args.sdf_filename,
         )
 
         for _ in range(args.num_frames):

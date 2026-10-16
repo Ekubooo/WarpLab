@@ -1,4 +1,4 @@
-"""Bake or load a container SDF independently of the PBF simulation."""
+"""Offline container SDF baking; independent of simulation and rendering."""
 
 import argparse
 from pathlib import Path
@@ -6,14 +6,15 @@ import sys
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
-CONTAINER_DIR = ASSET_DIR / "Container"
-BOUNDARY_DIR = ASSET_DIR / "Boundary"
+INPUT_DIR = ASSET_DIR / "output"
+# Temporary destination shared with the PBF runtime, without importing PBF.
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "PBF" / "Assets" / "Container"
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--boundary-obj", required=True, metavar="PATH",
-                        help="Container OBJ; bare filenames resolve in PBF/Assets/Container")
+                        help="Container OBJ; bare filenames resolve in boundary/Assets/output")
     parser.add_argument("--sdf-voxel-size", type=float, default=0.0075,
                         help="Voxel spacing in meters (default: 0.0075; used when baking)")
     parser.add_argument("--sdf-force-rebuild", action="store_true",
@@ -26,7 +27,7 @@ def resolve_container_path(path):
     source = Path(path).expanduser()
     # Preserve an explicit directory, including ./, rather than normalizing it away.
     if not source.is_absolute() and "/" not in str(path) and "\\" not in str(path):
-        source = CONTAINER_DIR / source
+        source = INPUT_DIR / source
     return source.resolve()
 
 
@@ -40,7 +41,7 @@ def main(argv=None):
     try:
         result = load_or_bake_sdf(
             resolve_container_path(args.boundary_obj),
-            cache_dir=BOUNDARY_DIR,
+            cache_dir=OUTPUT_DIR,
             options=SDFOptions(voxel_size=args.sdf_voxel_size,
                                force_rebuild=args.sdf_force_rebuild),
             device=args.device,

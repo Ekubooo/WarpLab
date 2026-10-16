@@ -1,4 +1,4 @@
-"""Load the configured static GPU SDF independently of the PBF solver."""
+"""Select and load offline NanoVDB boundaries for PBF."""
 
 from pathlib import Path
 
@@ -6,8 +6,32 @@ import warp as wp
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
-BOUNDARY_DIR = ASSET_DIR / "Boundary"
-STATIC_SDF_PATH = BOUNDARY_DIR / "stairs_container_bool_simplified.nvdb"
+CONTAINER_DIR = ASSET_DIR / "Container"
+DEFAULT_SDF_FILENAME = "stairs_container_bool_simplified.nvdb"
+
+
+def validate_sdf_filename(filename):
+    """Accept a bare NanoVDB filename, never a path or Windows drive prefix."""
+    if (not isinstance(filename, str) or not filename.strip()
+            or any(character in filename for character in "/\\:\x00")
+            or Path(filename).name != filename
+            or Path(filename).suffix.lower() != ".nvdb"):
+        raise ValueError("SDF must be a bare .nvdb filename without a directory or drive")
+    return filename
+
+
+def add_sdf_argument(parser):
+    """Share the runtime CLI option between the OpenGL and USD entry points."""
+    parser.add_argument(
+        "--sdf-file", dest="sdf_filename", metavar="NAME.nvdb",
+        type=validate_sdf_filename, default=DEFAULT_SDF_FILENAME,
+        help=f"Offline SDF filename in {CONTAINER_DIR}; directory paths are not accepted.",
+    )
+
+
+def resolve_sdf_path(filename=None):
+    name = validate_sdf_filename(DEFAULT_SDF_FILENAME if filename is None else filename)
+    return (Path(CONTAINER_DIR) / name).resolve()
 
 
 @wp.struct
@@ -30,17 +54,17 @@ def sample_boundary_sdf(boundary: SDFDeviceData, position: wp.vec3):
     return distance, world_gradient
 
 
-def load_static_sdf(*, device=None) -> wp.Volume:
-    """Read STATIC_SDF_PATH into GPU memory; the caller must retain the Volume.
+def load_static_sdf(filename=None, *, device=None) -> wp.Volume:
+    """Read an offline SDF from CONTAINER_DIR; the caller must retain the Volume.
 
     This startup operation neither reads an OBJ nor invokes the offline baker.
     """
-    path = Path(STATIC_SDF_PATH).expanduser().resolve()
+    path = resolve_sdf_path(filename)
     if not path.is_file():
-        raise FileNotFoundError(f"Static SDF not found: {path}; bake it first or update STATIC_SDF_PATH")
+        raise FileNotFoundError(f"Static SDF not found: {path}; bake it with demos.fluid.boundary.bake_sdf first")
     selected = wp.get_device(device)
     if not selected.is_cuda:
-        raise ValueError("Static NanoVDB SDF loading requires a CUDA device")
+        raise ValueError(f"Static NanoVDB SDF loading requires a CUDA device: {path}")
     try:
         with path.open("rb") as stream:
             volume = wp.Volume.load_from_nvdb(stream, device=selected)

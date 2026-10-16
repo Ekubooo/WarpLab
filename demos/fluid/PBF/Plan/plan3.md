@@ -1,3 +1,5 @@
+> 历史方案：当前离线 CLI 已迁至 `demos.fluid.boundary.bake_sdf`；PBF 通过 `--sdf-file` 从 `Assets/Container` 读取。现行接口见 [PBF 使用说明](../README.md)。下文保留原始设计记录。
+
 # SDF烘焙、缓存与读取
 - 默认烘焙体素间距为 **0.0075 米**，通过离线 `SDFOptions` 调整；启动读取直接使用文件内的体素信息。
 - 容量参考：当前墙厚 0.25 米、坑底厚 0.20 米的容器，float32 全覆盖 NanoVDB、每侧 padding 为 3 个体素时，SDF 本体约占 140.88 MiB 显存，未压缩 `.nvdb` 约 147.72 MB；Warp 1.15 加载时本体短暂占用约 281.75 MiB，不含 CUDA、PBF 与烘焙临时资源。

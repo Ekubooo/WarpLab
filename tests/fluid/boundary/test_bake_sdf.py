@@ -12,8 +12,7 @@ from unittest.mock import patch
 import trimesh
 import warp as wp
 
-from demos.fluid.PBF import bake_sdf as cli
-from demos.fluid.PBF import boundary_model
+from demos.fluid.boundary import bake_sdf as cli
 from demos.fluid.boundary import sdf_baker
 
 
@@ -31,9 +30,9 @@ class BakeCLIInterfaceTests(unittest.TestCase):
                          ("cuda:1", 0.01, True))
 
     def test_filename_directory_and_absolute_resolution(self):
-        self.assertEqual(cli.CONTAINER_DIR, Path(cli.__file__).resolve().parent / "Assets/Container")
-        self.assertEqual(cli.BOUNDARY_DIR, Path(cli.__file__).resolve().parent / "Assets/Boundary")
-        self.assertEqual(cli.resolve_container_path("room.obj"), cli.CONTAINER_DIR / "room.obj")
+        self.assertEqual(cli.INPUT_DIR, Path(cli.__file__).resolve().parent / "Assets/output")
+        self.assertEqual(cli.OUTPUT_DIR, Path(cli.__file__).resolve().parents[1] / "PBF/Assets/Container")
+        self.assertEqual(cli.resolve_container_path("room.obj"), cli.INPUT_DIR / "room.obj")
         for relative in ("./room.obj", "subdir/room.obj", ".\\room.obj"):
             self.assertEqual(cli.resolve_container_path(relative), Path(relative).resolve())
         absolute = Path(tempfile.gettempdir()).resolve() / "room.obj"
@@ -41,7 +40,7 @@ class BakeCLIInterfaceTests(unittest.TestCase):
 
     def test_module_and_direct_help_do_not_import_simulation_or_warp(self):
         root = Path(__file__).resolve().parents[3]
-        for target, cwd in ((["-m", "demos.fluid.PBF.bake_sdf"], root),
+        for target, cwd in ((["-m", "demos.fluid.boundary.bake_sdf"], root),
                             ([str(Path(cli.__file__).resolve())], Path(tempfile.gettempdir()))):
             result = subprocess.run([sys.executable, *target, "--help"], cwd=cwd,
                                     capture_output=True, text=True, timeout=30)
@@ -58,10 +57,8 @@ class BakeCLIInterfaceTests(unittest.TestCase):
             "volume=S(get_voxel_size=lambda: (0.0075,)*3))\n"
             "sys.argv=['bake_sdf', '--boundary-obj', 'mock.obj']\n"
             "with patch.object(b, 'load_or_bake_sdf', return_value=r):\n"
-            " runpy.run_module('demos.fluid.PBF.bake_sdf', run_name='__main__')\n"
-            "assert 'demos.fluid.PBF.PBF' not in sys.modules\n"
-            "assert 'demos.fluid.PBF.render_opengl' not in sys.modules\n"
-            "assert 'demos.fluid.PBF.boundary_model' not in sys.modules\n"
+            " runpy.run_module('demos.fluid.boundary.bake_sdf', run_name='__main__')\n"
+            "assert not any(n == 'demos.fluid.PBF' or n.startswith('demos.fluid.PBF.') for n in sys.modules)\n"
         )
         result = subprocess.run([sys.executable, "-c", script], cwd=root,
                                 capture_output=True, text=True, timeout=30)
@@ -79,15 +76,15 @@ class BakeCLIGPUTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
-        self.inputs = self.root / "Container"
-        self.outputs = self.root / "Boundary"
+        self.inputs = self.root / "source"
+        self.outputs = self.root / "Container"
         self.inputs.mkdir()
         self.source = self.inputs / "room.obj"
         outer = trimesh.creation.box(extents=(1, 1, 1))
         inner = trimesh.creation.box(extents=(0.6, 0.6, 0.6))
         inner.invert()
         trimesh.util.concatenate([outer, inner]).export(self.source)
-        for name, value in (("CONTAINER_DIR", self.inputs), ("BOUNDARY_DIR", self.outputs)):
+        for name, value in (("INPUT_DIR", self.inputs), ("OUTPUT_DIR", self.outputs)):
             patcher = patch.object(cli, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -101,7 +98,6 @@ class BakeCLIGPUTests(unittest.TestCase):
         return output.getvalue()
 
     def test_missing_cache_bakes_hit_skips_missing_source_and_force_rebuilds(self):
-        original_static = boundary_model.STATIC_SDF_PATH
         self.assertIn("baked and cached", self.run_cli())
         saved = self.target.read_bytes()
         self.source.unlink()
@@ -111,7 +107,6 @@ class BakeCLIGPUTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "Cannot bake/load SDF"):
             self.run_cli("--sdf-force-rebuild")
         self.assertEqual(self.target.read_bytes(), saved)
-        self.assertEqual(boundary_model.STATIC_SDF_PATH, original_static)
 
     def test_corrupt_cache_errors_and_explicit_rebuild_replaces(self):
         self.outputs.mkdir()
