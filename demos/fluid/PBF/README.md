@@ -23,6 +23,10 @@ a set of good para for the water effect
 
 ## OpenGL CLI：render_opengl.py
 
+启动时会读取 `boundary/Assets/output/stairs_scene_bool_simplified.obj`，绘制底座、台阶和兔子，围墙与顶盖保持不可见。该景观由 `scene_container_creator.py` 生成，采用与 SDF 相同的 Y-up 世界坐标，无需位移或缩放。路径根据脚本位置确定，不依赖工作目录；缺失或无法读取时会报告完整路径。更新边界时应同步重新生成景观文件。
+
+景观仅在启动时加载、注册一次，使用 Warp 默认网格着色器、灰色 `(0.55, 0.55, 0.55)` 和 `smooth_shading=False`；暂停或重置不会重新加载。粒子仍使用原有按速度着色的 billboard。`--help` 和 `--export-config` 不加载景观。
+
 | para | value | note |
 | --- | --- | --- |
 | `-h / --help` | — | 显示帮助并退出 |
@@ -91,9 +95,9 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device 
 
 直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，这些参数由下方独立烘焙命令提供。要换文件，修改 `STATIC_SDF_PATH`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
 
-`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 均保留原参数，无需额外绑定步骤。每次创建实例都会读取固定路径 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选，容器也未加入渲染。
+`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 均保留原参数，无需额外绑定步骤。每次创建实例都会读取固定路径 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
 
-当前文件的体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=3.0 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,3.0,1.525)`，内部仍有台阶和模型。全覆盖体素场的显存和文件大小随高度增长，加载时另有临时缓冲。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
+当前文件的体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=4.5 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,4.5,1.525)`，内部仍有台阶和模型。全覆盖体素场的显存和文件大小随高度增长，加载时另有临时缓冲。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
 
 ## 独立烘焙命令
 

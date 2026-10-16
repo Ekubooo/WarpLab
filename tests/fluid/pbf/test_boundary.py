@@ -158,6 +158,7 @@ class BoundaryInterfaceTest(unittest.TestCase):
                     patch.object(entry, constructor, return_value=fake) as creating, \
                     contextlib.ExitStack() as stack:
                 if entry is frontend:
+                    stack.enter_context(patch.object(entry, "load_static_scene", return_value=([], [])))
                     stack.enter_context(patch.object(entry, "create_pbf_renderer", return_value=renderer))
                     stack.enter_context(patch.object(entry, "register_keyboard_controls"))
                 entry.main()

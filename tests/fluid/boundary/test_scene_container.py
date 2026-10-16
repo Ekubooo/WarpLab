@@ -86,7 +86,8 @@ class ContainerTests(unittest.TestCase):
         np.testing.assert_allclose(exterior.bounds, bounds, rtol=0, atol=1e-6)
         np.testing.assert_allclose(exterior.volume, np.prod(extents), rtol=0, atol=3e-6)
         expected_area = 2 * (extents[0] * extents[1] + extents[0] * extents[2] + extents[1] * extents[2])
-        np.testing.assert_allclose(exterior.area, expected_area, rtol=0, atol=3e-6)
+        # The Boolean bridge uses float32; area rounding grows with taller walls.
+        np.testing.assert_allclose(exterior.area, expected_area, rtol=1e-7, atol=3e-6)
         on_faces = np.any(np.all(np.isclose(
             exterior.triangles[:, :, :, None], bounds.T[None, None, :, :], rtol=0, atol=1e-6),
             axis=1), axis=(1, 2))
@@ -96,9 +97,9 @@ class ContainerTests(unittest.TestCase):
         floor = make_floor()
         parts = creator.build_container_parts(floor)
         long0, long1, short0, short1, lid = parts
-        np.testing.assert_allclose(long0.extents, [3.45, 3.275, 0.25])
-        np.testing.assert_allclose(short0.extents, [0.25, 3.275, 1.675])
-        np.testing.assert_allclose(lid.bounds, [[-0.175, 3.0, -0.175], [3.275, 3.25, 1.775]])
+        np.testing.assert_allclose(long0.extents, [3.45, 4.775, 0.25])
+        np.testing.assert_allclose(short0.extents, [0.25, 4.775, 1.675])
+        np.testing.assert_allclose(lid.bounds, [[-0.175, 4.5, -0.175], [3.275, 4.75, 1.775]])
         for wall in parts[:4]:
             overlap = trimesh.boolean.intersection([floor, wall], engine="manifold")
             self.assertGreater(overlap.volume, 0)
@@ -127,7 +128,7 @@ class ContainerTests(unittest.TestCase):
             # 台阶外圈的内边缘随同一个宽度变化。
             self.assertTrue(np.any(np.isclose(terrain.vertices[:, 0], width, atol=1e-7)))
         before = creator.build_container_parts(floor, overlap_depth=0.04)
-        after = creator.build_container_parts(shifted, container_height=5.0, overlap_depth=0.04)
+        after = creator.build_container_parts(shifted, container_height=6.5, overlap_depth=0.04)
         for a, b in zip(before, after):
             np.testing.assert_allclose(b.vertices, a.vertices + (7, 2, -3))
         np.testing.assert_allclose(before[0].extents[[0, 2]], [3.52, 0.25])
@@ -141,7 +142,7 @@ class ContainerTests(unittest.TestCase):
                 depth = w * ratio
                 parts = creator.build_container_parts(floor, w, overlap_depth=depth)
                 expected = np.array([[-(w - depth), -0.2, -(w - depth)],
-                                     [length + w - depth, 3.0 + w, width + w - depth]])
+                                     [length + w - depth, 4.5 + w, width + w - depth]])
                 for part in parts:
                     self.assertTrue(np.all(part.bounds[0, [0, 2]] >= expected[0, [0, 2]] - 1e-10))
                     self.assertTrue(np.all(part.bounds[1, [0, 2]] <= expected[1, [0, 2]] + 1e-10))
@@ -175,14 +176,14 @@ class ContainerTests(unittest.TestCase):
             container = creator.boolean_union_meshes([floor, *creator.build_container_parts(floor)], "test")
             simplified = creator.simplify_mesh_manifold(container)
         # 整体为外长方体减内空腔；凸出墙头即使封闭，也无法满足这个独立体积关系。
-        expected_solid = 3.45 * 1.95 * 3.45 - 2.95 * 1.45 * 3.0
+        expected_solid = 3.45 * 1.95 * 4.95 - 2.95 * 1.45 * 4.5
         probes = [((1.55, 0.75, 0.8), False),  # 空腔
                   ((1.55, -0.1, 0.8), True),  # 地板
                   ((0, -0.1, 0.8), True),     # 墙与底座接缝
-                  ((0.02, 2.5, 0.8), True),   # 加高后的侧墙
+                  ((0.02, 4.0, 0.8), True),   # 加高后的侧墙
                   ((0.02, 0.75, 0.02), True), # 墙角
-                  ((1.55, 3.125, 0.8), True), # 顶盖
-                  ((1.55, 3.3, 0.8), False)] # 容器外
+                  ((1.55, 4.625, 0.8), True), # 顶盖
+                  ((1.55, 4.8, 0.8), False)] # 容器外
         for mesh in (container, simplified):
             with contextlib.redirect_stdout(io.StringIO()):
                 creator.validate_container_mesh(mesh, "test")
@@ -190,9 +191,9 @@ class ContainerTests(unittest.TestCase):
             np.testing.assert_allclose(mesh.volume, expected_solid, rtol=0, atol=2e-6)
             surfaces = mesh.split(only_watertight=False, repair=False)
             self.assertEqual(len(surfaces), 2)
-            self.assert_cuboid_exterior(mesh, np.array([[-0.175, -0.2, -0.175], [3.275, 3.25, 1.775]]))
+            self.assert_cuboid_exterior(mesh, np.array([[-0.175, -0.2, -0.175], [3.275, 4.75, 1.775]]))
             cavity = [surface for surface in surfaces if surface.volume < 0][0]
-            np.testing.assert_allclose(-cavity.volume, 2.95 * 1.45 * 3.0, rtol=0, atol=2e-6)
+            np.testing.assert_allclose(-cavity.volume, 2.95 * 1.45 * 4.5, rtol=0, atol=2e-6)
             for center, solid in probes:
                 probe = trimesh.creation.box(extents=(0.01, 0.01, 0.01))
                 probe.apply_translation(center)
@@ -258,12 +259,12 @@ class ContainerTests(unittest.TestCase):
                     creator.validate_container_mesh(container, "exported")
                 bounds = np.array([
                     [*(solid_terrain.bounds[0, :2] - 0.175), solid_terrain.bounds[0, 2] - 0.1],
-                    [*(solid_terrain.bounds[1, :2] + 0.175), 3.25],
+                    [*(solid_terrain.bounds[1, :2] + 0.175), 4.75],
                 ])
                 self.assert_cuboid_exterior(container, bounds)
                 cavity = [part for part in container.split(only_watertight=False, repair=False)
                           if part.volume < 0][0]
-                self.assertAlmostEqual(cavity.bounds[1, 2], 3.0, places=7)
+                self.assertAlmostEqual(cavity.bounds[1, 2], 4.5, places=7)
                 self.assertAlmostEqual(cavity.bounds[0, 2], 0.0, places=7)
                 # 原坑底厚 0.10；墙厚从 0.15 增到 0.25，外底面同步外移 0.10。
                 self.assertAlmostEqual(cavity.bounds[0, 2] - container.bounds[0, 2], 0.2, places=7)

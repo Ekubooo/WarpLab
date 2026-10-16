@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import warp as wp
 
 try:
@@ -29,8 +30,35 @@ except ImportError:
     from simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 
 
+STATIC_SCENE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "boundary" / "Assets" / "output" / "stairs_scene_bool_simplified.obj"
+)
+
+
+def load_static_scene():
+    """Load the wall-free Y-up mesh once, independently of the working directory."""
+    path = Path(STATIC_SCENE_PATH).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Static scene not found: {path}; generate the container assets first")
+    try:
+        import trimesh
+
+        mesh = trimesh.load(path, force="mesh", process=False)
+        if not isinstance(mesh, trimesh.Trimesh) or mesh.is_empty or not np.isfinite(mesh.vertices).all():
+            raise ValueError("Static scene must contain a nonempty, finite triangle mesh")
+    except Exception as error:
+        raise RuntimeError(f"Cannot load static scene {path}: {error}") from error
+    return mesh.vertices, mesh.faces
+
+
 class PBFRenderer(BillboardRenderer):
     """Let the PBF main loop handle pause and deferred reset requests."""
+
+    def register_shape(self, geo_hash, vertices, indices, color1=None, color2=None):
+        # Warp 1.15 flat-shaded meshes use np.arange(), which is int64 in NumPy 2.
+        # Its OpenGL draw calls require GL_UNSIGNED_INT indices (32 bits).
+        return super().register_shape(geo_hash, vertices, np.asarray(indices, dtype=np.uint32), color1, color2)
 
     def begin_frame(self, t=None):
         super().begin_frame(t)
@@ -221,6 +249,8 @@ def main():
     if args.speed_color_max <= args.speed_color_mid:
         raise SystemExit("--speed-color-max must be greater than --speed-color-mid")
 
+    scene_points, scene_indices = load_static_scene()
+
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
             verbose=args.verbose, config=args.config,
@@ -255,12 +285,21 @@ def main():
             nonlocal reset_requested
             reset_requested = True
 
-        register_keyboard_controls(
-            renderer, on_reset=request_reset,
-            on_reverse_gravity=lambda: reverse_gravity(simulation),
-        )
-
         try:
+            renderer.render_mesh(
+                name="terrain",
+                points=scene_points,
+                indices=scene_indices,
+                colors=(0.55, 0.55, 0.55),
+                pos=(0.0, 0.0, 0.0),
+                rot=(0.0, 0.0, 0.0, 1.0),
+                scale=(1.0, 1.0, 1.0),
+                smooth_shading=False,
+            )
+            register_keyboard_controls(
+                renderer, on_reset=request_reset,
+                on_reverse_gravity=lambda: reverse_gravity(simulation),
+            )
             while renderer.is_running() and (args.num_frames == 0 or frame < args.num_frames):
                 if reset_requested:
                     reset_simulation(simulation)

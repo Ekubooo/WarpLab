@@ -164,6 +164,11 @@ class ControlsTest(unittest.TestCase):
             paused = False
             draw_grid = True
             frames = 0
+            meshes = 0
+            closed = False
+
+            def render_mesh(self, **kwargs):
+                self.meshes += 1
 
             def register_key_press_callback(self, callback):
                 self.callback = callback
@@ -186,12 +191,13 @@ class ControlsTest(unittest.TestCase):
                 self.frames += 1
 
             def close(self):
-                pass
+                self.closed = True
 
         renderer = Renderer()
         args = frontend.parse_args([])
         with wp.ScopedDevice(self.device), contextlib.redirect_stdout(io.StringIO()), \
                 patch.object(frontend, 'parse_args', return_value=args), \
+                patch.object(frontend, 'load_static_scene', return_value=(np.zeros((3, 3)), [[0, 1, 2]])), \
                 patch.object(frontend, 'create_pbf_simulation', return_value=sim), \
                 patch.object(frontend, 'create_pbf_renderer', return_value=renderer):
             frontend.main()
@@ -204,6 +210,8 @@ class ControlsTest(unittest.TestCase):
         self.assertEqual(states[6][0], states[5][0])
         self.assertEqual(states[7][0], states[5][0])
         self.assertFalse(renderer.draw_grid)
+        self.assertEqual(renderer.meshes, 1)
+        self.assertTrue(renderer.closed)
 
 
 if __name__ == '__main__':
