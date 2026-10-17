@@ -281,7 +281,7 @@ def update_velocity(
 # //////////////////////////////////////////////////////////////////////////////
 
 
-class Example:
+class PBF_Origin:
     def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None):
         self.verbose = verbose
         self.sim_time = 0.0
@@ -462,7 +462,7 @@ def main():
         return
 
     with wp.ScopedDevice(args.device):
-        example = Example(
+        example = PBF_Origin(
             stage_path=args.stage_path, verbose=args.verbose,
             config=args.config,
         )

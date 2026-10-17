@@ -24,19 +24,19 @@ if __package__:
     from .pbf_helper import PBFConfig
     from . import config_io
     from . import boundary_model
-    from . import PBF as pbf
+    from . import PBF_Origin as pbf_origin
     from .simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 else:
     from pbf_helper import PBFConfig
     import config_io
     import boundary_model
-    import PBF as pbf
+    import PBF_Origin as pbf_origin
     from simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 
 
 def load_static_scene():
     """Load the wall-free Y-up mesh once, independently of the working directory."""
-    path = boundary_model.resolve_scene_path(pbf.SDF_FILENAME)
+    path = boundary_model.resolve_scene_path(pbf_origin.SDF_FILENAME)
     if not path.is_file():
         raise FileNotFoundError(f"Static scene not found: {path}; restore the matching OBJ/NVDB pair to PBF_Origin/Assets")
     try:

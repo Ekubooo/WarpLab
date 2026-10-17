@@ -3,24 +3,24 @@
 import warp as wp
 
 if __package__:
-    from .PBF import Example as PBFExample
+    from .PBF_Origin import PBF_Origin
     from . import pbf_helper as fn
 else:
-    from PBF import Example as PBFExample
+    from PBF_Origin import PBF_Origin
     import pbf_helper as fn
 
 
-def create_pbf_simulation(verbose: bool = False, config=None) -> PBFExample:
+def create_pbf_simulation(verbose: bool = False, config=None) -> PBF_Origin:
     """Create PBF with optional configuration and no USD output."""
-    return PBFExample(stage_path=None, verbose=verbose, config=config)
+    return PBF_Origin(stage_path=None, verbose=verbose, config=config)
 
 
-def reverse_gravity(sim: PBFExample) -> None:
+def reverse_gravity(sim: PBF_Origin) -> None:
     """Reverse runtime gravity without changing the startup configuration."""
     sim.gravity = -sim.gravity
 
 
-def reset_simulation(sim: PBFExample) -> None:
+def reset_simulation(sim: PBF_Origin) -> None:
     """Restore startup state in place, preserving simulation and render resources."""
     with wp.ScopedDevice(sim.pos.device):
         fn.init_particles(sim)

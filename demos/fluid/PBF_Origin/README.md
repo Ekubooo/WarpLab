@@ -6,7 +6,7 @@
 
 ```powershell
 python -m demos.fluid.PBF_Origin.render_opengl --device cuda:0
-python -m demos.fluid.PBF_Origin.PBF --device cuda:0 --stage-path None --num-frames 1
+python -m demos.fluid.PBF_Origin.PBF_Origin --device cuda:0 --stage-path None --num-frames 1
 ```
 
 直接脚本运行也支持：`python demos/fluid/PBF_Origin/render_opengl.py --device cuda:0`。模块入口从其他工作目录运行时，需要将仓库根目录加入 `PYTHONPATH`；资产和配置导出目录本身不依赖工作目录。
@@ -61,7 +61,7 @@ a set of good para for the water effect
 | `--block-end X Y Z` | `1.55 1.5 1.55` | 初始粒子块最大坐标，m |
 | `--clamp-negative-pressure / --no-clamp-negative-pressure` | `True` | 开启／关闭负压钳制 |
 
-## 离线/USD CLI：PBF.py
+## 离线/USD CLI：PBF_Origin.py
 
 | 参数 | 默认值 | 简短说明 |
 | --- | --- | --- |
@@ -86,14 +86,14 @@ a set of good para for the water effect
 
 ## 启动时读取静态 SDF
 
-资产选择由 `PBF.py` 的模块级常量控制；固定目录、文件名校验、路径解析和 GPU 读取由 `boundary_model.py` 管理，不随工作目录变化：
+资产选择由 `PBF_Origin.py` 的模块级常量控制；固定目录、文件名校验、路径解析和 GPU 读取由 `boundary_model.py` 管理，不随工作目录变化：
 
 ```python
-# PBF.py：修改这里即可切换碰撞与配对景观
+# PBF_Origin.py：修改这里即可切换碰撞与配对景观
 SDF_FILENAME = "stairs_scene.nvdb"
 ```
 
-两个入口均不提供 SDF 文件选择 CLI。选定 CUDA 设备后创建仿真实例，由 `Example.__init__()` 调用 `boundary_model.load_static_sdf(SDF_FILENAME, device=...)`，读取已有的 float32 NanoVDB。加载逻辑仍在构造函数中，文件名不进入构造或创建函数的参数列表。OpenGL 从同一 `PBF.SDF_FILENAME` 解析配对 OBJ；USD 只读取 NVDB。物理 JSON 不包含资产选择。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有；重置不会重新加载。文件缺失、损坏或类型错误会报告完整路径，不自动烘焙。
+两个入口均不提供 SDF 文件选择 CLI。选定 CUDA 设备后创建仿真实例，由 `PBF_Origin.__init__()` 调用 `boundary_model.load_static_sdf(SDF_FILENAME, device=...)`，读取已有的 float32 NanoVDB。加载逻辑仍在构造函数中，文件名不进入构造或创建函数的参数列表。OpenGL 从同一 `PBF_Origin.SDF_FILENAME` 解析配对 OBJ；USD 只读取 NVDB。物理 JSON 不包含资产选择。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有；重置不会重新加载。文件缺失、损坏或类型错误会报告完整路径，不自动烘焙。
 
 在仓库根目录、Conda `warplab` 环境中启动，无需 SDF CLI 参数：
 
@@ -104,16 +104,16 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF_Origin.render
 仅验证读取、不启动窗口或导出 USD：
 
 ```powershell
-conda run -n warplab --no-capture-output python -m demos.fluid.PBF_Origin.PBF --device cuda:0 --stage-path None --num-frames 0
+conda run -n warplab --no-capture-output python -m demos.fluid.PBF_Origin.PBF_Origin --device cuda:0 --stage-path None --num-frames 0
 ```
 
-直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，新资产由独立的 sim_Ready 管线准备。要换文件，修改 `PBF.py` 的 `SDF_FILENAME`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
+直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，新资产由独立的 sim_Ready 管线准备。要换文件，修改 `PBF_Origin.py` 的 `SDF_FILENAME`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
 
-`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 无需接收资产参数。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
+`PBF_Origin(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 无需接收资产参数。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
 
 当前文件的体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=4.5 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,4.5,1.525)`，内部仍有台阶和模型。全覆盖体素场的显存和文件大小随高度增长，加载时另有临时缓冲。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
 
-选择其他已烘焙文件时，在 `PBF.py` 中设置 `SDF_FILENAME = "other.nvdb"`；OpenGL 将读取 `Assets/other.obj`。
+选择其他已烘焙文件时，在 `PBF_Origin.py` 中设置 `SDF_FILENAME = "other.nvdb"`；OpenGL 将读取 `Assets/other.obj`。
 
 所有运行资源仅从本 demo 的 `Assets` 根目录读取，不回退到其他目录。OpenGL 按 NVDB 文件名选择同名 OBJ，USD 入口只要求 NVDB。PBF 不导入资产生成程序，生成程序也不导入 PBF。
 
@@ -123,12 +123,20 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF_Origin.PBF --
 
 OBJ/NVDB 受现有 Git 忽略规则影响，不会随普通提交保存。完整留档时需同时备份本目录的 `Assets`。
 
-## 测试
+## 启动自检
 
-本 demo 的独立入口与资源测试：
+模块入口：
 
 ```powershell
-python -m unittest discover -s tests/fluid/pbf_origin -t . -v
+python -m demos.fluid.PBF_Origin.PBF_Origin --device cuda:0 --stage-path None --num-frames 1
+python -m demos.fluid.PBF_Origin.render_opengl --device cuda:0 --num-frames 5
 ```
 
-物理算法仍保留当前基线实现；开发版 PBF 的完整测试位于 `tests/fluid/pbf`。
+直接脚本入口：
+
+```powershell
+python demos/fluid/PBF_Origin/PBF_Origin.py --device cuda:0 --stage-path None --num-frames 1
+python demos/fluid/PBF_Origin/render_opengl.py --device cuda:0 --num-frames 5
+```
+
+主类名称为 `PBF_Origin`，位于同名 `PBF_Origin.py` 中；`simulation.py` 与 OpenGL 入口均使用本地新模块，不读取旧 `PBF.py` 或开发版求解器。
