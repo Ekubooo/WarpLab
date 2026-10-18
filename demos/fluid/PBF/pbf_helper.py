@@ -21,7 +21,7 @@ class PBFConfig:
     rest_density: float = 1000.0
     frame_dt: float = 1.0 / 90.0
     substeps: int = 3
-    pressure_iterations: int = 3
+    pressure_iterations: int = 2
     lambda_regularization: float = 2.0
     gravity: tuple = (0.0, -9.81, 0.0)
     viscosity: float = 0.25
@@ -123,7 +123,7 @@ def compute_hash_grid_dims(container_min, container_max, cell_width):
 
 def init_parameters(sim):
     """Derive all particle scales and grid dimensions from the configuration."""
-    global S_corr_K, S_corr_Q, Inv_Rho0, Lamb_Eps, visStrength, vorConfirm, MaxVel, Gravity
+    global S_corr_K, S_corr_Q, Rho_0, Inv_Rho0, Lamb_Eps, visStrength, vorConfirm, MaxVel, Gravity
     global K_SPow3, K_DSPow3, K_SPoly6, Fluid_Mass
     global Boundary_Restitution, Boundary_Tangential_Retention
     global Boundary_Contact_Eps, Boundary_Disturbance
@@ -157,6 +157,7 @@ def init_parameters(sim):
     # Lambda has units of length squared; scale tensile strength accordingly.
     S_corr_K = wp.constant(config.artificial_pressure_strength * sim.support_radius**2)
     S_corr_Q = wp.constant(config.artificial_pressure_q)
+    Rho_0 = wp.constant(rest_density)
     Inv_Rho0 = wp.constant(1.0 / rest_density)
     Lamb_Eps = wp.constant(lambda_epsilon)
     visStrength = wp.constant(config.viscosity)
@@ -392,16 +393,47 @@ def apply_boundary(pos: wp.vec3, boundary: wp.vec3, tid: int):
         pos = wp.vec3(pos[0], pos[1], length - disturbance[2])
 
     return pos
+
  
 @wp.func
-def apply_SDF(volume_id:wp.uint64, pos:wp.vec3, radius:wp.float32):
-    queryCoord = wp.volume_world_to_index(volume_id, pos)
+def query_sdf_normal(sdf_id: wp.uint64, position: wp.vec3):
+    """Return validity, signed distance and a safe outward world-space normal.
 
-    grad = wp.vec3()
-    d = wp.volume_sample_grad_f(volume_id, queryCoord, wp.Volume.LINEAR, grad)
-    grad = wp.volume_index_to_world_dir(volume_id, grad)
-    
-    if d < radius :
-        pos -= wp.normalize(grad) * (d - radius)
+    Validate before normalizing; accept negative distances for collision
+    projection. Assumes axis-aligned, uniformly spaced voxels, as in the
+    baked SDF. Invalid samples return zero distance and normal.
+    """
+    index = wp.volume_world_to_index(sdf_id, position)
+    gradient = wp.vec3(0.0)
+    distance = wp.volume_sample_grad_f(sdf_id, index, wp.Volume.LINEAR, gradient)
+    if not wp.isfinite(distance):
+        return False, 0.0, wp.vec3(0.0)
 
+    # For this grid, the direction transform is simply gradient / voxel_size.
+    world_gradient = wp.volume_world_to_index_dir(sdf_id, gradient)
+    gradient_squared = wp.dot(world_gradient, world_gradient)
+    if not wp.isfinite(gradient_squared) or gradient_squared <= 1.0e-12:
+        return False, 0.0, wp.vec3(0.0)
+
+    return True, distance, world_gradient / wp.sqrt(gradient_squared)
+
+
+@wp.func
+def apply_SDF(volume_id: wp.uint64, pos: wp.vec3, radius: wp.float32):
+    valid, distance, normal = query_sdf_normal(volume_id, pos)
+    if valid and distance < radius:
+        pos += normal * (radius - distance)
     return pos
+
+
+@wp.func
+def query_volume_boundary(sdf_id: wp.uint64, position: wp.vec3, support_radius: float):
+    """Return validity, protected pressure distance and direction toward the boundary."""
+    valid, distance, normal = query_sdf_normal(sdf_id, position)
+    if not valid or distance <= 0.0 or distance >= support_radius:
+        return False, 0.0, wp.vec3(0.0)
+    # PBF uses support_radius = 4 * particle_radius. Keep the equivalent
+    # boundary point at least one particle diameter away to limit pressure.
+    pressure_distance = wp.max(distance + 0.125 * support_radius, 0.5 * support_radius)
+    return True, pressure_distance, -normal
+

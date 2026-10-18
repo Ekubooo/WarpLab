@@ -1,8 +1,10 @@
 """Load static NanoVDB SDFs and precompute their boundary volume maps."""
 
+from contextlib import contextmanager
 import math
 from numbers import Integral
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
@@ -11,19 +13,82 @@ import warp as wp
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
 
 
-def validate_sdf_filename(filename):
-    """Accept a bare NanoVDB filename, never a path or Windows drive prefix."""
-    if (not isinstance(filename, str) or not filename.strip()
-            or any(character in filename for character in "/\\:\x00")
-            or Path(filename).name != filename
-            or Path(filename).suffix.lower() != ".nvdb"):
-        raise ValueError("SDF must be a bare .nvdb filename without a directory or drive")
-    return filename
+@contextmanager
+def validate_boundary(
+    mode, *, filename=None, path=None, device=None, sdf=None,
+    support_radius=None, quadrature_points=None,
+):
+    """Check a function's inputs and results through one context-manager call.
+
+    Filename mode yields the name; precompute yields the allocated tile count.
+    Load mode yields a state with the resolved device: assign its ``sdf`` in
+    the body. Quadrature mode yields a state: assign ``offsets`` and
+    ``volume_weights`` in the body. These results are checked on normal exit,
+    including when the body returns. Loading errors retain their path context.
+    """
+    if mode == "filename":
+        if (not isinstance(filename, str) or not filename.strip()
+                or any(character in filename for character in "/\\:\x00")
+                or Path(filename).name != filename
+                or Path(filename).suffix.lower() != ".nvdb"):
+            raise ValueError("SDF must be a bare .nvdb filename without a directory or drive")
+        yield filename
+        return
+
+    if mode == "load":
+        if path is None:
+            raise ValueError("load validation requires a path")
+        if not path.is_file():
+            raise FileNotFoundError(f"Static SDF not found: {path}; generate it with python -m demos.sim_Ready first")
+        selected = wp.get_device(device)
+        if not selected.is_cuda:
+            raise ValueError(f"Static NanoVDB SDF loading requires a CUDA device: {path}")
+        state = SimpleNamespace(device=selected, sdf=None)
+        try:
+            yield state
+            if state.sdf is None:
+                raise TypeError("sdf must be a wp.Volume")
+            if state.sdf.dtype != wp.float32 or state.sdf.is_index:
+                raise ValueError("Static SDF must be a float32 scalar distance grid")
+            wp.synchronize_device(selected)
+        except Exception as error:
+            raise RuntimeError(f"Cannot load static SDF {path}: {error}") from error
+        return
+
+    if mode in ("quadrature", "precompute"):
+        if support_radius is None or not math.isfinite(support_radius) or support_radius <= 0:
+            raise ValueError("support_radius must be finite and positive")
+        if (isinstance(quadrature_points, bool)
+                or not isinstance(quadrature_points, Integral) or quadrature_points < 1):
+            raise ValueError("quadrature_points must be a positive integer")
+
+    if mode == "quadrature":
+        state = SimpleNamespace(offsets=None, volume_weights=None)
+        yield state
+        if state.offsets is None or state.volume_weights is None:
+            raise ValueError("quadrature validation requires offsets and volume_weights")
+        if (not np.isfinite(state.offsets).all() or not np.isfinite(state.volume_weights).all()
+                or np.any(state.volume_weights <= 0)):
+            raise ValueError("Quadrature offsets and weights must be representable as positive finite float32 weights")
+        return
+
+    if mode != "precompute":
+        raise ValueError(f"Unknown boundary validation mode: {mode}")
+    if not isinstance(sdf, wp.Volume):
+        raise TypeError("sdf must be a wp.Volume")
+    if not sdf.device.is_cuda:
+        raise ValueError("Volume-map precomputation requires a CUDA SDF")
+    if sdf.dtype != wp.float32 or sdf.is_index:
+        raise ValueError("SDF must be a float32 scalar distance grid")
+    tile_count = sdf.get_tile_count()
+    if tile_count == 0:
+        raise ValueError("SDF must have at least one allocated tile")
+    yield tile_count
 
 
 def resolve_sdf_path(filename):
-    name = validate_sdf_filename(filename)
-    return (Path(ASSET_DIR) / name).resolve()
+    with validate_boundary("filename", filename=filename) as name:
+        return (Path(ASSET_DIR) / name).resolve()
 
 
 def resolve_scene_path(filename):
@@ -57,23 +122,11 @@ def load_static_sdf(filename, *, device=None) -> wp.Volume:
     This startup operation neither reads an OBJ nor invokes the offline baker.
     """
     path = resolve_sdf_path(filename)
-    if not path.is_file():
-        raise FileNotFoundError(f"Static SDF not found: {path}; generate it with python -m demos.sim_Ready first")
-    selected = wp.get_device(device)
-    if not selected.is_cuda:
-        raise ValueError(f"Static NanoVDB SDF loading requires a CUDA device: {path}")
-    try:
+    with validate_boundary("load", path=path, device=device) as checked:
         with path.open("rb") as stream:
-            volume = wp.Volume.load_from_nvdb(stream, device=selected)
-        if volume.dtype != wp.float32 or volume.is_index:
-            raise ValueError("Static SDF must be a float32 scalar distance grid")
-        wp.synchronize_device(selected)
-    except Exception as error:
-        raise RuntimeError(f"Cannot load static SDF {path}: {error}") from error
+            volume = wp.Volume.load_from_nvdb(stream, device=checked.device)
+        checked.sdf = volume
     print(f"Static SDF loaded: {path} (voxel size {volume.get_voxel_size()[0]:g} m)")
-
-    # precompute VM here?
-
 
     return volume
 
@@ -85,22 +138,16 @@ def _build_volume_quadrature(support_radius, quadrature_points):
     not the polynomial order. The cube-to-ball cutoff is deliberately not
     renormalized, matching SPlisHSPlasH's volume-map quadrature.
     """
-    if not math.isfinite(support_radius) or support_radius <= 0:
-        raise ValueError("support_radius must be finite and positive")
-    if (isinstance(quadrature_points, bool)
-            or not isinstance(quadrature_points, Integral) or quadrature_points < 1):
-        raise ValueError("quadrature_points must be a positive integer")
-
-    nodes, weights = np.polynomial.legendre.leggauss(int(quadrature_points))
-    points = np.stack(np.meshgrid(nodes, nodes, nodes, indexing="ij"), axis=-1).reshape(-1, 3)
-    products = (weights[:, None, None] * weights[None, :, None] * weights[None, None, :]).reshape(-1)
-    inside = np.sum(points * points, axis=1) <= 1.0
-    offsets = np.asarray(points[inside] * support_radius, dtype=np.float32)
-    volume_weights = np.asarray(products[inside] * support_radius**3, dtype=np.float32)
-    if (not np.isfinite(offsets).all() or not np.isfinite(volume_weights).all()
-            or np.any(volume_weights <= 0)):
-        raise ValueError("Quadrature offsets and weights must be representable as positive finite float32 weights")
-    return offsets, volume_weights
+    with validate_boundary(
+        "quadrature", support_radius=support_radius, quadrature_points=quadrature_points,
+    ) as checked:
+        nodes, weights = np.polynomial.legendre.leggauss(int(quadrature_points))
+        points = np.stack(np.meshgrid(nodes, nodes, nodes, indexing="ij"), axis=-1).reshape(-1, 3)
+        products = (weights[:, None, None] * weights[None, :, None] * weights[None, None, :]).reshape(-1)
+        inside = np.sum(points * points, axis=1) <= 1.0
+        checked.offsets = np.asarray(points[inside] * support_radius, dtype=np.float32)
+        checked.volume_weights = np.asarray(products[inside] * support_radius**3, dtype=np.float32)
+        return checked.offsets, checked.volume_weights
 
 
 @wp.func
@@ -156,35 +203,27 @@ def precompute_volumeMap(
     ball plus the trilinear interpolation stencil at each queried map node.
     No mesh reconstruction, padding, file IO, or solver integration is done.
     """
-    offsets, volume_weights = _build_volume_quadrature(support_radius, quadrature_points)
-    
-    # validation
-    if not isinstance(sdf, wp.Volume):
-        raise TypeError("sdf must be a wp.Volume")
-    if not sdf.device.is_cuda:
-        raise ValueError("Volume-map precomputation requires a CUDA SDF")
-    if sdf.dtype != wp.float32 or sdf.is_index:
-        raise ValueError("SDF must be a float32 scalar distance grid")
-    tile_count = sdf.get_tile_count()
-    if tile_count == 0:
-        raise ValueError("SDF must have at least one allocated tile")
+    with validate_boundary(
+        "precompute", sdf=sdf, support_radius=support_radius, quadrature_points=quadrature_points,
+    ) as tile_count:
+        offsets, volume_weights = _build_volume_quadrature(support_radius, quadrature_points)
 
-    device = sdf.device
-    tiles = wp.empty(tile_count, dtype=wp.vec3i, device=device)
-    sdf.get_tiles(out=tiles)
-    info = sdf.get_grid_info()
-    volume_map = wp.Volume.allocate_by_tiles(
-        tiles, transform=info.transform_matrix, translation=info.translation,
-        bg_value=0.0, device=device,
-    )
-    gpu_offsets = wp.array(offsets, dtype=wp.vec3, device=device)
-    gpu_weights = wp.array(volume_weights, dtype=float, device=device)
-    wp.launch(
-        precompute_VM, 
-        dim=tile_count * 512,
-        inputs=[sdf.id, volume_map.id, tiles, gpu_offsets, gpu_weights, float(support_radius)],
-        device=device,
-    )
-    wp.synchronize_device(device)
-    return volume_map
+        device = sdf.device
+        tiles = wp.empty(tile_count, dtype=wp.vec3i, device=device)
+        sdf.get_tiles(out=tiles)
+        info = sdf.get_grid_info()
+        volume_map = wp.Volume.allocate_by_tiles(
+            tiles, transform=info.transform_matrix, translation=info.translation,
+            bg_value=0.0, device=device,
+        )
+        gpu_offsets = wp.array(offsets, dtype=wp.vec3, device=device)
+        gpu_weights = wp.array(volume_weights, dtype=float, device=device)
+        wp.launch(
+            precompute_VM,
+            dim=tile_count * 512,
+            inputs=[sdf.id, volume_map.id, tiles, gpu_offsets, gpu_weights, float(support_radius)],
+            device=device,
+        )
+        wp.synchronize_device(device)
+        return volume_map
 

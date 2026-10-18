@@ -43,13 +43,14 @@ out vec3 ObjectColor;
 
 void main()
 {
-    mat4 transform = model * mat4(
-        aInstanceTransform0,
-        aInstanceTransform1,
-        aInstanceTransform2,
-        aInstanceTransform3
+    // Expand the square in view space, so camera rotation also works when
+    // paused or redrawing without another particle-buffer update.
+    vec4 center = view * model * aInstanceTransform3;
+    vec2 size = vec2(
+        length((model * aInstanceTransform0).xyz),
+        length((model * aInstanceTransform1).xyz)
     );
-    gl_Position = projection * view * transform * vec4(aPos, 1.0);
+    gl_Position = projection * (center + vec4(aPos.xy * size, 0.0, 0.0));
     ObjectColor = aObjectColor;
 }
 """
@@ -72,9 +73,6 @@ void main()
 def update_billboard_transforms(
     positions: wp.array(dtype=wp.vec3),
     velocities: wp.array(dtype=wp.vec3),
-    camera_right: wp.vec3,
-    camera_up: wp.vec3,
-    camera_normal: wp.vec3,
     radius: float,
     speed_color_mid: float,
     speed_color_max: float,
@@ -85,12 +83,9 @@ def update_billboard_transforms(
     colors1: wp.array(dtype=wp.vec3),
     colors2: wp.array(dtype=wp.vec3),
 ):
-    """Build camera-facing transforms and speed-based instance colors."""
+    """Write particle centers, radii and speed-based instance colors."""
     tid = wp.tid()
     p = positions[tid]
-    right = camera_right * radius
-    up = camera_up * radius
-    normal = camera_normal * radius
 
     speed = wp.length(velocities[tid])
     normalized_speed = wp.clamp(speed / speed_color_max, 0.0, 1.0)
@@ -106,19 +101,19 @@ def update_billboard_transforms(
     colors2[tid] = color
 
     # Warp matrices are laid out transposed when consumed as OpenGL instance
-    # attributes. These rows become the basis and translation columns in GLSL.
+    # attributes. Store scale and translation; the shader supplies orientation.
     transforms[tid] = wp.mat44(
-        right[0],
-        right[1],
-        right[2],
+        radius,
         0.0,
-        up[0],
-        up[1],
-        up[2],
         0.0,
-        normal[0],
-        normal[1],
-        normal[2],
+        0.0,
+        0.0,
+        radius,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        radius,
         0.0,
         p[0],
         p[1],
@@ -151,8 +146,8 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
         self._billboard_color_resources.clear()
         super().clear()
 
-    def _draw(self):
-        """Upload camera matrices for the dedicated unlit billboard shader."""
+    def _upload_billboard_camera(self):
+        """Use the same camera state as Warp's mesh shader for this draw."""
         gl = self.gl
         gl.glUseProgram(self._billboard_shader.id)
         gl.glUniformMatrix4fv(self._loc_billboard_model, 1, gl.GL_FALSE, arr_pointer(self._model_matrix))
@@ -163,27 +158,18 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
             gl.GL_FALSE,
             arr_pointer(self._projection_matrix),
         )
+
+    def _process_inputs(self):
+        # Warp calls this once inside _draw, before uploading its mesh camera.
+        super()._process_inputs()
+        self._upload_billboard_camera()
+
+    def _draw(self):
+        self._switch_context()
+        if self.headless:
+            # Warp skips _process_inputs for hidden/offscreen renders.
+            self._upload_billboard_camera()
         super()._draw()
-
-    @staticmethod
-    def _camera_basis(camera_front, camera_up):
-        front = np.array((camera_front.x, camera_front.y, camera_front.z), dtype=np.float32)
-        up_hint = np.array((camera_up.x, camera_up.y, camera_up.z), dtype=np.float32)
-        front /= np.linalg.norm(front)
-
-        right = np.cross(front, up_hint)
-        right_length = np.linalg.norm(right)
-        if right_length < 1.0e-6:
-            # This only occurs when the view and up vectors become parallel.
-            up_hint = np.array((0.0, 0.0, 1.0), dtype=np.float32)
-            right = np.cross(front, up_hint)
-            right_length = np.linalg.norm(right)
-        right /= right_length
-
-        up = np.cross(right, front)
-        up /= np.linalg.norm(up)
-        normal = -front
-        return right, up, normal
 
     def _allocate_billboard_instances(self, instancer, points, color):
         """Initialize instance storage; subclasses may allocate it without host positions."""
@@ -238,8 +224,7 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
             velocities = velocities.to(self._device)
 
         if name not in self._shape_instancers:
-            # Unit square in the local XY plane. The per-frame instance matrix
-            # scales it by radius and rotates it into the camera plane.
+            # Unit square expanded in the current camera plane by the shader.
             vertices = np.array(
                 [
                     (-1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0),
@@ -265,7 +250,6 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
                 self._allocate_billboard_instances(instancer, points, low_color)
                 self._register_billboard_color_resources(name, instancer)
 
-        right, up, normal = self._camera_basis(self.camera_front, self.camera_up)
         with instancer:
             color1_resource, color2_resource = self._billboard_color_resources[name]
             colors1 = color1_resource.map(dtype=wp.vec3, shape=(len(points),))
@@ -278,9 +262,6 @@ class BillboardRenderer(wp.render.OpenGLRenderer):
                     inputs=[
                         points,
                         velocities,
-                        wp.vec3(*right),
-                        wp.vec3(*up),
-                        wp.vec3(*normal),
                         radius,
                         speed_color_mid,
                         speed_color_max,

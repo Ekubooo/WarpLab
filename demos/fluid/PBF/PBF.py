@@ -34,15 +34,37 @@ def apply_predict(
     preNew[tid] = predicit
 
 @wp.kernel
+def volume_query(
+    sdf_id: wp.uint64,
+    vmap_id: wp.uint64, 
+    pre_Pos: wp.array[wp.vec3],
+    Smoothing_Radius: wp.float32
+):
+    tid = wp.tid()
+    grad = wp.vec3(0,0,0)
+    currPos = pre_Pos[tid]
+
+    index = wp.volume_world_to_index(sdf_id, currPos)
+    dValue = wp.volume_sample_grad_f(sdf_id, index, wp.Volume.LINEAR, grad)
+    if dValue < Smoothing_Radius:
+        x_proj = currPos + wp.normalize(grad) * dValue
+        vm_index = wp.volume_world_to_index(sdf_id, x_proj)
+        vmapValue = wp.volume_sample_f(vmap_id, vm_index, wp.Volume.LINEAR)
+    
+
+@wp.kernel
 def calc_lambda(
     grid: wp.uint64,
     smoothing_length: float,
     pre_Pos: wp.array[wp.vec3],
     pre_New: wp.array[wp.vec3],
     clamp_negative_pressure: int,
+    sdf_id: wp.uint64,
+    vmap_id: wp.uint64, 
     lambda_Opt: wp.array[float]
 ):
     density = float(0.0)
+    volumeRho = float(0.0)
     grad_j = float(0.0)
     grad_i = wp.vec3(0,0,0)
     pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
@@ -70,9 +92,18 @@ def calc_lambda(
         if index!=i : 
             grad_j += wp.dot(currGrad, currGrad)
         # do something.
-    
+
+    # volume map query
+    valid_boundary, projDst, dirVM = fn.query_volume_boundary(sdf_id, currPos, smoothing_length)
+    if valid_boundary:
+        vm_index = wp.volume_world_to_index(vmap_id, currPos)
+        vmapValue = wp.volume_sample_f(vmap_id, vm_index, wp.Volume.LINEAR)
+        volumeRho = vmapValue * fn.Rho_0 * fn.Poly6(projDst, smoothing_length)
+        grad_i += vmapValue * dirVM * fn.DPow3(projDst, smoothing_length)
     gradSum = grad_j + wp.dot(grad_i, grad_i)
-    constraint = density*fn.Inv_Rho0 - 1.0
+
+    # constraint = density*fn.Inv_Rho0 - 1.0
+    constraint = (density + volumeRho) * fn.Inv_Rho0 - 1.0
     if clamp_negative_pressure != 0:
         constraint = wp.max(constraint, 0.0)
     lambdaCurr = -constraint / (gradSum + fn.Lamb_Eps)
@@ -86,6 +117,8 @@ def calc_deltaPos(
     pre_Pos: wp.array[wp.vec3],
     pre_New: wp.array[wp.vec3],
     lambda_Opt: wp.array[float],
+    sdf_id: wp.uint64,
+    vmap_id: wp.uint64, 
     delta_Pos: wp.array[wp.vec3]
 ):
     tid = wp.tid()
@@ -124,9 +157,17 @@ def calc_deltaPos(
         currGrad = dir2N * fn.DPow3(dst2N, smoothing_length)
         delta_Movement -= lambda_Sum * currGrad
 
-    delta_Pos[i] = delta_Movement * pressure_scale
+    # volume map query
+    gradVMap = wp.vec3(0.0)
+    valid_boundary, projDst, dirVM = fn.query_volume_boundary(sdf_id, currPos, smoothing_length)
+    if valid_boundary:
+        vm_index = wp.volume_world_to_index(vmap_id, currPos)
+        vmapValue = wp.volume_sample_f(vmap_id, vm_index, wp.Volume.LINEAR)
+        gradVMap = vmapValue * dirVM * fn.DPow3(projDst, smoothing_length)
 
-    # what if fusion？
+    delta_boundary = -lambda_i * gradVMap
+    delta_Pos[i] = delta_Movement * pressure_scale + delta_boundary
+
     # currPos = delta_Pos[tid] + pre_Pos[tid]
     # pre_Pos[tid] = fn.apply_boundary(currPos)
 
@@ -291,7 +332,10 @@ class Example:
         fn.init_parameters(self)
         # Keep the GPU Volume alive while the solver queries its SDF.
         self.static_sdf = boundary_model.load_static_sdf(SDF_FILENAME, device=wp.get_device())
-       # self.volume_map = boundary_model.precompute_volumeMap(self.static_sdf.id)
+
+        # Volume Map Precompute
+        self.volume_map = boundary_model.precompute_volumeMap(self.static_sdf, self.smoothing_length)
+
         fn.init_device_buffers(self)
         self.renderer = (
             wp.render.UsdRenderer(stage_path)
@@ -326,6 +370,8 @@ class Example:
                                 self.pre_Pos,
                                 self.pre_New,
                                 int(self.config.clamp_negative_pressure),
+                                self.static_sdf.id,
+                                self.volume_map.id
                             ],
                             outputs=[self.lambda_Opt]
                         )
@@ -337,7 +383,9 @@ class Example:
                                 self.smoothing_length, 
                                 self.pre_Pos, 
                                 self.pre_New,
-                                self.lambda_Opt
+                                self.lambda_Opt,
+                                self.static_sdf.id,
+                                self.volume_map.id
                             ],
                             outputs=[self.delta_Pos]
                         )

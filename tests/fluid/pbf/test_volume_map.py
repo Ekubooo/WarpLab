@@ -170,6 +170,20 @@ class VolumeMapGPUTests(unittest.TestCase):
         np.testing.assert_array_equal(valid, [1])
         np.testing.assert_allclose(directions, [[0, -1, 0]], atol=1e-6)
 
+    def test_pressure_distance_protection_uses_true_distance_for_support(self):
+        sdf = self.allocate([[0, 0, 0]], background=1.0)
+        self.fill(sdf, normal=(0, 1, 0), origin=(0, 0.2, 0))
+        distances = np.array([-0.01, 0, 0.001, 0.018, 0.019, 0.025, 0.049, 0.051])
+        valid, protected, directions = self.probe_boundary(
+            sdf, [[0.15, 0.2 + d, 0.15] for d in distances], 0.05,
+        )
+        inside = (distances > 0) & (distances < 0.05)
+        expected = np.where(inside, np.maximum(distances + 0.00625, 0.025), 0)
+        np.testing.assert_array_equal(valid, inside.astype(int))
+        np.testing.assert_allclose(protected, expected, atol=2e-7)
+        np.testing.assert_allclose(directions[inside], np.tile([0, -1, 0], (inside.sum(), 1)), atol=1e-6)
+        np.testing.assert_array_equal(directions[~inside], 0)
+
     def test_collision_preserves_positions_without_valid_normals(self):
         sdf = self.allocate([[0, 0, 0]], background=1.0)
         positions = wp.array([[0.15, 0.02, 0.15], [0.13, 0.023, 0.17]],
@@ -214,7 +228,8 @@ class VolumeMapGPUTests(unittest.TestCase):
         relative = np.array([0.15, 0.15, 0.15])
         valid, distances, directions = self.probe_boundary(sdf, [origin + relative], 0.2)
         np.testing.assert_array_equal(valid, [1])
-        np.testing.assert_allclose(distances, [relative @ normal], atol=2e-7)
+        expected_distance = max(relative @ normal + 0.025, 0.1)
+        np.testing.assert_allclose(distances, [expected_distance], atol=2e-7)
         np.testing.assert_allclose(directions, [-normal], atol=2e-6)
 
         # A tiny index-space gradient is valid when its world-space norm is one.
@@ -225,7 +240,7 @@ class VolumeMapGPUTests(unittest.TestCase):
         self.fill(tiny, normal=(0, 1, 0))
         valid, distances, directions = self.probe_boundary(tiny, [[2e-8, 2e-8, 2e-8]], 1e-7)
         np.testing.assert_array_equal(valid, [1])
-        np.testing.assert_allclose(distances, [2e-8], rtol=1e-6, atol=0)
+        np.testing.assert_allclose(distances, [5e-8], rtol=1e-6, atol=0)
         np.testing.assert_allclose(directions, [[0, -1, 0]], atol=1e-6)
 
     def test_runtime_pressure_plane_and_degenerate_gradient(self):
@@ -236,7 +251,7 @@ class VolumeMapGPUTests(unittest.TestCase):
         radius = sim.smoothing_length
         sdf = self.allocate([[0, 0, 0]], background=1.0)
         volume_map = self.allocate([[0, 0, 0]], background=0.0)
-        volume = 1e-4
+        volume = 2e-4
         self.fill(volume_map, offset=volume)
         positions = wp.array([[0.15, 0.0125, 0.15]], dtype=wp.vec3, device=self.device)
         grid = wp.HashGrid(16, 16, 16, device=self.device)
@@ -255,7 +270,7 @@ class VolumeMapGPUTests(unittest.TestCase):
 
         self.fill(sdf, normal=(0, 1, 0))
         actual_lambda, actual_delta = solve()
-        distance = 0.0125
+        distance = max(0.0125 + 0.5 * sim.config.particle_radius, 2 * sim.config.particle_radius)
         poly6 = lambda d: 315 / (64 * np.pi * radius**9) * (radius**2 - d**2)**3
         gradient = volume * 45 / (np.pi * radius**6) * (radius - distance)**2
         mass = 0.8 * (2 * sim.config.particle_radius)**3 * sim.config.rest_density
