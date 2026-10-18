@@ -291,6 +291,7 @@ class Example:
         fn.init_parameters(self)
         # Keep the GPU Volume alive while the solver queries its SDF.
         self.static_sdf = boundary_model.load_static_sdf(SDF_FILENAME, device=wp.get_device())
+       # self.volume_map = boundary_model.precompute_volumeMap(self.static_sdf.id)
         fn.init_device_buffers(self)
         self.renderer = (
             wp.render.UsdRenderer(stage_path)
