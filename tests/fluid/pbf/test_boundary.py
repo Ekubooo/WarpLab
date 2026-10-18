@@ -181,12 +181,17 @@ class BoundaryInterfaceTest(unittest.TestCase):
             refs.append(weakref.ref(resource))
             return resource
         device = object()
-        with patch.object(solver.fn, "init_parameters"), \
+        with patch.object(solver.fn, "init_parameters",
+                          side_effect=lambda sim: setattr(sim, "smoothing_length", 0.05)), \
                 patch.object(solver.fn, "init_device_buffers"), \
                 patch.object(wp, "get_device", return_value=device), \
-                patch.object(boundary, "load_static_sdf", side_effect=load) as loading:
+                patch.object(boundary, "load_static_sdf", side_effect=load) as loading, \
+                patch.object(boundary, "precompute_volumeMap", return_value=Resource()) as precomputing:
             sim = solver.Example(stage_path=None)
         loading.assert_called_once_with(solver.SDF_FILENAME, device=device)
+        precomputing.assert_called_once_with(sim.static_sdf, sim.smoothing_length)
+        # Mock call history must not hold the SDF alive after the instance dies.
+        precomputing.reset_mock()
         gc.collect()
         self.assertIs(refs[0](), sim.static_sdf)
         del sim

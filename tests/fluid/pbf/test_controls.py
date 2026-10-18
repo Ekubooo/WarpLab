@@ -137,7 +137,8 @@ class ControlsTest(unittest.TestCase):
             values = []
             for clamp in (1, 0):
                 wp.launch(solver.calc_lambda, 1,
-                          inputs=[grid.id, sim.support_radius, pos, pos, clamp], outputs=[result])
+                          inputs=[grid.id, sim.support_radius, pos, pos, clamp,
+                                  sim.static_sdf.id, sim.volume_map.id], outputs=[result])
                 values.append(float(result.numpy()[0]))
         self.assertEqual(values[0], 0)
         self.assertGreater(values[1], 0)

@@ -1,11 +1,14 @@
 """Gauss volume integration and NanoVDB coordinate/background regression tests."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 from demos.fluid.PBF import boundary_model as boundary
+from demos.fluid.PBF import pbf_helper as fn
 
 
 @wp.kernel
@@ -31,6 +34,27 @@ def _lookup(volume: wp.uint64, cells: wp.array(dtype=wp.vec3i), values: wp.array
     i = wp.tid()
     cell = cells[i]
     values[i] = wp.volume_lookup_f(volume, cell[0], cell[1], cell[2])
+
+
+@wp.kernel
+def _probe_volume_boundary(
+    sdf: wp.uint64, positions: wp.array(dtype=wp.vec3), radius: float,
+    valid: wp.array(dtype=int), distances: wp.array(dtype=float), directions: wp.array(dtype=wp.vec3),
+):
+    i = wp.tid()
+    ok, distance, direction = fn.query_volume_boundary(sdf, positions[i], radius)
+    valid[i] = int(ok)
+    distances[i] = distance
+    directions[i] = direction
+
+
+@wp.kernel
+def _probe_collision(
+    sdf: wp.uint64, positions: wp.array(dtype=wp.vec3), radius: float,
+    corrected: wp.array(dtype=wp.vec3),
+):
+    i = wp.tid()
+    corrected[i] = fn.apply_SDF(sdf, positions[i], radius)
 
 
 def _occupancy_reference(distance, radius):
@@ -71,6 +95,14 @@ class VolumeQuadratureTests(unittest.TestCase):
         np.testing.assert_allclose(weights, [8 * 0.05**3])
         with self.assertRaisesRegex(TypeError, "wp.Volume"):
             boundary.precompute_volumeMap(None, 0.05)
+
+    def test_invalid_quadrature_result_is_rejected_before_return(self):
+        for weight in (0.0, float("nan"), float("inf")):
+            with self.subTest(weight=weight), \
+                    patch.object(np.polynomial.legendre, "leggauss",
+                                 return_value=(np.array([0.0]), np.array([weight]))), \
+                    self.assertRaisesRegex(ValueError, "finite float32 weights"):
+                boundary._build_volume_quadrature(0.05, 1)
 
     def test_occupancy_values_and_piecewise_joins_on_cpu(self):
         wp.init()
@@ -113,6 +145,138 @@ class VolumeMapGPUTests(unittest.TestCase):
         values = wp.empty(len(cells), dtype=float, device=self.device)
         wp.launch(_lookup, len(cells), inputs=[volume.id, cells, values], device=self.device)
         return values.numpy()
+
+    def probe_boundary(self, sdf, positions, radius):
+        positions = wp.array(positions, dtype=wp.vec3, device=self.device)
+        valid = wp.empty(len(positions), dtype=int, device=self.device)
+        distances = wp.empty(len(positions), dtype=float, device=self.device)
+        directions = wp.empty(len(positions), dtype=wp.vec3, device=self.device)
+        wp.launch(_probe_volume_boundary, len(positions),
+                  inputs=[sdf.id, positions, radius, valid, distances, directions], device=self.device)
+        return valid.numpy(), distances.numpy(), directions.numpy()
+
+    def test_runtime_rejects_degenerate_and_nonfinite_samples(self):
+        sdf = self.allocate([[0, 0, 0]], background=1.0)
+        for slope, offset in ((0.0, 0.02), (1e-7, 0.02), (float("nan"), 0.02),
+                              (0.0, float("inf")), (0.0, -0.01), (0.0, 0.0), (0.0, 0.05)):
+            with self.subTest(slope=slope, offset=offset):
+                self.fill(sdf, normal=(0, slope, 0), offset=offset)
+                valid, distances, directions = self.probe_boundary(sdf, [[0.15, 0.2, 0.25]], 0.05)
+                np.testing.assert_array_equal(valid, [0])
+                np.testing.assert_array_equal(distances, [0])
+                np.testing.assert_array_equal(directions, [[0, 0, 0]])
+        self.fill(sdf, normal=(0, 1e-5, 0), offset=0.02)
+        valid, _, directions = self.probe_boundary(sdf, [[0.15, 0.2, 0.25]], 0.05)
+        np.testing.assert_array_equal(valid, [1])
+        np.testing.assert_allclose(directions, [[0, -1, 0]], atol=1e-6)
+
+    def test_collision_preserves_positions_without_valid_normals(self):
+        sdf = self.allocate([[0, 0, 0]], background=1.0)
+        positions = wp.array([[0.15, 0.02, 0.15], [0.13, 0.023, 0.17]],
+                             dtype=wp.vec3, device=self.device)
+        corrected = wp.empty(2, dtype=wp.vec3, device=self.device)
+        for slope, offset in ((0.0, 0.01), (0.0, -0.01), (1e-7, 0.01),
+                              (float("nan"), 0.01), (0.0, float("inf"))):
+            with self.subTest(slope=slope, offset=offset):
+                self.fill(sdf, normal=(0, slope, 0), offset=offset)
+                wp.launch(_probe_collision, 2, inputs=[sdf.id, positions, 0.0125, corrected],
+                          device=self.device)
+                np.testing.assert_array_equal(corrected.numpy(), positions.numpy())
+
+    def test_collision_projects_penetrated_surface_and_translated_plane(self):
+        sdf = self.allocate([[0, 0, 0]], background=1.0)
+        self.fill(sdf, normal=(0, 1, 0), origin=(0, 0.2, 0))
+        positions = wp.array([[0.15, y, 0.15] for y in (0.18, 0.2, 0.205, 0.25)],
+                             dtype=wp.vec3, device=self.device)
+        corrected = wp.empty(4, dtype=wp.vec3, device=self.device)
+        wp.launch(_probe_collision, 4, inputs=[sdf.id, positions, 0.0125, corrected], device=self.device)
+        expected = positions.numpy().copy()
+        expected[:3, 1] = 0.2125
+        np.testing.assert_allclose(corrected.numpy(), expected, atol=2e-7)
+
+        origin = np.array([1.3, -0.7, 0.4])
+        normal = np.array([1, 2, -1]) / np.sqrt(6)
+        sdf = self.allocate([[0, 0, 0]], background=1.0, translation=origin)
+        self.fill(sdf, normal=normal, origin=origin)
+        relative = np.array([0.15, 0.15, 0.15])
+        position = origin + relative
+        positions = wp.array([position], dtype=wp.vec3, device=self.device)
+        corrected = wp.empty(1, dtype=wp.vec3, device=self.device)
+        wp.launch(_probe_collision, 1, inputs=[sdf.id, positions, 0.15, corrected], device=self.device)
+        expected = position + (0.15 - relative @ normal) * normal
+        np.testing.assert_allclose(corrected.numpy(), [expected], atol=2e-7)
+
+    def test_runtime_world_normal_with_translation_and_uniform_voxel_scaling(self):
+        origin = np.array([1.3, -0.7, 0.4])
+        normal = np.array([1, 2, -1]) / np.sqrt(6)
+        sdf = self.allocate([[0, 0, 0]], background=1.0, translation=origin)
+        self.fill(sdf, normal=normal, origin=origin)
+        relative = np.array([0.15, 0.15, 0.15])
+        valid, distances, directions = self.probe_boundary(sdf, [origin + relative], 0.2)
+        np.testing.assert_array_equal(valid, [1])
+        np.testing.assert_allclose(distances, [relative @ normal], atol=2e-7)
+        np.testing.assert_allclose(directions, [-normal], atol=2e-6)
+
+        # A tiny index-space gradient is valid when its world-space norm is one.
+        tiny = wp.Volume.allocate_by_tiles(
+            wp.array([[0, 0, 0]], dtype=wp.vec3i, device=self.device),
+            voxel_size=1e-8, bg_value=1.0, device=self.device,
+        )
+        self.fill(tiny, normal=(0, 1, 0))
+        valid, distances, directions = self.probe_boundary(tiny, [[2e-8, 2e-8, 2e-8]], 1e-7)
+        np.testing.assert_array_equal(valid, [1])
+        np.testing.assert_allclose(distances, [2e-8], rtol=1e-6, atol=0)
+        np.testing.assert_allclose(directions, [[0, -1, 0]], atol=1e-6)
+
+    def test_runtime_pressure_plane_and_degenerate_gradient(self):
+        from demos.fluid.PBF import PBF as solver
+
+        sim = SimpleNamespace(config=solver.fn.PBFConfig())
+        solver.fn.init_parameters(sim)
+        radius = sim.smoothing_length
+        sdf = self.allocate([[0, 0, 0]], background=1.0)
+        volume_map = self.allocate([[0, 0, 0]], background=0.0)
+        volume = 1e-4
+        self.fill(volume_map, offset=volume)
+        positions = wp.array([[0.15, 0.0125, 0.15]], dtype=wp.vec3, device=self.device)
+        grid = wp.HashGrid(16, 16, 16, device=self.device)
+        grid.build(positions, radius)
+        lambdas = wp.empty(1, dtype=float, device=self.device)
+        corrections = wp.empty(1, dtype=wp.vec3, device=self.device)
+
+        def solve():
+            wp.launch(solver.calc_lambda, 1,
+                      inputs=[grid.id, radius, positions, positions, 1, sdf.id, volume_map.id],
+                      outputs=[lambdas], device=self.device)
+            wp.launch(solver.calc_deltaPos, 1,
+                      inputs=[grid.id, radius, positions, positions, lambdas, sdf.id, volume_map.id],
+                      outputs=[corrections], device=self.device)
+            return lambdas.numpy()[0], corrections.numpy()[0]
+
+        self.fill(sdf, normal=(0, 1, 0))
+        actual_lambda, actual_delta = solve()
+        distance = 0.0125
+        poly6 = lambda d: 315 / (64 * np.pi * radius**9) * (radius**2 - d**2)**3
+        gradient = volume * 45 / (np.pi * radius**6) * (radius - distance)**2
+        mass = 0.8 * (2 * sim.config.particle_radius)**3 * sim.config.rest_density
+        constraint = mass / sim.config.rest_density * poly6(0) + volume * poly6(distance) - 1
+        epsilon = sim.config.lambda_regularization / radius**2
+        expected_lambda = -max(constraint, 0) / (gradient**2 + epsilon)
+        self.assertLess(expected_lambda, 0)
+        np.testing.assert_allclose(actual_lambda, expected_lambda, rtol=2e-5)
+        np.testing.assert_allclose(actual_delta, [0, -expected_lambda * gradient, 0], rtol=2e-5, atol=1e-8)
+
+        # Both kernels must omit density/gradient terms when no normal exists.
+        self.fill(sdf, offset=0.01)
+        actual_lambda, actual_delta = solve()
+        self.assertEqual(actual_lambda, 0)
+        np.testing.assert_array_equal(actual_delta, [0, 0, 0])
+        # An externally nonzero lambda must still produce zero boundary motion.
+        lambdas.fill_(-0.1)
+        wp.launch(solver.calc_deltaPos, 1,
+                  inputs=[grid.id, radius, positions, positions, lambdas, sdf.id, volume_map.id],
+                  outputs=[corrections], device=self.device)
+        np.testing.assert_array_equal(corrections.numpy(), [[0, 0, 0]])
 
     def test_constant_fields_all_voxels_and_zero_output_background(self):
         radius = 0.15
