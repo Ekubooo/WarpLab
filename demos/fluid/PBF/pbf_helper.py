@@ -125,8 +125,7 @@ def init_parameters(sim):
     """Derive all particle scales and grid dimensions from the configuration."""
     global S_corr_K, S_corr_Q, Rho_0, Inv_Rho0, Lamb_Eps, visStrength, vorConfirm, MaxVel, Gravity
     global K_SPow3, K_DSPow3, K_SPoly6, Fluid_Mass
-    global Boundary_Restitution, Boundary_Tangential_Retention
-    global Boundary_Contact_Eps, Boundary_Disturbance
+    global Boundary_Restitution, Boundary_Tangential_Retention, Boundary_Contact_Eps, Boundary_Disturbance
 
     config = sim.config
     sim.particle_radius = config.particle_radius
