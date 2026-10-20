@@ -124,8 +124,9 @@ def compute_hash_grid_dims(container_min, container_max, cell_width):
 def init_parameters(sim):
     """Derive all particle scales and grid dimensions from the configuration."""
     global S_corr_K, S_corr_Q, Rho_0, Inv_Rho0, Lamb_Eps, visStrength, vorConfirm, MaxVel, Gravity
-    global K_SPow3, K_DSPow3, K_SPoly6, Fluid_Mass
+    global K_SPow3, K_DSPow3, K_SPoly6, Fluid_Mass, Smoothing_Radius, Particle_Radius
     global Boundary_Restitution, Boundary_Tangential_Retention, Boundary_Contact_Eps, Boundary_Disturbance
+    global NP_clamping
 
     config = sim.config
     sim.particle_radius = config.particle_radius
@@ -153,6 +154,8 @@ def init_parameters(sim):
 
     # Module globals are read directly by wp.func and by the solver via fn.
     Fluid_Mass = wp.constant(fluid_mass)
+    Particle_Radius =  wp.constant(float(sim.particle_radius))
+    Smoothing_Radius = wp.constant(float(sim.smoothing_length))
     # Lambda has units of length squared; scale tensile strength accordingly.
     S_corr_K = wp.constant(config.artificial_pressure_strength * sim.support_radius**2)
     S_corr_Q = wp.constant(config.artificial_pressure_q)
@@ -172,6 +175,7 @@ def init_parameters(sim):
         boundaryContactEpsScale * sim.smoothing_length
     )
     Boundary_Disturbance = wp.constant(boundaryDisturbance)
+    NP_clamping = wp.constant(int(config.clamp_negative_pressure))
 
     sim.frame_dt = config.frame_dt
     sim.substep = config.substeps
@@ -212,6 +216,8 @@ def init_device_buffers(sim):
     sim.curl = wp.zeros(sim.n, dtype=wp.vec4)
 
     sim.grid = wp.HashGrid(*sim.hash_grid_dims)
+    global GRID_id 
+    GRID_id = wp.constant(wp.uint64(sim.grid.id))
 
     init_particles(sim)
 
