@@ -80,7 +80,7 @@ a set of good para for the water effect
 SDF_FILENAME = "stairs_scene.nvdb"
 ```
 
-两个入口均不提供 SDF 文件选择 CLI。选定 CUDA 设备后创建仿真实例，由 `Example.__init__()` 调用 `boundary_model.load_static_sdf(SDF_FILENAME, device=...)`，读取已有的 float32 NanoVDB。加载逻辑仍在构造函数中，文件名不进入构造或创建函数的参数列表。OpenGL 从同一 `PBF.SDF_FILENAME` 解析配对 OBJ；USD 只读取 NVDB。物理 JSON 不包含资产选择。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有；重置不会重新加载。文件缺失、损坏或类型错误会报告完整路径，不自动烘焙。
+两个入口均不提供 SDF 文件选择 CLI。选定 CUDA 设备后创建仿真实例，由 `PBF.__init__()` 调用 `boundary_model.load_static_sdf(SDF_FILENAME, device=...)`，读取已有的 float32 NanoVDB。加载逻辑仍在构造函数中，文件名不进入构造或创建函数的参数列表。OpenGL 从同一 `PBF.SDF_FILENAME` 解析配对 OBJ；USD 只读取 NVDB。物理 JSON 不包含资产选择。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有；重置不会重新加载。文件缺失、损坏或类型错误会报告完整路径，不自动烘焙。
 
 在仓库根目录、Conda `warplab` 环境中启动，无需 SDF CLI 参数：
 
@@ -96,7 +96,7 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device 
 
 直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，新资产由独立的 sim_Ready 管线准备。要换文件，修改 `PBF.py` 的 `SDF_FILENAME`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
 
-`Example(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 无需接收资产参数。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
+`PBF(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 无需接收资产参数。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
 
 当前文件的体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=4.5 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,4.5,1.525)`，内部仍有台阶和模型。全覆盖体素场的显存和文件大小随高度增长，加载时另有临时缓冲。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
 

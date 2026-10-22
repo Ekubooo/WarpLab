@@ -3,24 +3,24 @@
 import warp as wp
 
 try:
-    from .PBF import Example as PBFExample
+    from .PBF import PBF as PBFSolver
     from . import pbf_helper as fn
 except ImportError:
-    from PBF import Example as PBFExample
+    from PBF import PBF as PBFSolver
     import pbf_helper as fn
 
 
-def create_pbf_simulation(verbose: bool = False, config=None) -> PBFExample:
+def create_pbf_simulation(verbose: bool = False, config=None) -> PBFSolver:
     """Create PBF with optional configuration and no USD output."""
-    return PBFExample(stage_path=None, verbose=verbose, config=config)
+    return PBFSolver(stage_path=None, verbose=verbose, config=config)
 
 
-def reverse_gravity(sim: PBFExample) -> None:
+def reverse_gravity(sim: PBFSolver) -> None:
     """Reverse runtime gravity without changing the startup configuration."""
     sim.gravity = -sim.gravity
 
 
-def reset_simulation(sim: PBFExample) -> None:
+def reset_simulation(sim: PBFSolver) -> None:
     """Restore the startup lattice and zero velocity without reallocating resources."""
     with wp.ScopedDevice(sim.pos.device):
         wp.launch(
@@ -40,7 +40,7 @@ def reset_simulation(sim: PBFExample) -> None:
         ):
             buffer.zero_()
         # Neighbor slots are ignored until the next step rebuilds their counts.
-        sim.n_Cache.NP_Count.zero_()
+        sim.n_Cache.NeighborCount.zero_()
         sim.gravity = wp.vec3(*sim.config.gravity)
         sim.sim_time = 0.0
         sim.grid.build(sim.pos, sim.smoothing_length)

@@ -15,6 +15,7 @@ from demos.fluid.PBF import PBF as solver
 from demos.fluid.PBF import render_opengl as frontend
 from demos.fluid.PBF.pbf_helper import PBFConfig
 from demos.fluid.PBF.simulation import reset_simulation, reverse_gravity
+from tests.fluid.pbf.solver_fixture import bind_solver, self_neighbor
 
 
 CONFIG = PBFConfig(
@@ -37,9 +38,10 @@ class ControlsTest(unittest.TestCase):
             empty_sdf = wp.Volume.allocate([0, 0, 0], [0, 0, 0], 1.0, bg_value=10.0,
                                            translation=(100.0, 100.0, 100.0), device=self.device)
             with patch.object(solver.boundary_model, "load_static_sdf", return_value=empty_sdf):
-                return solver.Example(stage_path=None, config=config)
+                return solver.PBF(stage_path=None, config=config)
 
     def step(self, sim, count=1):
+        bind_solver(sim.config, sim.grid, sim.static_sdf, sim.volume_map)
         with wp.ScopedDevice(self.device), contextlib.redirect_stdout(io.StringIO()):
             for _ in range(count):
                 sim.step()
@@ -59,10 +61,9 @@ class ControlsTest(unittest.TestCase):
         sim = self.make_simulation()
         initial = sim.pos.numpy()
         gravity = tuple(sim.gravity)
-        buffer_names = ("pos", "v", "pre_Pos", "pre_New", "delta_Pos",
-                        "lambda_Opt", "delta_Vel", "curl")
-        buffers = tuple(getattr(sim, name) for name in buffer_names)
-        pointers = tuple(buffer.ptr for buffer in buffers)
+        buffer_names = ("pos", "v", "pre_Pos", "delta_Pos", "lambda_Opt",
+                        "delta_Vel", "curl", "temp_pos", "temp_pPos")
+        allocation_pool = {getattr(sim, name).ptr for name in buffer_names}
         grid, sdf = sim.grid, sim.static_sdf
         sim.renderer = renderer = object()
         reverse_gravity(sim)
@@ -76,6 +77,8 @@ class ControlsTest(unittest.TestCase):
         reverse_gravity(sim)
         np.testing.assert_array_equal(sim.pos.numpy(), expected_pos)
         np.testing.assert_array_equal(sim.v.numpy(), expected_vel)
+        # Steps may swap position buffers; reset must preserve the current bindings.
+        pointers = tuple(getattr(sim, name).ptr for name in buffer_names)
         with wp.ScopedDevice("cpu"), \
                 patch.object(solver.boundary_model, "load_static_sdf",
                              side_effect=AssertionError("Reset reloaded SDF")):
@@ -86,12 +89,14 @@ class ControlsTest(unittest.TestCase):
         self.assertEqual(sim.sim_time, 0)
         self.assertEqual(tuple(sim.gravity), gravity)
         self.assertEqual(tuple(getattr(sim, name).ptr for name in buffer_names), pointers)
+        self.assertEqual({getattr(sim, name).ptr for name in buffer_names}, allocation_pool)
         self.assertIs(sim.grid, grid)
         self.assertIs(sim.static_sdf, sdf)
         self.assertIs(sim.renderer, renderer)
         np.testing.assert_array_equal(sim.pos.numpy(), initial)
-        for buffer in buffers[1:]:
-            np.testing.assert_array_equal(buffer.numpy(), 0)
+        for name in ("v", "pre_Pos", "delta_Pos", "lambda_Opt", "delta_Vel", "curl"):
+            np.testing.assert_array_equal(getattr(sim, name).numpy(), 0)
+        np.testing.assert_array_equal(sim.n_Cache.NeighborCount.numpy(), 0)
         self.step(sim, 5)
         np.testing.assert_array_equal(sim.pos.numpy(), expected_pos)
         np.testing.assert_array_equal(sim.v.numpy(), expected_vel)
@@ -134,11 +139,13 @@ class ControlsTest(unittest.TestCase):
             grid = wp.HashGrid(8, 8, 8)
             grid.build(pos, sim.support_radius)
             result = wp.zeros(1, dtype=float)
+            neighbors = self_neighbor(self.device)
             values = []
             for clamp in (1, 0):
+                bind_solver(replace(CONFIG, clamp_negative_pressure=bool(clamp)),
+                            grid, sim.static_sdf, sim.volume_map)
                 wp.launch(solver.calc_lambda, 1,
-                          inputs=[grid.id, sim.support_radius, pos, pos, clamp,
-                                  sim.static_sdf.id, sim.volume_map.id], outputs=[result])
+                          inputs=[pos, neighbors], outputs=[result])
                 values.append(float(result.numpy()[0]))
         self.assertEqual(values[0], 0)
         self.assertGreater(values[1], 0)
@@ -157,6 +164,7 @@ class ControlsTest(unittest.TestCase):
         import pyglet
         key = pyglet.window.key
         sim = self.make_simulation()
+        bind_solver(sim.config, sim.grid, sim.static_sdf, sim.volume_map)
         initial = sim.pos.numpy()
         events = (None, key.G, key.R, key.R, key.SPACE, key.SPACE, None, key.P)
         states = []

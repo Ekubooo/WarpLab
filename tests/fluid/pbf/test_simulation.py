@@ -34,8 +34,8 @@ class SimulationResetTest(unittest.TestCase):
             sim.lambda_Opt = wp.full(sim.n, 9.0, dtype=float)
             sim.curl = wp.full(sim.n, wp.vec4(9.0), dtype=wp.vec4)
             sim.n_Cache = fn.NeighborCache()
-            sim.n_Cache.NP_Count = wp.full(sim.n, 3, dtype=int)
-            sim.n_Cache.NP_Array = wp.full((16, sim.n), 7, dtype=int)
+            sim.n_Cache.NeighborCount = wp.full(sim.n, 3, dtype=int)
+            sim.n_Cache.CacheBuffer = wp.full((16, sim.n), 7, dtype=int)
             sim.grid = wp.HashGrid(8, 8, 8)
 
         expected = np.array([
@@ -44,7 +44,7 @@ class SimulationResetTest(unittest.TestCase):
         ], dtype=np.float32)
         zero_names = ("v", "pre_Pos", "delta_Pos", "lambda_Opt", "delta_Vel", "curl")
         resources = (sim.config, sim.grid, sim.static_sdf, sim.volume_map, sim.renderer)
-        cache_pointers = (sim.n_Cache.NP_Count.ptr, sim.n_Cache.NP_Array.ptr)
+        cache_pointers = (sim.n_Cache.NeighborCount.ptr, sim.n_Cache.CacheBuffer.ptr)
 
         # The helper module also contains the reorder kernel, whose grid id must resolve.
         with patch.object(fn, "GRID_id", wp.constant(wp.uint64(sim.grid.id)), create=True):
@@ -54,7 +54,7 @@ class SimulationResetTest(unittest.TestCase):
                 sim.pre_Pos, sim.temp_pPos = sim.temp_pPos, sim.pre_Pos
                 for name in ("pos",) + zero_names:
                     getattr(sim, name).fill_(9)
-                sim.n_Cache.NP_Count.fill_(3)
+                sim.n_Cache.NeighborCount.fill_(3)
                 reverse_gravity(sim)
                 sim.sim_time = 12.0
                 names = ("pos",) + zero_names + ("temp_pos", "temp_pPos")
@@ -68,12 +68,12 @@ class SimulationResetTest(unittest.TestCase):
                 np.testing.assert_allclose(sim.pos.numpy(), expected, rtol=0, atol=1e-7)
                 for name in zero_names:
                     np.testing.assert_array_equal(getattr(sim, name).numpy(), 0)
-                np.testing.assert_array_equal(sim.n_Cache.NP_Count.numpy(), 0)
-                np.testing.assert_array_equal(sim.n_Cache.NP_Array.numpy(), 7)
+                np.testing.assert_array_equal(sim.n_Cache.NeighborCount.numpy(), 0)
+                np.testing.assert_array_equal(sim.n_Cache.CacheBuffer.numpy(), 7)
                 self.assertEqual(sim.sim_time, 0)
                 self.assertEqual(tuple(sim.gravity), tuple(wp.vec3(*config.gravity)))
                 self.assertEqual(tuple(getattr(sim, name).ptr for name in names), pointers)
-                self.assertEqual((sim.n_Cache.NP_Count.ptr, sim.n_Cache.NP_Array.ptr), cache_pointers)
+                self.assertEqual((sim.n_Cache.NeighborCount.ptr, sim.n_Cache.CacheBuffer.ptr), cache_pointers)
                 for current, original in zip(
                     (sim.config, sim.grid, sim.static_sdf, sim.volume_map, sim.renderer), resources
                 ):

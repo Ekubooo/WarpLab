@@ -12,7 +12,7 @@
 ## 已确认实施约定
 
 - 网格检查与离线烘焙位于 `boundary/mesh_validation.py`、`boundary/sdf_baker.py`；`boundary_model.py` 提供固定路径加载和设备采样辅助函数，不使用 helper 模块全局 SDF 变量。
-- 两个入口选定设备后创建仿真实例，由 `Example.__init__()` 调用固定路径加载函数，并以 `self.static_sdf` 持有完整 `wp.Volume`；入口不再重复加载。`Example` 与 `create_pbf_simulation` 保留原签名，不增加边界参数；实例只读盘、不负责烘焙，`reset()` 不重新加载。直接创建实例同样需要有效的 SDF 文件和 CUDA。
+- 两个入口选定设备后创建仿真实例，由 `PBF.__init__()` 调用固定路径加载函数，并以 `self.static_sdf` 持有完整 `wp.Volume`；入口不再重复加载。`PBF` 与 `create_pbf_simulation` 保留原签名，不增加边界参数；实例只读盘、不负责烘焙，`reset()` 不重新加载。直接创建实例同样需要有效的 SDF 文件和 CUDA。
 - 离线输入裸文件名从 `PBF/Assets/Container` 解析，含目录的相对路径按工作目录解析；输出为 `PBF/Assets/Boundary/<stem>.nvdb`。运行时直接读取 `STATIC_SDF_PATH`，不改变 PBFConfig 或物理参数 JSON；文件缺失或损坏即报错。其他文件名烘焙后需手动修改固定路径。
 - 离线缓存命中时直接加载，不读取 OBJ、不校验源内容/参数/哈希、不生成 sidecar。错误缓存报错，通过 `SDFOptions(force_rebuild=True)` 显式重建。缺失或强制重建时先检查后烘焙，成功后原子保存。
 - `.nvdb` 是磁盘序列化格式；`wp.Volume` 持有其 GPU NanoVDB 数据和查询 id。实例的 `self.static_sdf` 必须保留完整 Volume，不能只存整数 id。

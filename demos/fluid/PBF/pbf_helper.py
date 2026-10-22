@@ -71,12 +71,12 @@ class PBFConfig:
 
 @wp.struct
 class NeighborCache:
-    NP_Count: wp.array[int]
-    NP_Array: wp.array2d[int]
+    NeighborCount: wp.array[int]
+    CacheBuffer: wp.array2d[int]
 
     def allocateNCache(self, pNum, nCap): 
-        self.NP_Count = wp.zeros(pNum, dtype=int)
-        self.NP_Array = wp.zeros((nCap, pNum), dtype=int)
+        self.NeighborCount = wp.zeros(pNum, dtype=int)
+        self.CacheBuffer = wp.zeros((nCap, pNum), dtype=int)
         # (nb_cache, p_num) shape is good for mem access.
 
         return self

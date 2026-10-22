@@ -9,6 +9,7 @@ import warp as wp
 
 from demos.fluid.PBF import boundary_model as boundary
 from demos.fluid.PBF import pbf_helper as fn
+from tests.fluid.pbf.solver_fixture import bind_solver, self_neighbor
 
 
 @wp.kernel
@@ -256,15 +257,17 @@ class VolumeMapGPUTests(unittest.TestCase):
         positions = wp.array([[0.15, 0.0125, 0.15]], dtype=wp.vec3, device=self.device)
         grid = wp.HashGrid(16, 16, 16, device=self.device)
         grid.build(positions, radius)
+        neighbors = self_neighbor(self.device)
+        bind_solver(sim.config, grid, sdf, volume_map)
         lambdas = wp.empty(1, dtype=float, device=self.device)
         corrections = wp.empty(1, dtype=wp.vec3, device=self.device)
 
         def solve():
             wp.launch(solver.calc_lambda, 1,
-                      inputs=[grid.id, radius, positions, positions, 1, sdf.id, volume_map.id],
+                      inputs=[positions, neighbors],
                       outputs=[lambdas], device=self.device)
             wp.launch(solver.calc_deltaPos, 1,
-                      inputs=[grid.id, radius, positions, positions, lambdas, sdf.id, volume_map.id],
+                      inputs=[positions, lambdas, neighbors],
                       outputs=[corrections], device=self.device)
             return lambdas.numpy()[0], corrections.numpy()[0]
 
@@ -289,7 +292,7 @@ class VolumeMapGPUTests(unittest.TestCase):
         # An externally nonzero lambda must still produce zero boundary motion.
         lambdas.fill_(-0.1)
         wp.launch(solver.calc_deltaPos, 1,
-                  inputs=[grid.id, radius, positions, positions, lambdas, sdf.id, volume_map.id],
+                  inputs=[positions, lambdas, neighbors],
                   outputs=[corrections], device=self.device)
         np.testing.assert_array_equal(corrections.numpy(), [[0, 0, 0]])
 

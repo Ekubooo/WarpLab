@@ -44,13 +44,13 @@ def cache_neighbors(
 
     while wp.hash_grid_query_next(query, loop_index):
         j = fn.sorted_index(query)
-        cap = NCache.NP_Array.shape[0]
+        cap = NCache.CacheBuffer.shape[0]
         if wp.length_sq(pos[i] - pos[j]) < R2:
             if fluid_count < cap :
-                NCache.NP_Array[fluid_count, i] = j
+                NCache.CacheBuffer[fluid_count, i] = j
             fluid_count += 1
 
-    NCache.NP_Count[i] = wp.min(fluid_count, cap)
+    NCache.NeighborCount[i] = wp.min(fluid_count, cap)
    
 @wp.kernel
 def calc_lambda(
@@ -67,8 +67,8 @@ def calc_lambda(
     i = wp.tid()
     currPos = pre_Pos[i]   
 
-    for k in range(Neighbor.NP_Count[i]):
-        nIndex = Neighbor.NP_Array[k, i]
+    for k in range(Neighbor.NeighborCount[i]):
+        nIndex = Neighbor.CacheBuffer[k, i]
         NPos = pre_Pos[nIndex]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
@@ -116,8 +116,8 @@ def calc_deltaPos(
     delta_Movement = wp.vec3(0,0,0)
     pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for k in range(Neighbor.NP_Count[i]):
-        nIndex = Neighbor.NP_Array[k, i]
+    for k in range(Neighbor.NeighborCount[i]):
+        nIndex = Neighbor.CacheBuffer[k, i]
         if nIndex == i: 
             continue
         NPos = pre_Pos[nIndex]
@@ -199,8 +199,8 @@ def calc_curl(
     omega_i = wp.vec3(0,0,0)
     volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for k in range(Neighbor.NP_Count[i]):
-        nIndex = Neighbor.NP_Array[k, i]
+    for k in range(Neighbor.NeighborCount[i]):
+        nIndex = Neighbor.CacheBuffer[k, i]
         if nIndex == i: 
             continue
         NPos = pre_Pos[nIndex]
@@ -235,8 +235,8 @@ def calc_visvor(
     vel_corr = wp.vec3(0,0,0)
     volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for k in range(Neighbor.NP_Count[i]):
-        nIndex = Neighbor.NP_Array[k, i]
+    for k in range(Neighbor.NeighborCount[i]):
+        nIndex = Neighbor.CacheBuffer[k, i]
         if nIndex == i: 
             continue
         NPos = pre_Pos[nIndex]
@@ -286,7 +286,7 @@ def update_velocity(
 
 
 # //////////////////////////////////////////////////////////////////////////////
-class Example:
+class PBF:
     def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None):
         self.verbose = verbose
         self.sim_time = 0.0
@@ -467,7 +467,7 @@ def main():
         return
 
     with wp.ScopedDevice(args.device):
-        example = Example(
+        example = PBF(
             stage_path=args.stage_path, verbose=args.verbose,
             config=args.config,
         )

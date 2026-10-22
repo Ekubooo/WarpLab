@@ -24,6 +24,7 @@ from demos.fluid.PBF import PBF as solver
 from demos.fluid.PBF import render_opengl as frontend
 from demos.fluid.PBF.simulation import create_pbf_simulation, reset_simulation
 from demos.fluid.PBF.pbf_helper import PBFConfig
+from tests.fluid.pbf.solver_fixture import bind_solver
 
 
 @wp.kernel
@@ -87,7 +88,7 @@ class BoundaryInterfaceTest(unittest.TestCase):
                     frontend.load_static_scene()
 
     def test_minimal_signatures_and_removed_baking_options(self):
-        self.assertEqual(list(inspect.signature(solver.Example).parameters),
+        self.assertEqual(list(inspect.signature(solver.PBF).parameters),
                          ["stage_path", "verbose", "config"])
         self.assertEqual(list(inspect.signature(create_pbf_simulation).parameters),
                          ["verbose", "config"])
@@ -174,7 +175,7 @@ class BoundaryInterfaceTest(unittest.TestCase):
 
     def test_constructor_owns_volume_until_instance_is_released(self):
         class Resource:
-            pass
+            id = 1
         refs = []
         def load(filename=None, *, device):
             resource = Resource()
@@ -187,7 +188,7 @@ class BoundaryInterfaceTest(unittest.TestCase):
                 patch.object(wp, "get_device", return_value=device), \
                 patch.object(boundary, "load_static_sdf", side_effect=load) as loading, \
                 patch.object(boundary, "precompute_volumeMap", return_value=Resource()) as precomputing:
-            sim = solver.Example(stage_path=None)
+            sim = solver.PBF(stage_path=None)
         loading.assert_called_once_with(solver.SDF_FILENAME, device=device)
         precomputing.assert_called_once_with(sim.static_sdf, sim.smoothing_length)
         # Mock call history must not hold the SDF alive after the instance dies.
@@ -202,7 +203,7 @@ class BoundaryInterfaceTest(unittest.TestCase):
         for entry in (solver, frontend):
             args = entry.parse_args(["--num-frames", "1"])
             if entry is solver:
-                constructor = "Example"
+                constructor = "PBF"
                 fake = SimpleNamespace(renderer=None, render=Mock(), step=Mock())
             else:
                 constructor = "create_pbf_simulation"
@@ -257,7 +258,7 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                 with patch.object(boundary, "ASSET_DIR", root), \
                         patch.object(solver, "SDF_FILENAME", path.name), \
                         patch.object(sdf_baker, "load_or_bake_sdf", side_effect=AssertionError("Startup baked")):
-                    sim = solver.Example(stage_path=None, config=config)
+                    sim = solver.PBF(stage_path=None, config=config)
                 volume_ref = weakref.ref(sim.static_sdf)
                 self.assertIsInstance(sim.static_sdf, wp.Volume)
                 self.assertAlmostEqual(sim.static_sdf.get_voxel_size()[0], 0.05, places=6)
@@ -303,13 +304,16 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                 self.assertIs(other.static_sdf, other_volume)
                 # These world coordinates must project against the unshifted Volume.
                 projected = wp.array([[0.79, 0.1, 0.2], [0.82, 0.1, 0.2], [-0.82, 0.1, 0.2]], dtype=wp.vec3)
+                bind_solver(sim.config, sim.grid, volume, sim.volume_map)
                 wp.launch(solver.update_prePos, dim=3,
-                          inputs=[sim.boundary, wp.zeros(3, dtype=wp.vec3), sim.particle_radius, volume.id],
+                          inputs=[wp.zeros(3, dtype=wp.vec3)],
                           outputs=[projected])
                 np.testing.assert_allclose(projected.numpy(),
                                            [[0.75, 0.1, 0.2], [0.75, 0.1, 0.2], [-0.75, 0.1, 0.2]], atol=2e-5)
                 for _ in range(2):
+                    bind_solver(sim.config, sim.grid, sim.static_sdf, sim.volume_map)
                     sim.step()
+                    bind_solver(other.config, other.grid, other.static_sdf, other.volume_map)
                     other.step()
                 self.assertTrue(np.isfinite(sim.pos.numpy()).all())
                 self.assertTrue(np.isfinite(sim.v.numpy()).all())
