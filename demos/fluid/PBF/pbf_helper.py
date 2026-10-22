@@ -19,9 +19,9 @@ class PBFConfig:
 
     particle_radius: float = 0.0125
     rest_density: float = 1000.0
-    frame_dt: float = 1.0 / 90.0
+    frame_dt: float = 1.0 / 120.0
     substeps: int = 3
-    pressure_iterations: int = 2
+    pressure_iterations: int = 3
     lambda_regularization: float = 2.0
     gravity: tuple = (0.0, -9.81, 0.0)
     viscosity: float = 0.25
@@ -69,13 +69,24 @@ class PBFConfig:
         if np.any(start < 0.0) or np.any(end > size) or np.any(end <= start):
             raise ValueError("Fluid block must have positive size and lie inside the container")
 
+@wp.struct
+class NeighborCache:
+    NP_Count: wp.array[int]
+    NP_Array: wp.array2d[int]
+
+    def allocateNCache(self, pNum, nCap): 
+        self.NP_Count = wp.zeros(pNum, dtype=int)
+        self.NP_Array = wp.zeros((nCap, pNum), dtype=int)
+        # (nb_cache, p_num) shape is good for mem access.
+
+        return self
 
 @wp.kernel
-def _initialize_particles_kernel(
-    positions: wp.array[wp.vec3],
+def init_particles(
     block_start: wp.vec3,
     spacing: float,
-    block_counts: wp.vec3i
+    block_counts: wp.vec3i,
+    positions: wp.array[wp.vec3]
 ):
     tid = wp.tid()
     # One thread per particle; Z varies fastest, then Y, then X.
@@ -84,6 +95,18 @@ def _initialize_particles_kernel(
     x = tid // (block_counts[1] * block_counts[2])
     offset = spacing * wp.vec3(float(x + 1), float(y + 1), float(z + 1))
     positions[tid] = block_start + offset
+
+@wp.kernel
+def by_cache_reordering(
+    pos: wp.array(dtype=wp.vec3),
+    pre_Pos: wp.array(dtype=wp.vec3),
+    pos_temp: wp.array(dtype=wp.vec3),
+    pPos_temp: wp.array(dtype=wp.vec3)
+):
+    id = wp.tid()
+    ori_index = wp.hash_grid_point_id(GRID_id, id)
+    pos_temp[id] = pos[ori_index]
+    pPos_temp[id] = pre_Pos[ori_index]
 
 
 def compute_hash_grid_dims(container_min, container_max, cell_width):
@@ -156,6 +179,7 @@ def init_parameters(sim):
     Fluid_Mass = wp.constant(fluid_mass)
     Particle_Radius =  wp.constant(float(sim.particle_radius))
     Smoothing_Radius = wp.constant(float(sim.smoothing_length))
+
     # Lambda has units of length squared; scale tensile strength accordingly.
     S_corr_K = wp.constant(config.artificial_pressure_strength * sim.support_radius**2)
     S_corr_Q = wp.constant(config.artificial_pressure_q)
@@ -195,6 +219,7 @@ def init_parameters(sim):
         raise ValueError("Fluid block must fit at least one particle on every axis")
     sim.block_counts = wp.vec3i(*(int(count) for count in counts))
     sim.n = int(np.prod(counts))
+    sim.neighborCapacity = int(192)
 
     # Validate dimensions before allocating any device storage.
     sim.hash_grid_dims = compute_hash_grid_dims(
@@ -204,40 +229,74 @@ def init_parameters(sim):
 
 def init_device_buffers(sim):
     """Allocate particle and work arrays before the initialization kernel runs."""
-    sim.pos = wp.empty(sim.n, dtype=wp.vec3)
+    sim.pos         = wp.empty(sim.n, dtype=wp.vec3)
+    sim.v           = wp.zeros(sim.n, dtype=wp.vec3)
+    sim.pre_Pos     = wp.zeros(sim.n, dtype=wp.vec3)
+    sim.delta_Pos   = wp.zeros(sim.n, dtype=wp.vec3)
+    sim.lambda_Opt  = wp.zeros(sim.n, dtype=float)
+    sim.delta_Vel   = wp.zeros(sim.n, dtype=wp.vec3)
+    sim.curl        = wp.zeros(sim.n, dtype=wp.vec4)
 
-    sim.v = wp.zeros(sim.n, dtype=wp.vec3)
-    sim.pre_Pos = wp.zeros(sim.n, dtype=wp.vec3)
-    sim.pre_New = wp.zeros(sim.n, dtype=wp.vec3)
-    sim.delta_Pos = wp.zeros(sim.n, dtype=wp.vec3)
-    sim.lambda_Opt = wp.zeros(sim.n, dtype=float)
+    # reorder
+    sim.temp_pos    = wp.zeros(sim.n, dtype=wp.vec3)
+    sim.temp_pPos   = wp.zeros(sim.n, dtype=wp.vec3)
+    
 
-    sim.delta_Vel = wp.zeros(sim.n, dtype=wp.vec3)
-    sim.curl = wp.zeros(sim.n, dtype=wp.vec4)
+    # Neighbor Cache
+    sim.n_Cache = NeighborCache().allocateNCache(
+        sim.n, 
+        sim.neighborCapacity, 
+    )
 
-    sim.grid = wp.HashGrid(*sim.hash_grid_dims)
+    # Special Hash Grid
     global GRID_id 
+    sim.grid = wp.HashGrid(*sim.hash_grid_dims)
     GRID_id = wp.constant(wp.uint64(sim.grid.id))
 
-    init_particles(sim)
-
-
-def init_particles(sim):
-    """Restore the initial lattice without reallocating particle storage."""
+    # pos init
     wp.launch(
-        kernel=_initialize_particles_kernel,
+        kernel=init_particles,
         dim=sim.n,
         inputs=[
-            sim.pos,
             wp.vec3(*sim.config.block_start),
             sim.particle_spacing,
             sim.block_counts
+        ],
+        outputs=[sim.pos]
+    )
+
+
+def buffer_reorder(sim):
+    wp.launch(
+        kernel=by_cache_reordering,
+        dim=sim.n,
+        inputs=[
+            sim.pos,
+            sim.pre_Pos,
+        ],
+        outputs=[            
+            sim.temp_pos,
+            sim.temp_pPos,
         ]
     )
+
+    sim.pos, sim.temp_pos = sim.temp_pos, sim.pos
+    sim.pre_Pos, sim.temp_pPos = sim.temp_pPos, sim.pre_Pos
 
 
 # //////////////////////////////////////////////////////////////////////////////
 # calculate function
+
+@wp.func_native("return query.cell_index - 1;")
+def sorted_index(query: wp.HashGridQuery) -> int:
+    """Read the sorted slot immediately after a successful hash_grid_query_next.
+
+    Warp 1.15 increments its internal cell_index when yielding the input point
+    index. Use the slot for particle state gathered in the same build's hash
+    order. Recheck this internal field when upgrading Warp.
+    """
+    ...
+
 
 @wp.func
 def square(x: float):
@@ -437,6 +496,7 @@ def query_volume_boundary(sdf_id: wp.uint64, position: wp.vec3, support_radius: 
     valid, distance, normal = query_sdf_normal(sdf_id, position)
     if not valid or distance <= 0.0 or distance >= support_radius:
         return False, 0.0, wp.vec3(0.0)
+    
     # PBF uses support_radius = 4 * particle_radius. Keep the equivalent
     # boundary point at least one particle diameter away to limit pressure.
     pressure_distance = wp.max(distance + 0.125 * support_radius, 0.5 * support_radius)

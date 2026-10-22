@@ -1,4 +1,4 @@
-"""Simulation creation and state control for the Warp PBF example."""
+"""Connect the PBF frontend to simulation creation, gravity and reset controls."""
 
 import warp as wp
 
@@ -21,14 +21,26 @@ def reverse_gravity(sim: PBFExample) -> None:
 
 
 def reset_simulation(sim: PBFExample) -> None:
-    """Restore startup state in place, preserving simulation and render resources."""
+    """Restore the startup lattice and zero velocity without reallocating resources."""
     with wp.ScopedDevice(sim.pos.device):
-        fn.init_particles(sim)
+        wp.launch(
+            kernel=fn.init_particles,
+            dim=sim.n,
+            inputs=[
+                wp.vec3(*sim.config.block_start),
+                sim.particle_spacing,
+                sim.block_counts,
+            ],
+            outputs=[sim.pos],
+            device=sim.pos.device,
+        )
         for buffer in (
-            sim.v, sim.pre_Pos, sim.pre_New, sim.delta_Pos,
+            sim.v, sim.pre_Pos, sim.delta_Pos,
             sim.lambda_Opt, sim.delta_Vel, sim.curl,
         ):
             buffer.zero_()
+        # Neighbor slots are ignored until the next step rebuilds their counts.
+        sim.n_Cache.NP_Count.zero_()
         sim.gravity = wp.vec3(*sim.config.gravity)
         sim.sim_time = 0.0
         sim.grid.build(sim.pos, sim.smoothing_length)

@@ -19,7 +19,6 @@ def apply_predict(
     dt: float,
     gravity: wp.vec3,
     prePos: wp.array[wp.vec3],
-    preNew: wp.array[wp.vec3],
     vel: wp.array[wp.vec3]
 ):
     tid = wp.tid()
@@ -31,31 +30,32 @@ def apply_predict(
     vel[tid] = v_new
     predicit = pos[tid] + dt * v_new
     prePos[tid] = predicit
-    preNew[tid] = predicit
 
 @wp.kernel
-def volume_query(
-    sdf_id: wp.uint64,
-    vmap_id: wp.uint64, 
-    pre_Pos: wp.array[wp.vec3],
-    Smoothing_Radius: wp.float32
+def cache_neighbors(
+    pos: wp.array(dtype=wp.vec3),
+    NCache: fn.NeighborCache,
 ):
-    tid = wp.tid()
-    grad = wp.vec3(0,0,0)
-    currPos = pre_Pos[tid]
+    i = wp.tid()
+    fluid_count = wp.int(0)
+    R2 = fn.Smoothing_Radius * fn.Smoothing_Radius
+    query = wp.hash_grid_query(fn.GRID_id, pos[i], fn.Smoothing_Radius)
+    loop_index = int(0)
 
-    index = wp.volume_world_to_index(sdf_id, currPos)
-    dValue = wp.volume_sample_grad_f(sdf_id, index, wp.Volume.LINEAR, grad)
-    if dValue < Smoothing_Radius:
-        x_proj = currPos + wp.normalize(grad) * dValue
-        vm_index = wp.volume_world_to_index(sdf_id, x_proj)
-        vmapValue = wp.volume_sample_f(vmap_id, vm_index, wp.Volume.LINEAR)
-    
+    while wp.hash_grid_query_next(query, loop_index):
+        j = fn.sorted_index(query)
+        cap = NCache.NP_Array.shape[0]
+        if wp.length_sq(pos[i] - pos[j]) < R2:
+            if fluid_count < cap :
+                NCache.NP_Array[fluid_count, i] = j
+            fluid_count += 1
 
+    NCache.NP_Count[i] = wp.min(fluid_count, cap)
+   
 @wp.kernel
 def calc_lambda(
     pre_Pos: wp.array[wp.vec3],
-    pre_New: wp.array[wp.vec3],
+    Neighbor: fn.NeighborCache,
     lambda_Opt: wp.array[float]
 ):
     density = float(0.0)
@@ -64,19 +64,14 @@ def calc_lambda(
     grad_i = wp.vec3(0,0,0)
     pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    # id of particle that order by hash/bucket/gridIndex(not "grid id")
-    tid = wp.tid()
-    i = wp.hash_grid_point_id(fn.GRID_id, tid)
-    qurryPos = pre_New[i]    # Snapshot
+    i = wp.tid()
     currPos = pre_Pos[i]   
-    neighbors = wp.hash_grid_query(fn.GRID_id, qurryPos, fn.Smoothing_Radius)
 
-    for index in neighbors:
-        NPos = pre_Pos[index]
+    for k in range(Neighbor.NP_Count[i]):
+        nIndex = Neighbor.NP_Array[k, i]
+        NPos = pre_Pos[nIndex]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > fn.square(fn.Smoothing_Radius):
-            continue
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
         # Self density is included by the grid query; its zero gradient is harmless.
@@ -84,9 +79,8 @@ def calc_lambda(
         currGrad = dir2N * pressure_scale * fn.DPow3(dst2N, fn.Smoothing_Radius)
 
         grad_i += currGrad
-        if index!=i : 
+        if nIndex!=i : 
             grad_j += wp.dot(currGrad, currGrad)
-        # do something.
 
     # volume map query
     valid_boundary, projDst, dirVM = fn.query_volume_boundary(SDF_id, currPos, fn.Smoothing_Radius)
@@ -108,15 +102,12 @@ def calc_lambda(
 @wp.kernel
 def calc_deltaPos(
     pre_Pos: wp.array[wp.vec3],
-    pre_New: wp.array[wp.vec3],
     lambda_Opt: wp.array[float],
+    Neighbor: fn.NeighborCache,
     delta_Pos: wp.array[wp.vec3]
 ):
-    tid = wp.tid()
-    i = wp.hash_grid_point_id(fn.GRID_id, tid)
+    i = wp.tid()
     currPos = pre_Pos[i]
-    qurryPos = pre_New[i]    # Snapshot
-    neighbors = wp.hash_grid_query(fn.GRID_id, qurryPos, fn.Smoothing_Radius)
 
     # data
     delta_Q = fn.S_corr_Q * fn.Smoothing_Radius
@@ -125,14 +116,13 @@ def calc_deltaPos(
     delta_Movement = wp.vec3(0,0,0)
     pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for index in neighbors:
-        if index == i: 
+    for k in range(Neighbor.NP_Count[i]):
+        nIndex = Neighbor.NP_Array[k, i]
+        if nIndex == i: 
             continue
-        NPos = pre_Pos[index]
+        NPos = pre_Pos[nIndex]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > fn.square(fn.Smoothing_Radius):
-            continue
 
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
@@ -143,7 +133,7 @@ def calc_deltaPos(
         x4 = x2 * x2 
         S_corr = -fn.S_corr_K * x4
 
-        lambda_j = lambda_Opt[index]
+        lambda_j = lambda_Opt[nIndex]
         lambda_Sum = lambda_i + lambda_j + S_corr
         currGrad = dir2N * fn.DPow3(dst2N, fn.Smoothing_Radius)
         delta_Movement -= lambda_Sum * currGrad
@@ -166,7 +156,6 @@ def calc_deltaPos(
 def update_prePos(
     delta_Pos: wp.array[wp.vec3],
     pre_Pos: wp.array[wp.vec3]
-
 ):
     # can this kernel fusion into last kernel?
     tid = wp.tid()
@@ -199,31 +188,29 @@ def update_position(
 def calc_curl(
     pre_Pos: wp.array[wp.vec3],
     vel: wp.array[wp.vec3],
+    Neighbor: fn.NeighborCache,
     curl: wp.array[wp.vec4]
 ):
-    tid = wp.tid()
-    i = wp.hash_grid_point_id(fn.GRID_id, tid)
+    i = wp.tid()
     currPos = pre_Pos[i]
-    neighbors = wp.hash_grid_query(fn.GRID_id, currPos, fn.Smoothing_Radius)
 
     # data
     currVel = vel[i]
     omega_i = wp.vec3(0,0,0)
     volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for index in neighbors:
-        if index == i: 
+    for k in range(Neighbor.NP_Count[i]):
+        nIndex = Neighbor.NP_Array[k, i]
+        if nIndex == i: 
             continue
-        NPos = pre_Pos[index]
+        NPos = pre_Pos[nIndex]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > fn.square(fn.Smoothing_Radius):
-            continue
         dst2N = wp.sqrt(sqrD2N)
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
 
         # curl
-        NVel = vel[index]
+        NVel = vel[nIndex]
         Vel_ij = NVel - currVel
         omega_i += volume_scale * wp.cross(Vel_ij, dir2N * fn.DPow3(dst2N, fn.Smoothing_Radius))
 
@@ -235,12 +222,11 @@ def calc_visvor(
     pre_Pos: wp.array[wp.vec3],
     vel: wp.array[wp.vec3],
     curl: wp.array[wp.vec4],
+    Neighbor: fn.NeighborCache,
     delta_Vel: wp.array[wp.vec3]
 ):
-    tid = wp.tid()
-    i = wp.hash_grid_point_id(fn.GRID_id, tid)
+    i = wp.tid()
     currPos = pre_Pos[i]
-    neighbors = wp.hash_grid_query(fn.GRID_id, currPos, fn.Smoothing_Radius)
 
     # data
     currVel = vel[i]
@@ -249,10 +235,11 @@ def calc_visvor(
     vel_corr = wp.vec3(0,0,0)
     volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for index in neighbors:
-        if index == i: 
+    for k in range(Neighbor.NP_Count[i]):
+        nIndex = Neighbor.NP_Array[k, i]
+        if nIndex == i: 
             continue
-        NPos = pre_Pos[index]
+        NPos = pre_Pos[nIndex]
         O2N = NPos - currPos
         sqrD2N = wp.dot(O2N, O2N)
         if sqrD2N > fn.square(fn.Smoothing_Radius):
@@ -261,9 +248,9 @@ def calc_visvor(
         dir2N = O2N/dst2N if dst2N > 0 else wp.vec3(0,0,0)
 
         # calc
-        NVel = vel[index]
+        NVel = vel[nIndex]
         Vel_ij = NVel - currVel
-        NCurl = curl[index]
+        NCurl = curl[nIndex]
         currGrad = fn.DPow3(dst2N, fn.Smoothing_Radius)
 
         # voricity
@@ -299,8 +286,6 @@ def update_velocity(
 
 
 # //////////////////////////////////////////////////////////////////////////////
-
-
 class Example:
     def __init__(self, stage_path="example_pbf.usd", verbose=False, config=None):
         self.verbose = verbose
@@ -327,19 +312,26 @@ class Example:
         with wp.ScopedTimer("sub-step", synchronize=True):
             # 3 substep: (or more)
             for _ in range(self.substep):
-                # Prologue
-                with wp.ScopedTimer("Init and SHGrid", active=self.verbose):
+                with wp.ScopedTimer("Prologue", active=self.verbose):
                     # apply and predict
                     wp.launch(
                         kernel=apply_predict,
                         dim=self.n,
                         inputs=[self.pos, self.dt, self.gravity],
-                        outputs= [self.pre_Pos, self.pre_New, self.v]
+                        outputs= [self.pre_Pos, self.v]
                     )
-                    self.grid.build(self.pre_New, self.smoothing_length)
+                    
+                    # hash grid, reorder and cache neighbor
+                    self.grid.build(self.pre_Pos, self.smoothing_length)
+                    fn.buffer_reorder(self)
+                    wp.launch(
+                        kernel=cache_neighbors,
+                        dim=self.n,
+                        inputs=[self.pre_Pos],
+                        outputs=[self.n_Cache]
+                    )
 
-                # Solver
-                with wp.ScopedTimer("Core Iterations", active=self.verbose):
+                with wp.ScopedTimer("Solver", active=self.verbose):
                     # iterations per substep
                     for i in range(self.iterations):
                         wp.launch(
@@ -347,7 +339,7 @@ class Example:
                             dim=self.n,
                             inputs=[
                                 self.pre_Pos,
-                                self.pre_New,
+                                self.n_Cache
                             ],
                             outputs=[self.lambda_Opt]
                         )
@@ -356,8 +348,8 @@ class Example:
                             dim=self.n,
                             inputs=[
                                 self.pre_Pos, 
-                                self.pre_New,
-                                self.lambda_Opt
+                                self.lambda_Opt,
+                                self.n_Cache
                             ],
                             outputs=[self.delta_Pos]
                         )
@@ -368,8 +360,7 @@ class Example:
                             outputs=[self.pre_Pos]
                         )
 
-                # Epilogue
-                with wp.ScopedTimer("Update with effect", active=self.verbose):
+                with wp.ScopedTimer("Epilogue", active=self.verbose):
                     self.grid.build(self.pre_Pos, self.smoothing_length)
                     wp.launch(
                         kernel=update_position,
@@ -380,7 +371,11 @@ class Example:
                     wp.launch(
                         kernel=calc_curl,
                         dim=self.n,
-                        inputs=[self.pre_Pos, self.v],
+                        inputs=[
+                            self.pre_Pos, 
+                            self.v,
+                            self.n_Cache
+                        ],
                         outputs=[self.curl]
                     )
                     wp.launch(
@@ -390,7 +385,8 @@ class Example:
                             self.dt,
                             self.pre_Pos,
                             self.v,
-                            self.curl
+                            self.curl,
+                            self.n_Cache
                         ],
                         outputs=[self.delta_Vel]
                     )
