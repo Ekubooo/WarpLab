@@ -161,6 +161,8 @@ simulation.step()  # 推进 1/90 秒：3 个子步，每子步 3 轮压力迭代
 
 流体和边界邻居缓存分别按 `[邻居序号, 当前粒子编号]` 存储，而不是 `[当前粒子编号, 邻居序号]`。`cache_neighbors` 直接写入该布局，不执行额外转置；密度、压力和粘度 kernel 使用相同布局读取，使一个 warp 中相邻粒子的同序号邻居访问连续。邻居数量仍分别保存在 `fluid_count[i]` 和 `boundary_count[i]`。
 
+流体属性在每个子步建表后搬到该次 HashGrid 的排序顺序。流体查询显式使用 `hash_grid_query_next` 推进，再由 `@wp.func_native` 的 `hash_grid_query_sorted_index` 读取 `query.cell_index - 1`，直接得到重排后属性的下标，不再分配或维护 `old_to_sorted` 反查表。该函数只能在查询成功推进后调用，且属性必须对应同一次建表的排列。它依赖 Warp 1.15 的内部查询游标，升级 Warp 时需复核；边界数组仍使用查询返回的输入下标。
+
 `fluid_lower/fluid_upper` 为内缩后的粒子中心范围。诊断中的 `fluid_boundary_violation` 检查此范围，`max_fluid_violation_ever` 累计每个子步结束时对此范围的越界；`fluid_container_violation` 仍检查原始容器几何范围。预测阶段可能暂时越界，随后由压力迭代的位置更新钳回，渲染读取完整 step 完成后的状态。
 
 仿真数组驻留所选 Warp 设备；正常 `step()/render()` 不调用 `.numpy()`。刚体模型矩阵由 Warp 直接写入 CUDA/OpenGL 共享缓冲区，实体和阴影共用；粒子首次渲染分配也避免回读。初始化、显式诊断、测试、截图和导出允许读回。渲染要求真正的 CUDA/OpenGL 互操作，注册失败直接报错，不回退到 CPU 拷贝；必要的资源 map/unmap 同步仍保留。

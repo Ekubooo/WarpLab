@@ -59,7 +59,7 @@ def estimate_device_storage_bytes(particle_count, boundary_count, grid_dims, con
         config.max_fluid_neighbors + config.max_boundary_neighbors
     ) * 4
     # Fluid persistent arrays, HashGrid point workspaces, and exclusion temporaries.
-    fluid_bytes = particle_count * (136 + 24 + 16)
+    fluid_bytes = particle_count * (132 + 24 + 16)
     if config.enable_vorticity_confinement and config.vorticity_confinement > 0.0:
         fluid_bytes += particle_count * 16  # vec4 vorticity scratch array
     # Boundary state and its HashGrid point workspace.
@@ -243,10 +243,9 @@ def reorder_fluid(
     target_velocities: wp.array(dtype=wp.vec3),
     target_old_positions: wp.array(dtype=wp.vec3),
     target_particle_ids: wp.array(dtype=int),
-    old_to_sorted: wp.array(dtype=int),
     fault: wp.array(dtype=int),
 ):
-    """Gather persistent fluid state into hash order and build its inverse map."""
+    """Gather persistent fluid state into the grid's spatially sorted order."""
     sorted_index = wp.tid()
     source_index = sorted_index
     if fault[0] == 0:
@@ -255,7 +254,17 @@ def reorder_fluid(
     target_velocities[sorted_index] = source_velocities[source_index]
     target_old_positions[sorted_index] = source_old_positions[source_index]
     target_particle_ids[sorted_index] = source_particle_ids[source_index]
-    old_to_sorted[source_index] = sorted_index
+
+
+@wp.func_native("return query.cell_index - 1;")
+def hash_grid_query_sorted_index(query: wp.HashGridQuery) -> int:
+    """Read the sorted slot immediately after a successful hash_grid_query_next.
+
+    Warp 1.15 increments its internal cell_index when yielding the input point
+    index. Use the slot for particle state gathered in the same build's hash
+    order. Recheck this internal field when upgrading Warp.
+    """
+    ...
 
 
 @wp.kernel
@@ -263,7 +272,6 @@ def cache_neighbors(
     fluid_grid: wp.uint64,
     boundary_grid: wp.uint64,
     x: wp.array(dtype=wp.vec3),
-    old_to_sorted: wp.array(dtype=int),
     boundary: BoundaryState,
     h: float,
     neighbors: Neighbors,
@@ -273,8 +281,10 @@ def cache_neighbors(
     i = wp.tid()
     fluid_count = int(0)
     boundary_count = int(0)
-    for old_j in wp.hash_grid_query(fluid_grid, x[i], h):
-        j = old_to_sorted[old_j]
+    query = wp.hash_grid_query(fluid_grid, x[i], h)
+    input_index = int(0)
+    while wp.hash_grid_query_next(query, input_index):
+        j = hash_grid_query_sorted_index(query)
         if j != i and wp.length_sq(x[i] - x[j]) < h * h:
             if fluid_count < neighbors.fluid.shape[0]:
                 neighbors.fluid[fluid_count, i] = j
@@ -1273,7 +1283,6 @@ class Example:
         particle_count = self.num_particles
         self.old_positions = device_zeros(particle_count, wp.vec3)
         self.particle_ids = to_device_array(np.arange(particle_count, dtype=np.int32), int)
-        self.old_to_sorted = to_device_array(np.arange(particle_count, dtype=np.int32), int)
         self._reorder_positions = device_zeros(particle_count, wp.vec3)
         self._reorder_velocities = device_zeros(particle_count, wp.vec3)
         self._reorder_old_positions = device_zeros(particle_count, wp.vec3)
@@ -1342,7 +1351,6 @@ class Example:
                 self._reorder_velocities,
                 self._reorder_old_positions,
                 self._reorder_particle_ids,
-                self.old_to_sorted,
                 self.rigid.fault,
             ],
             device=self.device,
@@ -1398,7 +1406,6 @@ class Example:
                     self.fluid_grid.id,
                     self.boundary_grid.id,
                     self.positions,
-                    self.old_to_sorted,
                     self.boundary,
                     self.support_radius,
                     self.neighbors,

@@ -37,6 +37,25 @@ def query_distances(mesh: wp.uint64, x: wp.array(dtype=wp.vec3), distances: wp.a
     distances[i] = q.sign * wp.length(p - x[i])
 
 
+@wp.kernel
+def collect_query_sorted_indices(
+    grid: wp.uint64,
+    point: wp.vec3,
+    radius: float,
+    columns: wp.array(dtype=int),
+    input_indices: wp.array(dtype=int),
+    count: wp.array(dtype=int),
+):
+    query = wp.hash_grid_query(grid, point, radius)
+    input_index = int(0)
+    k = int(0)
+    while wp.hash_grid_query_next(query, input_index):
+        columns[k] = solver.hash_grid_query_sorted_index(query)
+        input_indices[k] = input_index
+        k += 1
+    count[0] = k
+
+
 def w(r, h):
     return 315 / (64 * np.pi * h**9) * max(h * h - r * r, 0) ** 3
 
@@ -98,6 +117,7 @@ class CouplingTest(unittest.TestCase):
     def search(self, s):
         s.fluid_grid.build(s.positions, s.support_radius)
         s.boundary_grid.build(s.boundary.position, s.support_radius)
+        s._reorder_fluid()
         wp.launch(
             solver.cache_neighbors,
             s.num_particles,
@@ -105,7 +125,6 @@ class CouplingTest(unittest.TestCase):
                 s.fluid_grid.id,
                 s.boundary_grid.id,
                 s.positions,
-                s.old_to_sorted,
                 s.boundary,
                 s.support_radius,
                 s.neighbors,
@@ -503,11 +522,14 @@ class CouplingTest(unittest.TestCase):
     def test_cli_lambda_regularization(self):
         parser = argparse.ArgumentParser(add_help=False)
         add_simulation_arguments(parser)
-        self.assertEqual(config_from_args(parser.parse_args([])).lambda_regularization, 1.0)
+        self.assertEqual(
+            config_from_args(parser.parse_args([])).lambda_regularization,
+            solver.PBF2WayCouplingConfig.lambda_regularization,
+        )
         args = parser.parse_args(["--lambda-regularization", "2.5"])
         self.assertEqual(config_from_args(args).lambda_regularization, 2.5)
 
-    def test_hash_order_reorders_persistent_state_and_inverse_map(self):
+    def test_hash_order_reorders_persistent_state(self):
         devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
         for device in devices:
             with self.subTest(device=device):
@@ -526,8 +548,35 @@ class CouplingTest(unittest.TestCase):
                 np.testing.assert_array_equal(s.positions.numpy(), positions[particle_ids])
                 np.testing.assert_array_equal(s.velocities.numpy(), velocities[particle_ids])
                 np.testing.assert_array_equal(s.old_positions.numpy(), old_positions[particle_ids])
-                inverse = s.old_to_sorted.numpy()
-                np.testing.assert_array_equal(particle_ids[inverse], np.arange(count))
+
+    def test_native_query_sorted_indices_across_cells_and_empty_ranges(self):
+        self.make()  # Initialize Warp and the workspace kernel cache.
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        cell_keys = np.array([3, 6, 2, 9, 9, 2, 6, 2, 9, 9])
+        points = np.column_stack((cell_keys + 0.125, np.full(10, 0.25), np.full(10, 0.25)))
+        sorted_ids = np.array([2, 5, 7, 0, 1, 6, 3, 4, 8, 9])
+        for device in devices:
+            with self.subTest(device=device):
+                grid = wp.HashGrid(16, 16, 16, device=device)
+                grid.build(wp.array(points, dtype=wp.vec3, device=device), 1.0)
+                columns = wp.full(10, -1, dtype=int, device=device)
+                inputs = wp.full(10, -1, dtype=int, device=device)
+                count = wp.zeros(1, dtype=int, device=device)
+                for center, radius, expected_columns in (
+                    (9.5, 0.4, [6, 7, 8, 9]),
+                    (2.5, 0.4, [0, 1, 2]),
+                    (12.5, 0.4, []),
+                    (5.5, 6.0, list(range(10))),
+                ):
+                    wp.launch(
+                        collect_query_sorted_indices, 1,
+                        [grid.id, wp.vec3(center, 0.25, 0.25), radius, columns, inputs, count],
+                        device=device,
+                    )
+                    size = int(count.numpy()[0])
+                    actual_columns = columns.numpy()[:size]
+                    np.testing.assert_array_equal(actual_columns, expected_columns)
+                    np.testing.assert_array_equal(inputs.numpy()[:size], sorted_ids[actual_columns])
 
     def test_hash_grid_dimensions_cover_container_query_span(self):
         s = self.make()
@@ -582,7 +631,6 @@ class CouplingTest(unittest.TestCase):
                         s.fluid_grid.id,
                         s.boundary_grid.id,
                         s.positions,
-                        s.old_to_sorted,
                         s.boundary,
                         s.support_radius,
                         s.neighbors,
@@ -708,6 +756,7 @@ class CouplingTest(unittest.TestCase):
         vel = rng.normal(0, 0.2, (s.num_particles, 3)).astype(np.float32)
         s.velocities.assign(vel)
         self.search(s)
+        vel = s.velocities.numpy().astype(float)
         wp.launch(
             solver.density_lambda,
             s.num_particles,
@@ -805,7 +854,7 @@ class CouplingTest(unittest.TestCase):
             device=s.device,
         )
         x, bx, bv = (
-            points.astype(float),
+            s.positions.numpy().astype(float),
             s.boundary.position.numpy().astype(float),
             s.boundary.volume.numpy().astype(float),
         )
@@ -1020,6 +1069,7 @@ class CouplingTest(unittest.TestCase):
                 velocities = rng.normal(0.0, 0.3, (s.num_particles, 3)).astype(np.float32)
                 s.velocities.assign(velocities)
                 self.search(s)
+                velocities = s.velocities.numpy().astype(float)
                 wp.launch(
                     solver.density_lambda,
                     s.num_particles,
