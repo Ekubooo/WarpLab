@@ -58,6 +58,18 @@ def _probe_collision(
     corrected[i] = fn.apply_SDF(sdf, positions[i], radius)
 
 
+@wp.kernel
+def _probe_position_kernels(
+    positions: wp.array(dtype=wp.vec3),
+    values: wp.array(dtype=wp.vec2), gradients: wp.array(dtype=wp.vec3),
+):
+    i = wp.tid()
+    origin = wp.vec3(0.0)
+    position = positions[i]
+    values[i] = wp.vec2(fn.Poly6(origin, position), fn.Poly6(position, origin))
+    gradients[i] = fn.GradPow3(origin, position)
+
+
 def _occupancy_reference(distance, radius):
     q = np.maximum(np.asarray(distance, dtype=np.float64) / radius, 0)
     return np.where(q <= 0.5, 1 - 6 * q**2 + 6 * q**3,
@@ -244,6 +256,36 @@ class VolumeMapGPUTests(unittest.TestCase):
         np.testing.assert_allclose(distances, [5e-8], rtol=1e-6, atol=0)
         np.testing.assert_allclose(directions, [[0, -1, 0]], atol=1e-6)
 
+    def test_position_kernels_preserve_self_density_gradient_direction_and_support(self):
+        config = fn.PBFConfig()
+        radius = 4 * config.particle_radius
+        positions = np.array([[0, 0, 0], [0.0125, 0, 0], [-0.0125, 0, 0],
+                              [0, 0.025, 0], [0.02, 0.01, -0.01],
+                              [radius, 0, 0], [1.1 * radius, 0, 0]], dtype=np.float32)
+        grid = wp.HashGrid(8, 8, 8, device=self.device)
+        sdf = self.allocate([[0, 0, 0]], background=1.0)
+        bind_solver(config, grid, sdf, sdf)
+        wp.get_module(__name__).unload()
+        values = wp.empty(len(positions), dtype=wp.vec2, device=self.device)
+        gradients = wp.empty(len(positions), dtype=wp.vec3, device=self.device)
+        wp.launch(_probe_position_kernels, len(positions),
+                  inputs=[wp.array(positions, dtype=wp.vec3, device=self.device)],
+                  outputs=[values, gradients], device=self.device)
+
+        offsets = positions.astype(float)
+        squared = np.sum(offsets**2, axis=1)
+        distances = np.sqrt(squared)
+        expected_values = 315 / (64 * np.pi * radius**9) * np.maximum(radius**2 - squared, 0)**3
+        direction = np.divide(offsets, distances[:, None], out=np.zeros_like(offsets),
+                              where=distances[:, None] > 0)
+        expected_gradients = direction * (-45 / (np.pi * radius**6) * np.maximum(radius - distances, 0)**2)[:, None]
+        np.testing.assert_allclose(values.numpy(), np.column_stack([expected_values, expected_values]), rtol=3e-6, atol=1e-7)
+        np.testing.assert_allclose(gradients.numpy(), expected_gradients, rtol=3e-6, atol=1e-7)
+        self.assertGreater(values.numpy()[0, 0], 0)
+        np.testing.assert_array_equal(gradients.numpy()[0], 0)
+        np.testing.assert_array_equal(values.numpy()[-2:], 0)
+        np.testing.assert_array_equal(gradients.numpy()[-2:], 0)
+
     def test_runtime_pressure_plane_and_degenerate_gradient(self):
         from demos.fluid.PBF import PBF as solver
 
@@ -261,13 +303,14 @@ class VolumeMapGPUTests(unittest.TestCase):
         bind_solver(sim.config, grid, sdf, volume_map)
         lambdas = wp.empty(1, dtype=float, device=self.device)
         corrections = wp.empty(1, dtype=wp.vec3, device=self.device)
+        volume_grad = wp.full(1, wp.vec3(99.0), dtype=wp.vec3, device=self.device)
 
         def solve():
             wp.launch(solver.calc_lambda, 1,
                       inputs=[positions, neighbors],
-                      outputs=[lambdas], device=self.device)
+                      outputs=[lambdas, volume_grad], device=self.device)
             wp.launch(solver.calc_deltaPos, 1,
-                      inputs=[positions, lambdas, neighbors],
+                      inputs=[positions, lambdas, neighbors, volume_grad],
                       outputs=[corrections], device=self.device)
             return lambdas.numpy()[0], corrections.numpy()[0]
 
@@ -283,16 +326,25 @@ class VolumeMapGPUTests(unittest.TestCase):
         self.assertLess(expected_lambda, 0)
         np.testing.assert_allclose(actual_lambda, expected_lambda, rtol=2e-5)
         np.testing.assert_allclose(actual_delta, [0, -expected_lambda * gradient, 0], rtol=2e-5, atol=1e-8)
+        np.testing.assert_allclose(volume_grad.numpy(), [[0, gradient, 0]], rtol=2e-5)
 
-        # Both kernels must omit density/gradient terms when no normal exists.
+        # Delta consumes the saved result even if the volume changes after lambda.
         self.fill(sdf, offset=0.01)
+        lambdas.fill_(-0.1)
+        wp.launch(solver.calc_deltaPos, 1,
+                  inputs=[positions, lambdas, neighbors, volume_grad],
+                  outputs=[corrections], device=self.device)
+        np.testing.assert_allclose(corrections.numpy(), [[0, 0.1 * gradient, 0]], rtol=2e-5, atol=1e-8)
+
+        # The next lambda must overwrite a previously valid cache with zero.
         actual_lambda, actual_delta = solve()
         self.assertEqual(actual_lambda, 0)
         np.testing.assert_array_equal(actual_delta, [0, 0, 0])
+        np.testing.assert_array_equal(volume_grad.numpy(), [[0, 0, 0]])
         # An externally nonzero lambda must still produce zero boundary motion.
         lambdas.fill_(-0.1)
         wp.launch(solver.calc_deltaPos, 1,
-                  inputs=[positions, lambdas, neighbors],
+                  inputs=[positions, lambdas, neighbors, volume_grad],
                   outputs=[corrections], device=self.device)
         np.testing.assert_array_equal(corrections.numpy(), [[0, 0, 0]])
 

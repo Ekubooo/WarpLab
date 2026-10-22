@@ -29,7 +29,7 @@ class SimulationResetTest(unittest.TestCase):
         )
         with wp.ScopedDevice(device):
             for name in ("pos", "v", "pre_Pos", "delta_Pos", "delta_Vel",
-                         "temp_pos", "temp_pPos"):
+                         "volume_Grad", "temp_pos", "temp_pPos"):
                 setattr(sim, name, wp.full(sim.n, wp.vec3(9.0), dtype=wp.vec3))
             sim.lambda_Opt = wp.full(sim.n, 9.0, dtype=float)
             sim.curl = wp.full(sim.n, wp.vec4(9.0), dtype=wp.vec4)
@@ -42,7 +42,7 @@ class SimulationResetTest(unittest.TestCase):
             np.array(config.block_start) + sim.particle_spacing * np.array([x, y, z])
             for x in (1, 2) for y in (1, 2) for z in (1, 2)
         ], dtype=np.float32)
-        zero_names = ("v", "pre_Pos", "delta_Pos", "lambda_Opt", "delta_Vel", "curl")
+        zero_names = ("v", "pre_Pos", "delta_Pos", "lambda_Opt", "delta_Vel", "curl", "volume_Grad")
         resources = (sim.config, sim.grid, sim.static_sdf, sim.volume_map, sim.renderer)
         cache_pointers = (sim.n_Cache.NeighborCount.ptr, sim.n_Cache.CacheBuffer.ptr)
 

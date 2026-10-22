@@ -36,7 +36,7 @@ def reset_simulation(sim: PBFSolver) -> None:
         )
         for buffer in (
             sim.v, sim.pre_Pos, sim.delta_Pos,
-            sim.lambda_Opt, sim.delta_Vel, sim.curl,
+            sim.lambda_Opt, sim.delta_Vel, sim.curl, sim.volume_Grad,
         ):
             buffer.zero_()
         # Neighbor slots are ignored until the next step rebuilds their counts.

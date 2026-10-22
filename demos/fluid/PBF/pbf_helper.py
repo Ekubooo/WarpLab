@@ -234,6 +234,7 @@ def init_device_buffers(sim):
     sim.pre_Pos     = wp.zeros(sim.n, dtype=wp.vec3)
     sim.delta_Pos   = wp.zeros(sim.n, dtype=wp.vec3)
     sim.lambda_Opt  = wp.zeros(sim.n, dtype=float)
+    sim.volume_Grad = wp.zeros(sim.n, dtype=wp.vec3)
     sim.delta_Vel   = wp.zeros(sim.n, dtype=wp.vec3)
     sim.curl        = wp.zeros(sim.n, dtype=wp.vec4)
 
@@ -354,67 +355,29 @@ def diff_viscous_kernel(
         return wp.vec3()
 
 @wp.func
-def Poly6(dst: float, radius: float):
-    if dst < radius: 
-        # scale = 315.0/(64.0 * wp.pi * wp.pow(wp.abs(radius), 9.0))
-        return cube(square(radius) - square(dst)) * K_SPoly6
+def Poly6(pos: wp.vec3, neighbor_pos: wp.vec3):
+    O2N = neighbor_pos - pos
+    sqrD2N = wp.dot(O2N, O2N)
+    if sqrD2N < square(Smoothing_Radius):
+        return cube(square(Smoothing_Radius) - sqrD2N) * K_SPoly6
     return 0.0
 
 @wp.func
-def DPow3(dst: float, radius: float):
-    if dst < radius: 
-        # SPow3Grad = 45.0/(wp.pi * wp.pow(radius, 6.0)) 
-        return -1.0 * square(radius - dst) * K_DSPow3
-    return 0.0
+def GradPow3(pos: wp.vec3, neighbor_pos: wp.vec3):
+    O2N = neighbor_pos - pos
+    sqrD2N = wp.dot(O2N, O2N)
+    if sqrD2N > 0.0 and sqrD2N < square(Smoothing_Radius):
+        dst2N = wp.sqrt(sqrD2N)
+        grad = -1.0 * square(Smoothing_Radius - dst2N) * K_DSPow3
+        return (O2N/dst2N) * grad
+    return wp.vec3(0,0,0)
 
 @wp.func
-def Pow3(dst: float, radius: float):
-    if dst < radius: 
-        # SPow3 = 15.0 / (wp.pi * wp.pow(radius, 6.0)) 
-        return cube(radius - dst) * K_SPow3
+def Pow3(dst: float):
+    if dst < Smoothing_Radius:
+        # SPow3 = 15.0 / (wp.pi * wp.pow(Smoothing_Radius, 6.0))
+        return cube(Smoothing_Radius - dst) * K_SPow3
     return 0.0
-
-
-@wp.func
-def apply_boundary_collision_velocity(
-    position: wp.vec3,
-    boundary: wp.vec3,
-    reconstructed_velocity: wp.vec3,
-    incoming_velocity: wp.vec3,
-):
-    velocity = reconstructed_velocity
-    contact_range = Boundary_Disturbance + Boundary_Contact_Eps
-
-    for axis in range(3):
-        normal = wp.vec3(0.0, 0.0, 0.0)
-        if axis == 0:
-            if position[0] <= contact_range:
-                normal = wp.vec3(1.0, 0.0, 0.0)
-            elif position[0] >= boundary[0] - contact_range:
-                normal = wp.vec3(-1.0, 0.0, 0.0)
-        elif axis == 1:
-            if position[1] <= contact_range:
-                normal = wp.vec3(0.0, 1.0, 0.0)
-            elif position[1] >= boundary[1] - contact_range:
-                normal = wp.vec3(0.0, -1.0, 0.0)
-        else:
-            if position[2] <= contact_range:
-                normal = wp.vec3(0.0, 0.0, 1.0)
-            elif position[2] >= boundary[2] - contact_range:
-                normal = wp.vec3(0.0, 0.0, -1.0)
-
-        incoming_normal_velocity = wp.dot(incoming_velocity, normal)
-        if incoming_normal_velocity < 0.0:
-            reconstructed_normal_velocity = wp.dot(velocity, normal)
-            tangential_velocity = velocity - reconstructed_normal_velocity * normal
-            target_normal_velocity = -Boundary_Restitution * incoming_normal_velocity
-            final_normal_velocity = wp.max(reconstructed_normal_velocity, target_normal_velocity)
-            velocity = (
-                Boundary_Tangential_Retention * tangential_velocity
-                + final_normal_velocity * normal
-            )
-
-    return velocity
 
 
 @wp.func

@@ -62,7 +62,7 @@ class ControlsTest(unittest.TestCase):
         initial = sim.pos.numpy()
         gravity = tuple(sim.gravity)
         buffer_names = ("pos", "v", "pre_Pos", "delta_Pos", "lambda_Opt",
-                        "delta_Vel", "curl", "temp_pos", "temp_pPos")
+                        "delta_Vel", "curl", "volume_Grad", "temp_pos", "temp_pPos")
         allocation_pool = {getattr(sim, name).ptr for name in buffer_names}
         grid, sdf = sim.grid, sim.static_sdf
         sim.renderer = renderer = object()
@@ -94,7 +94,7 @@ class ControlsTest(unittest.TestCase):
         self.assertIs(sim.static_sdf, sdf)
         self.assertIs(sim.renderer, renderer)
         np.testing.assert_array_equal(sim.pos.numpy(), initial)
-        for name in ("v", "pre_Pos", "delta_Pos", "lambda_Opt", "delta_Vel", "curl"):
+        for name in ("v", "pre_Pos", "delta_Pos", "lambda_Opt", "delta_Vel", "curl", "volume_Grad"):
             np.testing.assert_array_equal(getattr(sim, name).numpy(), 0)
         np.testing.assert_array_equal(sim.n_Cache.NeighborCount.numpy(), 0)
         self.step(sim, 5)
@@ -139,13 +139,14 @@ class ControlsTest(unittest.TestCase):
             grid = wp.HashGrid(8, 8, 8)
             grid.build(pos, sim.support_radius)
             result = wp.zeros(1, dtype=float)
+            volume_grad = wp.zeros(1, dtype=wp.vec3)
             neighbors = self_neighbor(self.device)
             values = []
             for clamp in (1, 0):
                 bind_solver(replace(CONFIG, clamp_negative_pressure=bool(clamp)),
                             grid, sim.static_sdf, sim.volume_map)
                 wp.launch(solver.calc_lambda, 1,
-                          inputs=[pos, neighbors], outputs=[result])
+                          inputs=[pos, neighbors], outputs=[result, volume_grad])
                 values.append(float(result.numpy()[0]))
         self.assertEqual(values[0], 0)
         self.assertGreater(values[1], 0)
