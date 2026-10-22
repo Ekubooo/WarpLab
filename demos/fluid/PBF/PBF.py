@@ -345,7 +345,6 @@ class PBF:
                         )
 
                 with wp.ScopedTimer("Epilogue", active=self.verbose):
-                    self.grid.build(self.pre_Pos, self.smoothing_length)
                     wp.launch(
                         kernel=update_position,
                         dim=self.n,
