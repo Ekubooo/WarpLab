@@ -53,6 +53,20 @@ def load_static_scene():
 class PBFRenderer(BillboardRenderer):
     """Let the PBF main loop handle pause and deferred reset requests."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Keep Warp's info overlay, but publish FPS only once per time window.
+        self._fps_alpha = 0.0
+        self._fps_refresh_interval = 0.5
+        self._fps_window_start = None
+        self._fps_last_update_time = None
+        self._fps_frame_start = None
+        self._fps_pending_frame_duration = None
+        self._fps_update_samples = 0
+        self._fps_update_duration = 0.0
+        self._fps_render_samples = 0
+        self._fps_render_duration = 0.0
+
     def register_shape(self, geo_hash, vertices, indices, color1=None, color2=None):
         # Warp 1.15 flat-shaded meshes use np.arange(), which is int64 in NumPy 2.
         # Its OpenGL draw calls require GL_UNSIGNED_INT indices (32 bits).
@@ -60,17 +74,53 @@ class PBFRenderer(BillboardRenderer):
 
     def begin_frame(self, t=None):
         super().begin_frame(t)
+        self._fps_frame_start = time.perf_counter()
         # Warp treats zero as an omitted time; reset must display simulation time zero.
         if t is not None:
             self.time = t
 
     def end_frame(self):
         self._last_end_frame_time = time.time()
+        if self._fps_frame_start is not None:
+            self._fps_pending_frame_duration = time.perf_counter() - self._fps_frame_start
+            self._fps_frame_start = None
         if self._add_shape_instances:
             self.allocate_shape_instances()
         if self._update_shape_instances:
             self.update_shape_instances()
         self.update()
+
+    def update(self):
+        now = time.perf_counter()
+        if self._fps_window_start is None:
+            self._fps_window_start = now
+
+        frame_duration = self._fps_pending_frame_duration
+        self._fps_pending_frame_duration = None
+        if not self.skip_rendering:
+            if frame_duration is not None and frame_duration > 0.0:
+                self._fps_update_samples += 1
+                self._fps_update_duration += frame_duration
+            if self._fps_last_update_time is not None:
+                render_duration = now - self._fps_last_update_time
+                if render_duration > 0.0:
+                    self._fps_render_samples += 1
+                    self._fps_render_duration += render_duration
+        self._fps_last_update_time = now
+
+        if now - self._fps_window_start >= self._fps_refresh_interval:
+            # Invert the mean duration instead of averaging instantaneous FPS.
+            if self._fps_update_samples:
+                self._fps_update = self._fps_update_samples / self._fps_update_duration
+            if self._fps_render_samples:
+                self._fps_render = self._fps_render_samples / self._fps_render_duration
+            self._fps_window_start = now
+            self._fps_update_samples = 0
+            self._fps_update_duration = 0.0
+            self._fps_render_samples = 0
+            self._fps_render_duration = 0.0
+
+        super().update()
 
 
 def create_pbf_renderer(

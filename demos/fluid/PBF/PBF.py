@@ -93,16 +93,27 @@ def calc_lambda(
     i = wp.tid()
     currPos = pre_Pos[i]   
 
-    for k in range(Neighbor.NeighborCount[i]):
-        nIndex = Neighbor.CacheBuffer[k, i]
-        NPos = pre_Pos[nIndex]
-        # Self density is included by the grid query; its zero gradient is harmless.
-        density += fn.Fluid_Mass * fn.Poly6(currPos, NPos)
-        currGrad = fn.GradPow3(currPos, NPos) * pressure_scale
+    neighborCount = Neighbor.NeighborCount[i]
+    if neighborCount > 0:
+        nextIndex = Neighbor.CacheBuffer[0, i]
+        nextPos = pre_Pos[nextIndex]
+        nextNextIndex = Neighbor.CacheBuffer[wp.min(1, neighborCount - 1), i]
 
-        grad_i += currGrad
-        if nIndex!=i :
-            grad_j += wp.dot(currGrad, currGrad)
+        for k in range(neighborCount):
+            nIndex = nextIndex
+            NPos = nextPos
+
+            nextIndex = nextNextIndex
+            nextPos = pre_Pos[nextIndex]
+            nextNextIndex = Neighbor.CacheBuffer[wp.min(k + 2, neighborCount - 1), i]
+
+            # Self density is included by the grid query; its zero gradient is harmless.
+            density += fn.Fluid_Mass * fn.Poly6(currPos, NPos)
+            currGrad = fn.GradPow3(currPos, NPos) * pressure_scale
+
+            grad_i += currGrad
+            if nIndex!=i :
+                grad_j += wp.dot(currGrad, currGrad)
 
     volumeRho = volume_Rho[i]
     grad_i += volume_Grad[i]
@@ -134,22 +145,33 @@ def calc_deltaPos(
     delta_Movement = wp.vec3(0,0,0)
     pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for k in range(Neighbor.NeighborCount[i]):
-        nIndex = Neighbor.CacheBuffer[k, i]
-        if nIndex == i:
-            continue
-        NPos = pre_Pos[nIndex]
-        poly6 = fn.Poly6(currPos, NPos)
+    neighborCount = Neighbor.NeighborCount[i]
+    if neighborCount > 0:
+        nextIndex = Neighbor.CacheBuffer[0, i]
+        nextPos = pre_Pos[nextIndex]
+        nextNextIndex = Neighbor.CacheBuffer[wp.min(1, neighborCount - 1), i]
 
-        x = poly6 * (1.0/WDeltaQ)
-        x2 = x * x
-        x4 = x2 * x2
-        S_corr = -fn.S_corr_K * x4
+        for k in range(neighborCount):
+            nIndex = nextIndex
+            NPos = nextPos
 
-        lambda_j = lambda_Opt[nIndex]
-        lambda_Sum = lambda_i + lambda_j + S_corr
-        currGrad = fn.GradPow3(currPos, NPos)
-        delta_Movement -= lambda_Sum * currGrad
+            nextIndex = nextNextIndex
+            nextPos = pre_Pos[nextIndex]
+            nextNextIndex = Neighbor.CacheBuffer[wp.min(k + 2, neighborCount - 1), i]
+
+            if nIndex == i:
+                continue
+            poly6 = fn.Poly6(currPos, NPos)
+
+            x = poly6 * (1.0/WDeltaQ)
+            x2 = x * x
+            x4 = x2 * x2
+            S_corr = -fn.S_corr_K * x4
+
+            lambda_j = lambda_Opt[nIndex]
+            lambda_Sum = lambda_i + lambda_j + S_corr
+            currGrad = fn.GradPow3(currPos, NPos)
+            delta_Movement -= lambda_Sum * currGrad
 
     delta_boundary = -lambda_i * volume_Grad[i]
     delta_Pos[i] = delta_Movement * pressure_scale + delta_boundary
@@ -201,16 +223,27 @@ def calc_curl(
     omega_i = wp.vec3(0,0,0)
     volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for k in range(Neighbor.NeighborCount[i]):
-        nIndex = Neighbor.CacheBuffer[k, i]
-        if nIndex == i:
-            continue
-        NPos = pre_Pos[nIndex]
+    neighborCount = Neighbor.NeighborCount[i]
+    if neighborCount > 0:
+        nextIndex = Neighbor.CacheBuffer[0, i]
+        nextPos = pre_Pos[nextIndex]
+        nextNextIndex = Neighbor.CacheBuffer[wp.min(1, neighborCount - 1), i]
 
-        # curl
-        NVel = vel[nIndex]
-        Vel_ij = NVel - currVel
-        omega_i += volume_scale * wp.cross(Vel_ij, fn.GradPow3(currPos, NPos))
+        for k in range(neighborCount):
+            nIndex = nextIndex
+            NPos = nextPos
+
+            nextIndex = nextNextIndex
+            nextPos = pre_Pos[nextIndex]
+            nextNextIndex = Neighbor.CacheBuffer[wp.min(k + 2, neighborCount - 1), i]
+
+            if nIndex == i:
+                continue
+
+            # curl
+            NVel = vel[nIndex]
+            Vel_ij = NVel - currVel
+            omega_i += volume_scale * wp.cross(Vel_ij, fn.GradPow3(currPos, NPos))
 
     curl[i] = wp.vec4(omega_i[0], omega_i[1], omega_i[2], wp.length(omega_i))
 
@@ -233,27 +266,38 @@ def calc_visvor(
     vel_corr = wp.vec3(0,0,0)
     volume_scale = fn.Fluid_Mass * fn.Inv_Rho0
 
-    for k in range(Neighbor.NeighborCount[i]):
-        nIndex = Neighbor.CacheBuffer[k, i]
-        if nIndex == i:
-            continue
-        NPos = pre_Pos[nIndex]
-        O2N = NPos - currPos
-        sqrD2N = wp.dot(O2N, O2N)
-        if sqrD2N > fn.square(fn.Smoothing_Radius):
-            continue
+    neighborCount = Neighbor.NeighborCount[i]
+    if neighborCount > 0:
+        nextIndex = Neighbor.CacheBuffer[0, i]
+        nextPos = pre_Pos[nextIndex]
+        nextNextIndex = Neighbor.CacheBuffer[wp.min(1, neighborCount - 1), i]
 
-        # calc
-        NVel = vel[nIndex]
-        Vel_ij = NVel - currVel
-        NCurl = curl[nIndex]
-        currGrad = fn.GradPow3(currPos, NPos)
+        for k in range(neighborCount):
+            nIndex = nextIndex
+            NPos = nextPos
 
-        # voricity
-        etaTotal += -volume_scale * currGrad * (NCurl[3] - currCurlMag)
+            nextIndex = nextNextIndex
+            nextPos = pre_Pos[nextIndex]
+            nextNextIndex = Neighbor.CacheBuffer[wp.min(k + 2, neighborCount - 1), i]
 
-        # viscosity
-        vel_corr += volume_scale * Vel_ij * fn.Poly6(currPos, NPos)
+            if nIndex == i:
+                continue
+            O2N = NPos - currPos
+            sqrD2N = wp.dot(O2N, O2N)
+            if sqrD2N > fn.square(fn.Smoothing_Radius):
+                continue
+
+            # calc
+            NVel = vel[nIndex]
+            Vel_ij = NVel - currVel
+            NCurl = curl[nIndex]
+            currGrad = fn.GradPow3(currPos, NPos)
+
+            # voricity
+            etaTotal += -volume_scale * currGrad * (NCurl[3] - currCurlMag)
+
+            # viscosity
+            vel_corr += volume_scale * Vel_ij * fn.Poly6(currPos, NPos)
 
 
     if wp.length(etaTotal) > 1e-8:
