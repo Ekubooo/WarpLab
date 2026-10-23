@@ -1,6 +1,11 @@
 ## PBFConfig
 a set of good para for the water effect
 
+run:
+```
+python -m demos.fluid.PBF.render_opengl --device cuda:0 --particle-radius 0.01 --container-size 3.1 8 1.6 --block-start 0.05 0 0.05 --block-end 1.55 1.5 1.55 --substeps 3 --pressure-iterations 3
+```
+
 | para | value | note |
 | --- | --- | --- |
 | `particle_radius` | `0.0125` | 粒子半径，m |

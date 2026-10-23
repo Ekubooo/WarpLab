@@ -137,14 +137,45 @@ def create_pbf_renderer(
     )
 
 
-def register_keyboard_controls(renderer, *, on_reset, on_reverse_gravity):
-    """Consume PBF shortcuts before Warp applies its default G binding."""
+def register_keyboard_controls(renderer, simulation: pbf.PBF, *, on_reset):
+    """Handle PBF playback, gravity and reset controls in one place."""
     import pyglet
 
+    slow_motion = False
+    last_direction_key = None
+    gravity_strength = math.hypot(*simulation.config.gravity)
+    pressed_keys = set()
+
     def on_key_press(symbol, _modifiers):
+        nonlocal slow_motion, last_direction_key
+
+        if symbol in (pyglet.window.key.G, pyglet.window.key.X,
+                      pyglet.window.key.Q, pyglet.window.key.E):
+            if symbol in pressed_keys:
+                return pyglet.event.EVENT_HANDLED
+            pressed_keys.add(symbol)
+
         if symbol == pyglet.window.key.G:
-            on_reverse_gravity()
+            reverse_gravity(simulation)
+            last_direction_key = None
+        elif symbol in (pyglet.window.key.Q, pyglet.window.key.E):
+            # Q/E select world -X/+X; repeating that selection restores world -Y.
+            if last_direction_key == symbol:
+                simulation.gravity = wp.vec3(0.0, -gravity_strength, 0.0)
+                last_direction_key = None
+            else:
+                direction = -1.0 if symbol == pyglet.window.key.Q else 1.0
+                simulation.gravity = wp.vec3(direction * gravity_strength, 0.0, 0.0)
+                last_direction_key = symbol
+        elif symbol == pyglet.window.key.X:
+            slow_motion = not slow_motion
+            simulation.frame_dt = simulation.config.frame_dt * (0.5 if slow_motion else 1.0)
+            simulation.dt = simulation.frame_dt / simulation.substep
         elif symbol == pyglet.window.key.R:
+            slow_motion = False
+            last_direction_key = None
+            simulation.frame_dt = simulation.config.frame_dt
+            simulation.dt = simulation.frame_dt / simulation.substep
             renderer.paused = True
             on_reset()
         elif symbol == pyglet.window.key.P:
@@ -153,7 +184,14 @@ def register_keyboard_controls(renderer, *, on_reset, on_reverse_gravity):
             return None
         return pyglet.event.EVENT_HANDLED
 
+    def on_key_release(symbol, _modifiers):
+        pressed_keys.discard(symbol)
+
+    def on_deactivate():
+        pressed_keys.clear()
+
     renderer.register_key_press_callback(on_key_press)
+    renderer.window.push_handlers(on_key_release=on_key_release, on_deactivate=on_deactivate)
     return on_key_press
 
 
@@ -345,8 +383,7 @@ def main():
                 smooth_shading=False,
             )
             register_keyboard_controls(
-                renderer, on_reset=request_reset,
-                on_reverse_gravity=lambda: reverse_gravity(simulation),
+                renderer, simulation, on_reset=request_reset,
             )
             while renderer.is_running() and (args.num_frames == 0 or frame < args.num_frames):
                 if reset_requested:

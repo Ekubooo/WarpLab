@@ -1,13 +1,14 @@
 """CUDA/OpenGL regressions for camera motion and repeated billboard draws."""
 
 import ctypes
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
 import warp as wp
 
 from demos.fluid.common.billboard_renderer import BillboardRenderer
-from demos.fluid.PBF.render_opengl import PBFRenderer
+from demos.fluid.PBF.render_opengl import PBFRenderer, register_keyboard_controls
 
 
 class BillboardCameraTests(unittest.TestCase):
@@ -105,6 +106,54 @@ class BillboardCameraTests(unittest.TestCase):
                 renderer._draw()
                 np.testing.assert_array_equal(self.pixels(renderer), redrawn)
                 self.assertEqual(renderer.gl.glGetError(), renderer.gl.GL_NO_ERROR)
+
+    def test_pbf_s_and_down_move_back_x_preserves_other_camera_controls(self):
+        from pyglet.window import key
+
+        renderer, _, _ = self.make_renderer(PBFRenderer)
+        renderer._key_handler = key.KeyStateHandler()
+        renderer.headless = False
+        renderer._frame_speed = 5.0
+        start = np.array(renderer.camera_pos)
+        front = np.array(renderer.camera_front)
+        distance = renderer._camera_speed * renderer._frame_speed
+
+        renderer._key_handler.on_key_press(key.S, 0)
+        renderer._draw()
+        np.testing.assert_allclose(renderer.camera_pos, start - front * distance, atol=1e-6)
+        self.assertTrue(renderer._key_handler[key.S])
+        renderer._key_handler.on_key_release(key.S, 0)
+
+        renderer._key_handler.on_key_press(key.DOWN, 0)
+        renderer._draw()
+        np.testing.assert_allclose(renderer.camera_pos, start - front * distance * 2, atol=1e-6)
+        renderer._key_handler.on_key_release(key.DOWN, 0)
+
+        sim = SimpleNamespace(
+            config=SimpleNamespace(frame_dt=0.02, gravity=(0.0, -9.81, 0.0)),
+            substep=4, frame_dt=0.02, dt=0.005,
+        )
+        register_keyboard_controls(renderer, sim, on_reset=lambda: None)
+        wireframe = renderer.render_wireframe
+        for _ in range(3):
+            renderer._key_press_callback(key.X, 0)
+        self.assertEqual(sim.frame_dt, 0.01)
+        self.assertEqual(renderer.render_wireframe, wireframe)
+        renderer._key_handler.on_key_press(key.X, 0)
+        renderer._draw()
+        np.testing.assert_allclose(renderer.camera_pos, start - front * distance * 2, atol=1e-6)
+
+        renderer._key_handler.on_key_press(key.W, 0)
+        renderer._draw()
+        np.testing.assert_allclose(renderer.camera_pos, start - front * distance, atol=1e-6)
+        self.assert_camera_matches(renderer)
+        renderer._key_handler.on_key_release(key.W, 0)
+
+        renderer._key_handler.on_key_press(key.D, 0)
+        renderer._draw()
+        np.testing.assert_allclose(renderer.camera_pos, start - front * distance + [distance, 0, 0], atol=1e-6)
+        self.assertTrue(renderer._key_handler[key.X])
+        self.assert_camera_matches(renderer)
 
 
 if __name__ == "__main__":
