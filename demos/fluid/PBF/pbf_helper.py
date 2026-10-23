@@ -19,7 +19,7 @@ class PBFConfig:
 
     particle_radius: float = 0.0125
     rest_density: float = 1000.0
-    frame_dt: float = 1.0 / 120.0
+    frame_dt: float = 1.0 / 150.0
     substeps: int = 3
     pressure_iterations: int = 3
     lambda_regularization: float = 2.0
@@ -234,6 +234,7 @@ def init_device_buffers(sim):
     sim.pre_Pos     = wp.zeros(sim.n, dtype=wp.vec3)
     sim.delta_Pos   = wp.zeros(sim.n, dtype=wp.vec3)
     sim.lambda_Opt  = wp.zeros(sim.n, dtype=float)
+    sim.volume_Rho  = wp.zeros(sim.n, dtype=float)
     sim.volume_Grad = wp.zeros(sim.n, dtype=wp.vec3)
     sim.delta_Vel   = wp.zeros(sim.n, dtype=wp.vec3)
     sim.curl        = wp.zeros(sim.n, dtype=wp.vec4)

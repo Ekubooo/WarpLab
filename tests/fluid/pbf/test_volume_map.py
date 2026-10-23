@@ -303,12 +303,16 @@ class VolumeMapGPUTests(unittest.TestCase):
         bind_solver(sim.config, grid, sdf, volume_map)
         lambdas = wp.empty(1, dtype=float, device=self.device)
         corrections = wp.empty(1, dtype=wp.vec3, device=self.device)
+        volume_rho = wp.full(1, 99.0, dtype=float, device=self.device)
         volume_grad = wp.full(1, wp.vec3(99.0), dtype=wp.vec3, device=self.device)
 
         def solve():
+            wp.launch(solver.volume_query, 1,
+                      inputs=[positions],
+                      outputs=[volume_rho, volume_grad], device=self.device)
             wp.launch(solver.calc_lambda, 1,
-                      inputs=[positions, neighbors],
-                      outputs=[lambdas, volume_grad], device=self.device)
+                      inputs=[positions, neighbors, volume_rho, volume_grad],
+                      outputs=[lambdas], device=self.device)
             wp.launch(solver.calc_deltaPos, 1,
                       inputs=[positions, lambdas, neighbors, volume_grad],
                       outputs=[corrections], device=self.device)
@@ -327,6 +331,7 @@ class VolumeMapGPUTests(unittest.TestCase):
         np.testing.assert_allclose(actual_lambda, expected_lambda, rtol=2e-5)
         np.testing.assert_allclose(actual_delta, [0, -expected_lambda * gradient, 0], rtol=2e-5, atol=1e-8)
         np.testing.assert_allclose(volume_grad.numpy(), [[0, gradient, 0]], rtol=2e-5)
+        np.testing.assert_allclose(volume_rho.numpy(), [volume * sim.config.rest_density * poly6(distance)], rtol=2e-5)
 
         # Delta consumes the saved result even if the volume changes after lambda.
         self.fill(sdf, offset=0.01)
@@ -336,11 +341,12 @@ class VolumeMapGPUTests(unittest.TestCase):
                   outputs=[corrections], device=self.device)
         np.testing.assert_allclose(corrections.numpy(), [[0, 0.1 * gradient, 0]], rtol=2e-5, atol=1e-8)
 
-        # The next lambda must overwrite a previously valid cache with zero.
+        # The next volume query must overwrite a previously valid cache with zero.
         actual_lambda, actual_delta = solve()
         self.assertEqual(actual_lambda, 0)
         np.testing.assert_array_equal(actual_delta, [0, 0, 0])
         np.testing.assert_array_equal(volume_grad.numpy(), [[0, 0, 0]])
+        np.testing.assert_array_equal(volume_rho.numpy(), [0])
         # An externally nonzero lambda must still produce zero boundary motion.
         lambdas.fill_(-0.1)
         wp.launch(solver.calc_deltaPos, 1,

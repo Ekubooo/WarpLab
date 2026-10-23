@@ -305,6 +305,6 @@ def create_billboard_renderer(
         camera_front=camera_front,
         camera_up=(0.0, 1.0, 0.0),
         background_color=(0.0, 0.0, 0.0),
-        vsync=True,
+        vsync=False,
         device=device,
     )

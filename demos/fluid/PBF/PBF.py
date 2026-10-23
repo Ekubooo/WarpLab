@@ -37,15 +37,16 @@ def cache_neighbors(
     NCache: fn.NeighborCache,
 ):
     i = wp.tid()
+    currPos = pos[i]
     fluid_count = wp.int(0)
     R2 = fn.Smoothing_Radius * fn.Smoothing_Radius
-    query = wp.hash_grid_query(fn.GRID_id, pos[i], fn.Smoothing_Radius)
+    query = wp.hash_grid_query(fn.GRID_id, currPos, fn.Smoothing_Radius)
     loop_index = int(0)
 
     while wp.hash_grid_query_next(query, loop_index):
         j = fn.sorted_index(query)
         cap = NCache.CacheBuffer.shape[0]
-        if wp.length_sq(pos[i] - pos[j]) < R2:
+        if wp.length_sq(currPos - pos[j]) < R2:
             if fluid_count < cap :
                 NCache.CacheBuffer[fluid_count, i] = j
             fluid_count += 1
@@ -53,14 +54,38 @@ def cache_neighbors(
     NCache.NeighborCount[i] = wp.min(fluid_count, cap)
    
 @wp.kernel
+def volume_query(
+    pre_Pos: wp.array[wp.vec3],
+    volume_Rho: wp.array[float],
+    volume_Grad: wp.array[wp.vec3]
+):
+    i = wp.tid()
+    currPos = pre_Pos[i]
+    volumeRho = float(0.0)
+    gradVMap = wp.vec3(0.0)
+
+    # volume map query
+    valid_boundary, projDst, dirVM = fn.query_volume_boundary(SDF_id, currPos, fn.Smoothing_Radius)
+    if valid_boundary:
+        vm_index = wp.volume_world_to_index(VMAP_id, currPos)
+        vmapValue = wp.volume_sample_f(VMAP_id, vm_index, wp.Volume.LINEAR)
+        # Evaluate the equivalent boundary point in local coordinates.
+        boundaryOffset = dirVM * projDst
+        volumeRho = vmapValue * fn.Rho_0 * fn.Poly6(wp.vec3(0.0), boundaryOffset)
+        gradVMap = vmapValue * fn.GradPow3(wp.vec3(0.0), boundaryOffset)
+
+    volume_Rho[i] = volumeRho
+    volume_Grad[i] = gradVMap
+
+@wp.kernel
 def calc_lambda(
     pre_Pos: wp.array[wp.vec3],
     Neighbor: fn.NeighborCache,
-    lambda_Opt: wp.array[float],
-    volume_Grad: wp.array[wp.vec3]
+    volume_Rho: wp.array[float],
+    volume_Grad: wp.array[wp.vec3],
+    lambda_Opt: wp.array[float]
 ):
     density = float(0.0)
-    volumeRho = float(0.0)
     grad_j = float(0.0)
     grad_i = wp.vec3(0,0,0)
     pressure_scale = fn.Fluid_Mass * fn.Inv_Rho0
@@ -79,20 +104,8 @@ def calc_lambda(
         if nIndex!=i :
             grad_j += wp.dot(currGrad, currGrad)
 
-    # volume map query
-    gradVMap = wp.vec3(0.0)
-    valid_boundary, projDst, dirVM = fn.query_volume_boundary(SDF_id, currPos, fn.Smoothing_Radius)
-    if valid_boundary:
-        vm_index = wp.volume_world_to_index(VMAP_id, currPos)
-        vmapValue = wp.volume_sample_f(VMAP_id, vm_index, wp.Volume.LINEAR)
-        # Evaluate the equivalent boundary point in local coordinates.
-        boundaryOffset = dirVM * projDst
-        volumeRho = vmapValue * fn.Rho_0 * fn.Poly6(wp.vec3(0.0), boundaryOffset)
-        gradVMap = vmapValue * fn.GradPow3(wp.vec3(0.0), boundaryOffset)
-        grad_i += gradVMap
-
-    # Reused by calc_deltaPos before pre_Pos is updated.
-    volume_Grad[i] = gradVMap
+    volumeRho = volume_Rho[i]
+    grad_i += volume_Grad[i]
     gradSum = grad_j + wp.dot(grad_i, grad_i)
 
     # constraint = density*fn.Inv_Rho0 - 1.0
@@ -292,7 +305,7 @@ class PBF:
         )
 
     def step(self):
-        with wp.ScopedTimer("sub-step", synchronize=True):
+        with wp.ScopedTimer("sub-step", synchronize=False):
             # 3 substep: (or more)
             for _ in range(self.substep):
                 with wp.ScopedTimer("Prologue", active=self.verbose):
@@ -318,13 +331,21 @@ class PBF:
                     # iterations per substep
                     for i in range(self.iterations):
                         wp.launch(
+                            kernel=volume_query,
+                            dim=self.n,
+                            inputs=[self.pre_Pos],
+                            outputs=[self.volume_Rho, self.volume_Grad]
+                        )
+                        wp.launch(
                             kernel=calc_lambda,
                             dim=self.n,
                             inputs=[
                                 self.pre_Pos,
-                                self.n_Cache
+                                self.n_Cache,
+                                self.volume_Rho,
+                                self.volume_Grad
                             ],
-                            outputs=[self.lambda_Opt, self.volume_Grad]
+                            outputs=[self.lambda_Opt]
                         )
                         wp.launch(
                             kernel=calc_deltaPos, 
