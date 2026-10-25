@@ -3,6 +3,8 @@
 import ctypes
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+import weakref
 
 import numpy as np
 import warp as wp
@@ -19,13 +21,14 @@ class BillboardCameraTests(unittest.TestCase):
             raise unittest.SkipTest("CUDA/OpenGL interop is required")
         cls.device = wp.get_device("cuda:0")
 
-    def make_renderer(self, renderer_type):
+    def make_renderer(self, renderer_type, **kwargs):
         renderer = renderer_type(
             title="Billboard camera regression", device=self.device, headless=True,
             scaling=1.0, up_axis="Y", camera_pos=(0, 0, 4), camera_front=(0, 0, -1),
             screen_width=320, screen_height=240, near_plane=0.1, far_plane=20,
             draw_grid=False, draw_sky=False, draw_axis=False, vsync=False,
             background_color=(0, 0, 0),
+            **kwargs,
         )
         self.addCleanup(self.close_renderer, renderer)
         positions = wp.array([[0, 0, 0]], dtype=wp.vec3, device=self.device)
@@ -62,6 +65,87 @@ class BillboardCameraTests(unittest.TestCase):
         pixels = wp.empty((240, 320, 3), dtype=wp.uint8, device=self.device)
         self.assertTrue(renderer.get_pixels(pixels, split_up_tiles=False, use_uint8=True))
         return pixels.numpy()
+
+    def test_pbf_particle_count_is_optional_and_snapshots_length_once(self):
+        class PositionsMetadata:
+            def __init__(self, count):
+                self.count = count
+                self.reads = 0
+
+            def __len__(self):
+                self.reads += 1
+                return self.count
+
+        renderer, _, _ = self.make_renderer(PBFRenderer)
+        self.assertIsNone(renderer._particle_count_label)
+        self.assertNotIn(renderer._draw_particle_count, renderer.render_2d_callbacks)
+
+        for count in (0, 125000):
+            with self.subTest(count=count):
+                metadata = PositionsMetadata(count)
+                reference = weakref.ref(metadata)
+                renderer, positions, velocities = self.make_renderer(
+                    PBFRenderer, particle_positions=metadata,
+                )
+                expected = f"Particles: {count:,}"
+                self.assertEqual(renderer._particle_count_label.text, expected)
+                metadata.count = count + 1
+                renderer.paused = True
+                renderer._draw()
+                renderer.render_billboards("points", positions, velocities, 0.4, 2.0, 7.5)
+                renderer._draw()
+                self.assertEqual(renderer._particle_count_label.text, expected)
+                self.assertEqual(metadata.reads, 1)
+                del metadata
+                self.assertIsNone(reference())
+
+    def test_pbf_particle_count_overlay_tracks_info_layout_and_visibility(self):
+        from pyglet.window import key
+
+        positions = wp.zeros(27, dtype=wp.vec3, device=self.device)
+        renderer, _, _ = self.make_renderer(PBFRenderer, particle_positions=positions)
+        label = renderer._particle_count_label
+        normal_y = label.y
+        renderer.paused = True
+        renderer._draw()
+        self.assertLess(label.y, normal_y)
+        for height in (360, 480):
+            renderer.window.set_size(480, height)
+            renderer._window_resize_callback(480, height)
+            renderer._draw()
+            self.assertEqual(label.x, renderer._info_label.x)
+            self.assertEqual(label.y, renderer._info_label.y - renderer._info_label.content_height - 4)
+            self.assertGreater(label.y - label.content_height, 0)
+            self.assertEqual(label.text, "Particles: 27")
+            self.assertEqual(renderer.gl.glGetError(), renderer.gl.GL_NO_ERROR)
+
+        with patch.object(label, 'draw', wraps=label.draw) as draw_label:
+            renderer._key_press_callback(key.I, 0)
+            renderer._draw()
+            self.assertFalse(renderer.show_info)
+            draw_label.assert_not_called()
+            renderer._key_press_callback(key.I, 0)
+            renderer._draw()
+            self.assertTrue(renderer.show_info)
+            draw_label.assert_called_once_with()
+        self.assertTrue(renderer.gl.glIsEnabled(renderer.gl.GL_DEPTH_TEST))
+
+    def test_static_particle_count_does_not_query_depth_or_update_positions(self):
+        positions = wp.zeros(27, dtype=wp.vec3, device=self.device)
+        renderer, _, _ = self.make_renderer(PBFRenderer, particle_positions=positions)
+        label = renderer._particle_count_label
+        with patch.object(label, '_update_translation', wraps=label._update_translation) as translate, \
+                patch.object(renderer.gl, 'glIsEnabled', side_effect=AssertionError('Per-frame GL query')):
+            for _ in range(3):
+                renderer._draw_particle_count()
+            translate.assert_not_called()
+            renderer.paused = True
+            renderer._draw()
+            translate.assert_called_once_with()
+        with patch.object(label, 'draw', side_effect=RuntimeError('Text draw failed')):
+            with self.assertRaisesRegex(RuntimeError, 'Text draw failed'):
+                renderer._draw_particle_count()
+        self.assertTrue(renderer.gl.glIsEnabled(renderer.gl.GL_DEPTH_TEST))
 
     def test_key_motion_updates_once_and_aligns_both_shaders(self):
         from pyglet.window import key

@@ -53,8 +53,22 @@ def load_static_scene():
 class PBFRenderer(BillboardRenderer):
     """Let the PBF main loop handle pause and deferred reset requests."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, particle_positions: wp.array | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        # Snapshot the initialized array's host metadata without retaining its buffer.
+        self._particle_count = None if particle_positions is None else len(particle_positions)
+        self._particle_count_label = None
+        if self._particle_count is not None:
+            import pyglet
+
+            self._particle_count_label = pyglet.text.Label(
+                f"Particles: {self._particle_count:,}",
+                font_name=self._info_label.font_name, font_size=self._info_label.font_size,
+                color=self._info_label.color, x=self._info_label.x,
+                anchor_x="left", anchor_y="top",
+            )
+            self.render_2d_callbacks.append(self._draw_particle_count)
+
         # Keep Warp's info overlay, but publish FPS only once per time window.
         self._fps_alpha = 0.0
         self._fps_refresh_interval = 0.5
@@ -66,6 +80,21 @@ class PBFRenderer(BillboardRenderer):
         self._fps_update_duration = 0.0
         self._fps_render_samples = 0
         self._fps_render_duration = 0.0
+
+    def _draw_particle_count(self):
+        if not self.show_info:
+            return
+        label = self._particle_count_label
+        position = (self._info_label.x, self._info_label.y - self._info_label.content_height - 4, label.z)
+        if label.position != position:
+            label.position = position
+        gl = self.gl
+        # Warp enables depth testing after its info overlay, before this first 2D callback.
+        gl.glDisable(gl.GL_DEPTH_TEST)
+        try:
+            label.draw()
+        finally:
+            gl.glEnable(gl.GL_DEPTH_TEST)
 
     def register_shape(self, geo_hash, vertices, indices, color1=None, color2=None):
         # Warp 1.15 flat-shaded meshes use np.arange(), which is int64 in NumPy 2.
@@ -126,6 +155,7 @@ class PBFRenderer(BillboardRenderer):
 def create_pbf_renderer(
     device=None, title="Warp PBF", *, scaling=0.05,
     camera_pos=(2.0, 3.0, 10.0), camera_front=(-0.1, -0.1, -1.0),
+    particle_positions: wp.array | None = None,
 ):
     """Keep the shared frontend's view settings with PBF-specific pause handling."""
     configure_nvidia_prime_render_offload()
@@ -134,6 +164,7 @@ def create_pbf_renderer(
         screen_width=1280, screen_height=720, near_plane=0.1, far_plane=100.0,
         camera_pos=camera_pos, camera_front=camera_front, camera_up=(0.0, 1.0, 0.0),
         background_color=(0.0, 0.0, 0.0), vsync=True, device=device,
+        particle_positions=particle_positions,
     )
 
 
@@ -362,6 +393,7 @@ def main():
             scaling=1.0,
             camera_pos=tuple(camera_pos),
             camera_front=tuple(-camera_offset),
+            particle_positions=simulation.pos,
         )
         billboard_radius = simulation.particle_radius
         frame = 0

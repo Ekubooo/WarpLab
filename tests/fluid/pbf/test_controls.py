@@ -265,6 +265,33 @@ class ControlsTest(unittest.TestCase):
                 self.assertAlmostEqual(float(displacement[1]), 0, places=6)
                 self.assertAlmostEqual(sim.sim_time, CONFIG.frame_dt)
 
+    def test_particle_count_survives_buffer_swaps_and_reset(self):
+        sim = self.make_simulation(replace(CONFIG, substeps=1))
+        initial_positions = sim.pos
+        renderer = frontend.PBFRenderer(
+            device=self.device, headless=True, particle_positions=sim.pos,
+            screen_width=480, screen_height=360,
+            draw_grid=False, draw_sky=False, draw_axis=False,
+        )
+        try:
+            expected = f"Particles: {sim.n:,}"
+            self.step(sim)
+            self.assertIsNot(sim.pos, initial_positions)
+            renderer.begin_frame(sim.sim_time)
+            renderer.end_frame()
+            self.assertEqual(renderer._particle_count_label.text, expected)
+            reset_simulation(sim)
+            renderer.paused = True
+            renderer.begin_frame(sim.sim_time)
+            renderer.end_frame()
+            self.assertEqual(renderer._particle_count_label.text, expected)
+            self.assertEqual(renderer._particle_count, len(sim.pos))
+            self.assertEqual(renderer.gl.glGetError(), renderer.gl.GL_NO_ERROR)
+        finally:
+            renderer._switch_context()
+            renderer._shape_instancers.clear()
+            renderer.close()
+
     def test_reset_preserves_imported_startup_config(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "startup.json"
@@ -323,6 +350,7 @@ class ControlsTest(unittest.TestCase):
         sim = self.make_simulation()
         bind_solver(sim.config, sim.grid, sim.static_sdf, sim.volume_map)
         initial = sim.pos.numpy()
+        initial_positions = sim.pos
         events = (None, key.G, key.X, key.R, key.R, key.X, key.SPACE,
                   key.X, key.SPACE, None, key.P)
         states = []
@@ -368,9 +396,10 @@ class ControlsTest(unittest.TestCase):
                 patch.object(frontend, 'parse_args', return_value=args), \
                 patch.object(frontend, 'load_static_scene', return_value=(np.zeros((3, 3)), [[0, 1, 2]])), \
                 patch.object(frontend, 'create_pbf_simulation', return_value=sim), \
-                patch.object(frontend, 'create_pbf_renderer', return_value=renderer), \
+                patch.object(frontend, 'create_pbf_renderer', return_value=renderer) as create_renderer, \
                 patch.object(wp, 'launch', wraps=wp.launch) as launching:
             frontend.main()
+        self.assertIs(create_renderer.call_args.kwargs['particle_positions'], initial_positions)
         for frame in (4, 5, 6):
             self.assertEqual(states[frame][0], 0)
             self.assertTrue(states[frame][1])
