@@ -11,6 +11,18 @@ import warp as wp
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
+VOLUME_MAP_ALGORITHM_VERSION = 1
+
+
+def _nvdb_io():
+    # Direct PBF.py execution puts only its own directory on sys.path.
+    if not __package__:
+        import sys
+        root = str(Path(__file__).resolve().parents[3])
+        if root not in sys.path:
+            sys.path.insert(0, root)
+    from demos.sim_Ready import nvdb_io
+    return nvdb_io
 
 
 @contextmanager
@@ -129,6 +141,106 @@ def load_static_sdf(filename, *, device=None) -> wp.Volume:
     print(f"Static SDF loaded: {path} (voxel size {volume.get_voxel_size()[0]:g} m)")
 
     return volume
+
+
+def _volume_map_name(support_radius, quadrature_points):
+    return (f"PBF_VMAP|v={VOLUME_MAP_ALGORITHM_VERSION}"
+            f"|h={float(support_radius).hex()}|q={int(quadrature_points)}")
+
+
+def _check_sdf_support(sdf, support_radius):
+    name = sdf.get_grid_info().name
+    if not name.startswith("PBF_SDF|"):
+        return  # Legacy full-domain assets have no positive-side truncation.
+    try:
+        fields = dict(item.split("=", 1) for item in name.split("|")[1:])
+        maximum = float.fromhex(fields["hmax"])
+        if fields["v"] != "1" or not math.isfinite(maximum) or maximum <= 0:
+            raise ValueError("Unsupported SDF metadata")
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"Invalid sparse SDF metadata: {name}") from error
+    if support_radius > maximum:
+        raise ValueError(f"SDF supports h <= {maximum:g} m, requested {support_radius:g} m; "
+                         "regenerate the asset with a larger max support radius")
+
+
+def _read_boundary_volumes(path, device):
+    count = _nvdb_io().grid_count(path)
+    with path.open("rb") as stream:
+        sdf = wp.Volume.load_from_nvdb(stream, device=device)
+    if sdf.dtype != wp.float32 or sdf.is_index:
+        raise ValueError("Static SDF must be a float32 scalar distance grid")
+    info = sdf.get_grid_info()
+    if info.grid_index != 0 or info.grid_count != count:
+        raise ValueError("NanoVDB file and first grid headers disagree on grid count or index")
+    if info.name.startswith("PBF_VMAP|"):
+        raise ValueError("The first NanoVDB grid must be the SDF, not a volume map")
+    volume_map = sdf.load_next_grid()
+    if (count == 2) != (volume_map is not None):
+        raise ValueError("NanoVDB file and grid headers disagree on grid count")
+    if volume_map is not None:
+        info = volume_map.get_grid_info()
+        if info.grid_index != 1 or info.grid_count != count:
+            raise ValueError("NanoVDB second grid header has an invalid count or index")
+        if volume_map.dtype != wp.float32 or volume_map.is_index:
+            raise ValueError("Volume map must be a float32 scalar grid")
+        if volume_map.load_next_grid() is not None:
+            raise ValueError("Unexpected third NanoVDB grid")
+    wp.synchronize_device(device)
+    return sdf, volume_map
+
+
+def _check_volume_map_layout(sdf, volume_map):
+    a, b = sdf.get_grid_info(), volume_map.get_grid_info()
+    if (not np.array_equal(a.transform_matrix, b.transform_matrix)
+            or not np.array_equal(a.translation, b.translation)
+            or sdf.get_tile_count() != volume_map.get_tile_count()
+            or not np.array_equal(sdf.get_tiles().numpy(), volume_map.get_tiles().numpy())):
+        raise ValueError("Volume map coordinate transform or allocated tiles differ from SDF")
+
+
+def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=None):
+    """Load a matched grid pair, or compute, atomically cache and reload it.
+
+    Only the selected NVDB is updated. Geometry baking and asset publication
+    remain the responsibility of sim_Ready's standalone pipeline.
+    """
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Static SDF not found: {path}; generate it with python -m demos.sim_Ready first")
+    if not math.isfinite(support_radius) or support_radius <= 0:
+        raise ValueError("support_radius must be finite and positive")
+    if (isinstance(quadrature_points, bool) or not isinstance(quadrature_points, Integral)
+            or quadrature_points < 1):
+        raise ValueError("quadrature_points must be a positive integer")
+    selected = wp.get_device(device)
+    if not selected.is_cuda:
+        raise ValueError(f"Static NanoVDB boundary loading requires a CUDA device: {path}")
+    expected = _volume_map_name(support_radius, quadrature_points)
+    try:
+        sdf, volume_map = _read_boundary_volumes(path, selected)
+        _check_sdf_support(sdf, support_radius)
+        if volume_map is not None and volume_map.get_grid_info().name == expected:
+            _check_volume_map_layout(sdf, volume_map)
+            print(f"Boundary cache hit: {path} (h={support_radius:g} m, q={quadrature_points})")
+            return sdf, volume_map
+        print(f"Boundary cache rebuild: {path} (h={support_radius:g} m, q={quadrature_points})")
+        volume_map = None
+        volume_map = precompute_volumeMap(sdf, support_radius, quadrature_points=quadrature_points)
+        _nvdb_io().save_volumes(
+            (sdf, volume_map), path, grid_names=(sdf.get_grid_info().name, expected),
+        )
+        # Reload the persisted pair through the same reader, without retaining
+        # the old GPU allocations (including any stale map aliased by sdf).
+        sdf = volume_map = None
+        sdf, volume_map = _read_boundary_volumes(path, selected)
+        if volume_map is None or volume_map.get_grid_info().name != expected:
+            raise ValueError("Saved boundary cache metadata does not match requested parameters")
+        _check_sdf_support(sdf, support_radius)
+        _check_volume_map_layout(sdf, volume_map)
+        return sdf, volume_map
+    except Exception as error:
+        raise RuntimeError(f"Cannot load boundary volumes {path}: {error}") from error
 
 
 def _build_volume_quadrature(support_radius, quadrature_points):

@@ -85,7 +85,11 @@ python -m demos.fluid.PBF.render_opengl --device cuda:0 --particle-radius 0.01 -
 SDF_FILENAME = "stairs_scene.nvdb"
 ```
 
-两个入口均不提供 SDF 文件选择 CLI。选定 CUDA 设备后创建仿真实例，由 `PBF.__init__()` 调用 `boundary_model.load_static_sdf(SDF_FILENAME, device=...)`，读取已有的 float32 NanoVDB。加载逻辑仍在构造函数中，文件名不进入构造或创建函数的参数列表。OpenGL 从同一 `PBF.SDF_FILENAME` 解析配对 OBJ；USD 只读取 NVDB。物理 JSON 不包含资产选择。返回的完整 `wp.Volume` 由 `self.static_sdf` 持有；重置不会重新加载。文件缺失、损坏或类型错误会报告完整路径，不自动烘焙。
+两个入口均不提供 SDF 文件选择 CLI。选定 CUDA 设备后创建仿真实例，由 `PBF.__init__()` 将解析后的 NVDB 路径、当前支撑半径 `h` 和设备传给 `boundary_model.load_boundary_volumes()`，接收 SDF 和体积图。加载逻辑仍在构造函数中，文件名不进入构造或创建函数的参数列表。OpenGL 从同一 `PBF.SDF_FILENAME` 解析配对 OBJ；USD 只读取 NVDB。物理 JSON 不包含资产选择。两个 `wp.Volume` 由 `self.static_sdf`、`self.volume_map` 持有；重置不会重新加载。文件缺失、损坏或类型错误会报告完整路径，不自动烘焙几何。
+
+首次读取 SimReady 发布的单网格 SDF 时，boundary_model 调用现有体积图预计算，然后调用 SimReady 的 `nvdb_io.save_volumes()` 原子写回当前 NVDB。文件使用一个 segment，依次保存 SDF 和体积图两个 float32 grid；写回后释放临时资源，再通过统一读取路径返回两个 Volume。此过程不安装额外 NanoVDB 库、不修改压力或碰撞算法，也不手动复制资产。再次启动若缓存有效则直接读取，不再积分。仅 PBF 正在读取的资产副本会补齐缓存，SimReady 的 output 副本仍可保持单网格。
+
+体积图 grid 名称保存 `h`、每轴高斯积分点数（默认 16）和 `VOLUME_MAP_ALGORITHM_VERSION`（初始 1）；任一不匹配或缺少缓存标记都会重新计算并替换第二网格。修改会影响预计算结果的公式或规则时递增该版本。SimReady 的正侧窄带 SDF 名称记录 `max_support_radius`，运行时要求 `h <= max_support_radius`；超出时须用更大上限重新烘焙，不能依靠重算体积图恢复已省略的距离。旧全域 SDF 无此标记，仍然兼容。
 
 在仓库根目录、Conda `warplab` 环境中启动，无需 SDF CLI 参数：
 
@@ -101,13 +105,13 @@ conda run -n warplab --no-capture-output python -m demos.fluid.PBF.PBF --device 
 
 直接脚本运行也支持。仿真入口不接受 `--boundary-obj`、`--sdf-voxel-size`、`--sdf-force-rebuild`，新资产由独立的 sim_Ready 管线准备。要换文件，修改 `PBF.py` 的 `SDF_FILENAME`；`--help` 和 `--export-config` 仍直接退出，不读 SDF 或初始化设备。
 
-`PBF(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 无需接收资产参数。每次创建实例都会读取所选 SDF 并分配 GPU Volume。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
+`PBF(stage_path="example_pbf.usd", verbose=False, config=None)` 和 `create_pbf_simulation(verbose=False, config=None)` 无需接收资产参数。每次创建实例读取所选 NVDB 并分配 GPU Volume；缓存缺失时额外预计算、保存和重读。**每轮压力迭代使用 SDF 投影粒子位置；SDF 与 PBF 均为 Y-up，直接使用世界坐标，不再有运行时 Z 偏移。** 原箱体位置限制及碰撞速度反弹未启用；初始化仍为长方体点阵，未按 SDF 筛选。OpenGL 入口单独渲染无墙景观；完整 SDF 容器的围墙及顶盖不显示。
 
-当前文件的体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=4.5 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,4.5,1.525)`，内部仍有台阶和模型。全覆盖体素场的显存和文件大小随高度增长，加载时另有临时缓冲。NanoVDB 读取需要 CUDA；直接通过 Python API 创建实例也会加载，因此当前创建仿真实例同样需要 CUDA 和有效的 SDF 文件。
+默认资产体素间距为 0.0075 米，墙厚 0.25 米、坑底最薄处 0.20 米、内顶面 Y=4.5 米。空腔坐标极值为 `(0.075,0,0.075)` 至 `(3.025,4.5,1.525)`，内部仍有台阶和模型。新烘焙保留全部固体内部负距离与正侧保留带，远场使用正背景并省略 tile；体积图复用相同 tile 和坐标变换、背景为零。两种背景值不同是预期行为。缓存首次写回有 CPU 打包开销，加载时也有临时缓冲。NanoVDB 边界加载需要 CUDA；直接通过 Python API 创建实例也会加载，因此同样需要 CUDA 和有效的 SDF 文件。保存或校验失败会报错，并保留替换前的文件；不支持多 segment 或超过两个 grid 的输入。
 
 选择其他已烘焙文件时，在 `PBF.py` 中设置 `SDF_FILENAME = "other.nvdb"`；OpenGL 将读取 `Assets/other.obj`。
 
-原 `Assets/Boundary` 与 `Assets/Container` 完整保留为归档，不参与加载，也不作为缺失文件的回退路径。OpenGL 按 NVDB 文件名选择同名 OBJ，USD 入口只要求 NVDB。PBF 不导入资产生成程序，生成程序也不导入 PBF。
+原 `Assets/Boundary` 与 `Assets/Container` 完整保留为归档，不参与加载，也不作为缺失文件的回退路径。OpenGL 按 NVDB 文件名选择同名 OBJ，USD 入口只要求 NVDB。运行期仅调用 SimReady 的 NVDB 写入工具，不启动几何资产生成管线；生成程序不导入 PBF。
 
 ## 独立资产准备
 
@@ -121,7 +125,7 @@ python -m demos.fluid.PBF.render_opengl --device cuda:0
 
 上例生成 Spot 后，若要在 PBF 使用它，先将 `PBF.py` 的 `SDF_FILENAME` 改为 `"stairs_spot.nvdb"`。
 
-裸 OBJ 文件名从 `sim_Ready/Assets` 读取；新管线每次重新计算，不使用旧缓存。默认体素间距 `0.0075 m`、padding 三个体素，实体为负、空腔和外部为正。输出同名的无墙景观 OBJ 与封闭容器 NVDB，不保存容器 OBJ。完整说明见 [sim_Ready](../../sim_Ready/README.md)。Boundary 的旧生成和烘焙工具仍完整保留，但属于归档流程，不用于当前资源发布。
+裸 OBJ 文件名从 `sim_Ready/Assets` 读取；新管线每次重新计算，不使用旧缓存。默认体素间距 `0.0075 m`、每侧 padding 三个体素，外侧包围盒沿用原版范围，不随支撑半径扩大；实体为负、空腔和外部为正。正侧有效带及体积图正确性保证针对封闭容器的空腔使用区域，外表面邻近网格边缘处不保证与扩展全域参考一致。输出同名的无墙景观 OBJ 与封闭容器 NVDB，不保存容器 OBJ。完整说明见 [sim_Ready](../../sim_Ready/README.md)。Boundary 的旧生成和烘焙工具仍完整保留，但属于归档流程，不用于当前资源发布。
 
 ## 测试
 

@@ -33,7 +33,7 @@ class CUDAGraphTest(unittest.TestCase):
         with wp.ScopedDevice(self.device), contextlib.redirect_stdout(io.StringIO()):
             sdf = wp.Volume.allocate([0, 0, 0], [0, 0, 0], 1.0, bg_value=10.0,
                                      translation=(100.0, 100.0, 100.0), device=self.device)
-            with patch.object(solver.boundary_model, "load_static_sdf", return_value=sdf):
+            with patch.object(solver.boundary_model, "load_boundary_volumes", return_value=(sdf, sdf)):
                 sim = solver.PBF(stage_path=None, config=config)
             bind_solver(config, sim.grid, sim.static_sdf, sim.volume_map)
             # Exercise nonzero pressure, curl and viscosity rather than uniform free fall.

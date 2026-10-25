@@ -19,10 +19,15 @@ def parse_args(argv=None):
                         help="Output filename stem (default: stairs_scene); no path or extension")
     parser.add_argument("--obj-up-axis", choices=("Y", "Z"), default="Y")
     parser.add_argument("--sdf-voxel-size", type=float, default=config.BakeOptions.voxel_size)
+    parser.add_argument("--sdf-max-support-radius", type=float,
+                        default=config.BakeOptions.max_support_radius,
+                        help="Maximum supported fluid smoothing radius, in meters (default: 0.05)")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args(argv)
     if not 0 < args.sdf_voxel_size < float("inf"):
         parser.error("--sdf-voxel-size must be finite and positive")
+    if not 0 < args.sdf_max_support_radius < float("inf"):
+        parser.error("--sdf-max-support-radius must be finite and positive")
     return args
 
 
@@ -32,7 +37,8 @@ def main(argv=None):
     try:
         return build_assets(args.obj, name=args.name, device=args.device,
                             obj_up_axis=args.obj_up_axis,
-                            bake_options=config.BakeOptions(voxel_size=args.sdf_voxel_size))
+                            bake_options=config.BakeOptions(voxel_size=args.sdf_voxel_size,
+                                max_support_radius=args.sdf_max_support_radius))
     except (OSError, ValueError, RuntimeError) as error:
         raise SystemExit(f"Cannot build assets: {error}") from error
 

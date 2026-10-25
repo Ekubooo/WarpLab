@@ -32,3 +32,4 @@ class GeometryOptions:
 class BakeOptions:
     voxel_size: float = 0.0075
     padding_voxels: int = 3
+    max_support_radius: float = 0.05

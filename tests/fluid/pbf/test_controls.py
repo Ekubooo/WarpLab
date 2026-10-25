@@ -173,7 +173,8 @@ class ControlsTest(unittest.TestCase):
             # Keep controls tests independent of the scene while providing a valid SDF id.
             empty_sdf = wp.Volume.allocate([0, 0, 0], [0, 0, 0], 1.0, bg_value=10.0,
                                            translation=(100.0, 100.0, 100.0), device=self.device)
-            with patch.object(solver.boundary_model, "load_static_sdf", return_value=empty_sdf):
+            with patch.object(solver.boundary_model, "load_boundary_volumes",
+                              return_value=(empty_sdf, empty_sdf)):
                 return solver.PBF(stage_path=None, config=config)
 
     def step(self, sim, count=1):
@@ -216,7 +217,7 @@ class ControlsTest(unittest.TestCase):
         # Steps may swap position buffers; reset must preserve the current bindings.
         pointers = tuple(getattr(sim, name).ptr for name in buffer_names)
         with wp.ScopedDevice("cpu"), \
-                patch.object(solver.boundary_model, "load_static_sdf",
+                patch.object(solver.boundary_model, "load_boundary_volumes",
                              side_effect=AssertionError("Reset reloaded SDF")):
             reset_simulation(sim)
             reset_simulation(sim)

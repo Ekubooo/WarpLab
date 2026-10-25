@@ -336,9 +336,11 @@ class PBF:
 
         fn.init_parameters(self)
         fn.init_device_buffers(self)
-        # Keep the GPU Volume alive while the solver queries its SDF.
-        self.static_sdf = boundary_model.load_static_sdf(SDF_FILENAME, device=wp.get_device())
-        self.volume_map = boundary_model.precompute_volumeMap(self.static_sdf, self.smoothing_length)
+        # Retain both owning resources while kernels query the boundary.
+        self.static_sdf, self.volume_map = boundary_model.load_boundary_volumes(
+            boundary_model.resolve_sdf_path(SDF_FILENAME), self.smoothing_length,
+            device=wp.get_device(),
+        )
         global SDF_id, VMAP_id
         SDF_id = wp.constant(wp.uint64(self.static_sdf.id))
         VMAP_id = wp.constant(wp.uint64(self.volume_map.id))

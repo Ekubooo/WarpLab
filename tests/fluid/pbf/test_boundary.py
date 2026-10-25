@@ -107,7 +107,7 @@ class BoundaryInterfaceTest(unittest.TestCase):
                 self.assertEqual(entry.parse_args(["--config", str(preset)]).config.substeps, 2)
                 with patch.object(sys, "argv", [entry.__name__, "--export-config", "test.json"]), \
                         patch.object(config_io, "CONFIG_DIR", Path(directory)), \
-                        patch.object(boundary, "load_static_sdf", side_effect=AssertionError("SDF touched")), \
+                        patch.object(boundary, "load_boundary_volumes", side_effect=AssertionError("SDF touched")), \
                         patch.object(wp, "ScopedDevice", side_effect=AssertionError("GPU touched")), \
                         contextlib.redirect_stdout(io.StringIO()):
                     entry.main()
@@ -177,27 +177,28 @@ class BoundaryInterfaceTest(unittest.TestCase):
         class Resource:
             id = 1
         refs = []
-        def load(filename=None, *, device):
-            resource = Resource()
-            refs.append(weakref.ref(resource))
-            return resource
+        def load(path, support_radius, *, device):
+            resources = (Resource(), Resource())
+            refs.extend(weakref.ref(resource) for resource in resources)
+            return resources
         device = object()
         with patch.object(solver.fn, "init_parameters",
                           side_effect=lambda sim: setattr(sim, "smoothing_length", 0.05)), \
                 patch.object(solver.fn, "init_device_buffers"), \
                 patch.object(wp, "get_device", return_value=device), \
-                patch.object(boundary, "load_static_sdf", side_effect=load) as loading, \
-                patch.object(boundary, "precompute_volumeMap", return_value=Resource()) as precomputing:
+                patch.object(boundary, "load_boundary_volumes", side_effect=load) as loading:
             sim = solver.PBF(stage_path=None)
-        loading.assert_called_once_with(solver.SDF_FILENAME, device=device)
-        precomputing.assert_called_once_with(sim.static_sdf, sim.smoothing_length)
+        loading.assert_called_once_with(boundary.resolve_sdf_path(solver.SDF_FILENAME),
+                                       sim.smoothing_length, device=device)
         # Mock call history must not hold the SDF alive after the instance dies.
-        precomputing.reset_mock()
+        loading.reset_mock()
         gc.collect()
         self.assertIs(refs[0](), sim.static_sdf)
+        self.assertIs(refs[1](), sim.volume_map)
         del sim
         gc.collect()
         self.assertIsNone(refs[0]())
+        self.assertIsNone(refs[1]())
 
     def test_both_main_functions_delegate_loading_to_constructor(self):
         for entry in (solver, frontend):
@@ -212,7 +213,7 @@ class BoundaryInterfaceTest(unittest.TestCase):
             renderer.is_running.return_value = False
             with patch.object(entry, "parse_args", return_value=args), \
                     patch.object(entry.wp, "ScopedDevice", return_value=contextlib.nullcontext()), \
-                    patch.object(boundary, "load_static_sdf",
+                    patch.object(boundary, "load_boundary_volumes",
                                  side_effect=AssertionError("Entry loaded SDF twice")) as loading, \
                     patch.object(entry, constructor, return_value=fake) as creating, \
                     contextlib.ExitStack() as stack:
@@ -262,7 +263,7 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                 volume_ref = weakref.ref(sim.static_sdf)
                 self.assertIsInstance(sim.static_sdf, wp.Volume)
                 self.assertAlmostEqual(sim.static_sdf.get_voxel_size()[0], 0.05, places=6)
-                with patch.object(boundary, "load_static_sdf", side_effect=AssertionError("Reset reloaded SDF")):
+                with patch.object(boundary, "load_boundary_volumes", side_effect=AssertionError("Reset reloaded SDF")):
                     reset_simulation(sim)
                 gc.collect()
                 self.assertIs(volume_ref(), sim.static_sdf)
@@ -299,7 +300,7 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                 wp.launch(probe_sdf, dim=3, inputs=[data, points, distances, gradients])
                 np.testing.assert_allclose(distances.numpy(), [0.4, -0.1, 0.04], atol=0.015)
                 other_volume = other.static_sdf
-                with patch.object(boundary, "load_static_sdf", side_effect=AssertionError("Reset reloaded SDF")):
+                with patch.object(boundary, "load_boundary_volumes", side_effect=AssertionError("Reset reloaded SDF")):
                     reset_simulation(other)
                 self.assertIs(other.static_sdf, other_volume)
                 # These world coordinates must project against the unshifted Volume.

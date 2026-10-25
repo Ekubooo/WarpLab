@@ -317,6 +317,8 @@ class BakeTests(unittest.TestCase):
 
     def test_invalid_bake_options(self):
         for options in (config.BakeOptions(voxel_size=0), config.BakeOptions(voxel_size=float("nan")),
-                        config.BakeOptions(padding_voxels=0), config.BakeOptions(padding_voxels=True)):
+                        config.BakeOptions(padding_voxels=0), config.BakeOptions(padding_voxels=True),
+                        config.BakeOptions(max_support_radius=0),
+                        config.BakeOptions(max_support_radius=float("inf"))):
             with self.assertRaises(ValueError):
                 sdf.check_options(options)
