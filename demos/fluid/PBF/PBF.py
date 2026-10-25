@@ -448,6 +448,58 @@ class PBF:
 
             self.sim_time += self.frame_dt
 
+    def capture_graph(self):
+        """Capture a full step for both buffers; recapture after changing parameters."""
+        device = self.pos.device
+        if not device.is_cuda:
+            raise RuntimeError("PBF graph capture requires a CUDA device")
+
+        original = (self.pos, self.pre_Pos, self.temp_pos, self.temp_pPos)
+        sim_time = self.sim_time
+        starts = (
+            original,
+            (original[2], original[3], original[0], original[1])
+        )
+        graphs = {}
+
+        with wp.ScopedDevice(device):
+            wp.load_module(module=fn.__name__, device=device)
+            wp.load_module(module=__name__, device=device)
+            self.grid.reserve(self.n)
+
+            try:
+                for buffers in starts:
+                    self.pos, self.pre_Pos, self.temp_pos, self.temp_pPos = buffers
+                    key = (self.pos.ptr, self.pre_Pos.ptr)
+
+                    with wp.ScopedCapture() as capture:
+                        self.step()
+
+                    # Replay needs the same bindings as the Python buffer swaps.
+                    end_buffers = (self.pos, self.pre_Pos, self.temp_pos, self.temp_pPos)
+                    graphs[key] = (capture.graph, end_buffers)
+            finally:
+                self.pos, self.pre_Pos, self.temp_pos, self.temp_pPos = original
+                self.sim_time = sim_time
+
+        self.step_graphs = graphs
+
+    def launch_graph(self):
+        """Replay one full step, then update the Python buffer bindings and time."""
+        graphs = getattr(self, "step_graphs", None)
+        if graphs is None:
+            raise RuntimeError("Call capture_graph() before launch_graph()")
+
+        key = (self.pos.ptr, self.pre_Pos.ptr)
+        if key not in graphs:
+            raise RuntimeError("Position buffers changed; call capture_graph() again")
+        graph, end_buffers = graphs[key]
+
+        with wp.ScopedDevice(self.pos.device):
+            wp.capture_launch(graph)
+        self.pos, self.pre_Pos, self.temp_pos, self.temp_pPos = end_buffers
+        self.sim_time += self.frame_dt
+
     def render(self):
         if self.renderer is None:
             return
