@@ -1,7 +1,8 @@
-"""Construct Y-up landscape and collision solids from shared source geometry.
+"""Prepare container scenes and independent rigid geometry in memory.
 
-The two boolean branches are independent. Only their simplified results are
-consumed downstream; no function in this module writes files.
+The container's two boolean branches are independent; independent rigid assets
+use explicit transforms without placement or simplification. No function in
+this module writes files.
 """
 
 from dataclasses import dataclass
@@ -64,6 +65,28 @@ def simplify(mesh, tolerance):
     if tolerance < solid.get_tolerance():
         raise ValueError("Requested simplification tolerance is below the backend minimum")
     return _mesh(solid.simplify(tolerance))
+
+
+def prepare_rigid(obj_path, *, scale=1.0, obj_up_axis=None):
+    """Read independent geometry, applying only explicitly requested transforms.
+
+    Input units are meters unless changed by ``scale``. The default preserves
+    the model origin and axes. Explicit Z-up conversion rotates around that
+    origin into Y-up, matching the container input convention.
+    """
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("Rigid model scale must be finite and positive")
+    if obj_up_axis not in (None, "Y", "Z"):
+        raise ValueError("OBJ up axis must be Y, Z or omitted to preserve its axes")
+    model = trimesh.load(obj_path, force="mesh", process=False)
+    if not isinstance(model, trimesh.Trimesh) or model.is_empty or not np.isfinite(model.vertices).all():
+        raise ValueError("Input OBJ must contain a finite, nonempty triangle mesh")
+    # Keep separate parts unwelded until input validation and boolean union.
+    if scale != 1.0:
+        model.apply_scale(scale)
+    if obj_up_axis == "Z":
+        model.apply_transform(trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0]))
+    return model
 
 
 def _check_options(options):

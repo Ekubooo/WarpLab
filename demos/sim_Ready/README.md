@@ -1,6 +1,8 @@
 # sim_Ready 离线资产管线
 
-将输入模型放置在程序化阶梯中央，输出一套同名文件：`NAME.obj` 是无墙景观，`NAME.nvdb` 是含四墙与顶盖的碰撞距离场。两者使用相同的 Y-up 世界坐标，单位为米。几何生成与仿真通过资产文件衔接；PBF 只复用 SimReady 独立的 NVDB 写入工具，不启动几何生成管线。
+包含两条独立流程：默认容器流程将模型放置在程序化阶梯中央；刚体流程处理保留局部原点的独立实体。两条流程均输出同名 OBJ 和单网格 SDF NVDB，再发布到相同的配置目的地。几何生成与仿真通过资产文件衔接；PBF 只复用 SimReady 独立的 NVDB 写入工具，不启动几何生成管线。
+
+容器流程的 `NAME.obj` 是无墙景观，`NAME.nvdb` 是含四墙与顶盖的碰撞距离场，使用 Y-up 世界坐标和米制单位。刚体流程的两份文件表示同一独立实体，使用一致的资产局部坐标。
 
 ## 使用
 
@@ -26,7 +28,58 @@ python demos/sim_Ready/__main__.py --help
 
 依赖：`numpy`、`trimesh`、支持 `Mesh64` 的 `manifold3d` 和支持 CUDA NanoVDB 的 `warp`。运行测试另需 `scipy`。输入模型必须是封闭、朝向一致的正体积实体；不会自动补洞或裁平模型。
 
-## 阶段与职责
+## 独立刚体流程
+
+从仓库根目录使用独立入口，容器入口 `python -m demos.sim_Ready` 保持原行为：
+
+```powershell
+conda run -n WarpSim --no-capture-output python -m demos.sim_Ready.rigid_pipeline --obj bunny_flat_bottom.obj --name rigid_bunny
+# 直接脚本运行同样支持
+python demos/sim_Ready/rigid_pipeline.py --obj path/to/part.obj --name rigid_part
+```
+
+`--obj` 和 `--name` 必填，名称和路径解析规则与容器一致。新增参数及差异如下，其余烘焙参数和设备参数沿用上表：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `--scale` | `1.0` | 显式等比缩放，必须为有限正数；输入单位按米解释，可用于单位换算 |
+| `--obj-up-axis Y\|Z` | 不指定 | 默认保留模型局部轴；仅显式指定 Z 时绕原点旋转为 Y-up |
+
+不自动居中、按平台缩放、放置到地形或简化模型。输出仍为 `output/NAME.obj` 与 `output/NAME.nvdb`，并按 `config.OUTPUT_DIRECTORIES` 发布，默认包括 `PBF/Assets`。请为刚体选择独立名称，避免覆盖同名容器。
+
+```text
+rigid_pipeline.build_rigid_asset()
+├─ 解析路径与源文件覆盖保护
+├─ geometry.prepare_rigid()：读取模型、显式缩放／轴转换
+├─ validation.validate_rigid_parts()：校验各个输入部件
+├─ geometry.union()：合并重叠实体，移除内部重复表面
+├─ validation.validate_solid()：校验结果及 float32 转换
+├─ pipeline.save_mesh_obj()：保存局部坐标 OBJ
+├─ sdf.bake_rigid() → sdf.bake()：计算外扩范围，复用 GPU 烘焙
+└─ 保存单网格 NVDB → pipeline.publish_pair()
+```
+
+同一个资产可以包含多个固定在一起的正向封闭部件。支持重叠、面接触和彼此分离的实体；布尔并集后只在点／边连接而形成非流形的结果会被拒绝。输入中的开放面、反向部件、退化／重复面和 float32 转换后坍缩都会报错；只合并完全重合的顶点，不自动补洞、修复法线或推断嵌套空腔。带反向内壳的空腔模型不在本流程支持范围。拓扑校验不构成通用自交证明。
+
+刚体每侧采样域至少外扩 `ceil((2*h_max + 2*sqrt(3)*dx)/dx)` 个体素，并取不小于 `BakeOptions.padding_voxels` 的值；默认外扩 17 个体素（0.1275 m），随后按原有 tile 规则对齐。该范围覆盖当前 PBF 体积图的外侧积分和插值邻域；不改变容器默认 3 个体素的外扩规则。SDF 距离符号、正侧截断背景及 `hmax` 元数据格式仍与容器一致。
+
+Python API：
+
+```python
+from demos.sim_Ready.config import BakeOptions
+from demos.sim_Ready.rigid_pipeline import build_rigid_asset
+
+result = build_rigid_asset(
+    "part.obj", name="rigid_part", scale=1.0, obj_up_axis=None,
+    bake_options=BakeOptions(voxel_size=0.0075, max_support_radius=0.05),
+    device="cuda:0",
+)
+print(result.mesh, result.sdf, result.destinations)
+```
+
+本流程只生产几何与 SDF，不导入 Newton／MimicKit，不处理关节、质量惯量或动态位姿。PBF 的体积图功能保持原样：读取该 NVDB 后生成并缓存体积图到同一文件。重新运行刚体流程会重新发布单网格 SDF，下次 PBF 加载时重新生成体积图。PBF 当前默认场景不会自动切换为新刚体；动态实例接入属于后续工作。
+
+## 容器阶段与职责
 
 ```text
 __main__.py：CLI 参数

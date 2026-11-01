@@ -17,6 +17,14 @@ class BuildResult:
     destinations: tuple[Path, ...]
 
 
+@dataclass(frozen=True)
+class AssetPaths:
+    source: Path
+    mesh: Path
+    sdf: Path
+    destinations: tuple[Path, ...]
+
+
 def validate_name(value):
     if (not isinstance(value, str) or not value or value != value.strip()
             or any(c in value for c in '/\\:.<>"|?*')
@@ -43,6 +51,21 @@ def _protect_input(source, paths):
             raise ValueError(f"Output would overwrite the input model: {path}")
 
 
+def resolve_asset_paths(obj_path, name):
+    """Resolve shared input/output rules without touching output files."""
+    name = validate_name(name)
+    source = resolve_obj(obj_path)
+    directories = tuple(dict.fromkeys(Path(p).resolve() for p in config.OUTPUT_DIRECTORIES))
+    output = config.OUTPUT.resolve()
+    if output not in directories:
+        raise ValueError("Output destinations must include the primary output directory")
+    paths = [directory / (name + extension) for directory in directories for extension in (".obj", ".nvdb")]
+    _protect_input(source, paths)
+    if not source.is_file():
+        raise FileNotFoundError(f"Input OBJ not found: {source}")
+    return AssetPaths(source, output / (name + ".obj"), output / (name + ".nvdb"), directories)
+
+
 def _temporary(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, filename = tempfile.mkstemp(prefix=path.stem + ".", suffix=".asset.tmp", dir=path.parent)
@@ -50,10 +73,11 @@ def _temporary(path):
     return Path(filename)
 
 
-def _save_landscape(mesh, path):
+def save_mesh_obj(mesh, path, *, digits=8):
+    """Atomically save geometry; containers retain their original precision."""
     temporary = _temporary(path)
     try:
-        temporary.write_text(mesh.export(file_type="obj"), encoding="utf-8")
+        temporary.write_text(mesh.export(file_type="obj", digits=digits), encoding="utf-8")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -106,27 +130,18 @@ def build_assets(obj_path="bunny_flat_bottom.obj", *, name=config.DEFAULT_NAME,
                  geometry_options=config.GeometryOptions(), bake_options=config.BakeOptions(),
                  obj_up_axis="Y", device="cuda:0"):
     """Always rebuild. The local OBJ is available before collision baking starts."""
-    name = validate_name(name)
-    source = resolve_obj(obj_path)
-    directories = tuple(dict.fromkeys(Path(p).resolve() for p in config.OUTPUT_DIRECTORIES))
-    output = config.OUTPUT.resolve()
-    if output not in directories:
-        raise ValueError("Output destinations must include the primary output directory")
-    paths = [directory / (name + extension) for directory in directories for extension in (".obj", ".nvdb")]
-    _protect_input(source, paths)
-    if not source.is_file():
-        raise FileNotFoundError(f"Input OBJ not found: {source}")
+    paths = resolve_asset_paths(obj_path, name)
     # Lazy imports keep help/name/path handling independent of CUDA and mesh libraries.
     from . import geometry, sdf, validation
     sdf.check_options(bake_options)
     stage = "scene preparation"
     try:
-        scene = geometry.prepare_scene(source, options=geometry_options, obj_up_axis=obj_up_axis)
+        scene = geometry.prepare_scene(paths.source, options=geometry_options, obj_up_axis=obj_up_axis)
         print(f"Model scale: {scene.scale:.9g}", flush=True)
         stage = "landscape boolean and simplification"
         visible = geometry.landscape(scene, geometry_options)
-        obj = output / (name + ".obj")
-        _save_landscape(visible, obj)
+        obj = paths.mesh
+        save_mesh_obj(visible, obj)
         print(f"Landscape: {obj} ({len(visible.faces)} triangles)", flush=True)
         stage = "container boolean and simplification"
         collision, bounds = geometry.container(scene, geometry_options)
@@ -135,12 +150,12 @@ def build_assets(obj_path="bunny_flat_bottom.obj", *, name=config.DEFAULT_NAME,
         print(f"Cavity bounds: {checked.cavity_bounds.tolist()}", flush=True)
         stage = "SDF baking"
         volume = sdf.bake(checked, options=bake_options, device=device)
-        nvdb = output / (name + ".nvdb")
+        nvdb = paths.sdf
         sdf.save_volume(volume, nvdb)
         stage = "asset publication"
-        publish_pair((obj, nvdb), [p for p in directories if p != output])
-        for directory in directories:
+        publish_pair((obj, nvdb), [p for p in paths.destinations if p != obj.parent])
+        for directory in paths.destinations:
             print(f"Assets: {directory / name}.obj / .nvdb", flush=True)
-        return BuildResult(obj, nvdb, directories)
+        return BuildResult(obj, nvdb, paths.destinations)
     except (OSError, ValueError, RuntimeError) as error:
         raise RuntimeError(f"{stage} failed: {error}") from error

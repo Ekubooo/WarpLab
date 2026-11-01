@@ -1,7 +1,8 @@
 """Validate in-memory collision geometry before uploading float32 data to CUDA.
 
-Checks establish closed manifold topology, orientation and the expected cuboid
-exterior/single cavity. They do not constitute a general self-intersection proof.
+Shared checks establish closed manifold topology and orientation. Container
+checks additionally require a cuboid exterior/single cavity. These checks do
+not constitute a general self-intersection proof.
 No repair or per-shell normal correction is performed.
 """
 
@@ -20,7 +21,16 @@ class ValidatedMesh:
     cavity_bounds: np.ndarray
 
 
-def _triangles(vertices, faces, label):
+@dataclass(frozen=True)
+class ValidatedSolidMesh:
+    """GPU-ready independent solid; its coordinates retain the asset origin."""
+
+    vertices: np.ndarray
+    faces: np.ndarray
+    bounds: np.ndarray
+
+
+def _triangles(vertices, faces, label, *, weld=True):
     if vertices.ndim != 2 or vertices.shape[1] != 3 or not len(vertices):
         raise ValueError(f"{label}: expected nonempty 3D vertices")
     if not np.isfinite(vertices).all():
@@ -29,8 +39,9 @@ def _triangles(vertices, faces, label):
         raise ValueError(f"{label}: expected nonempty triangle indices")
     if not np.issubdtype(faces.dtype, np.integer) or faces.min() < 0 or faces.max() >= len(vertices):
         raise ValueError(f"{label}: invalid vertex indices")
-    vertices, mapping = np.unique(vertices, axis=0, return_inverse=True)
-    faces = mapping[faces]
+    if weld:
+        vertices, mapping = np.unique(vertices, axis=0, return_inverse=True)
+        faces = mapping[faces]
     canonical = np.sort(faces, axis=1)
     if (np.any(np.diff(canonical, axis=1) == 0)
             or len(np.unique(canonical, axis=0)) != len(faces)):
@@ -43,7 +54,8 @@ def _triangles(vertices, faces, label):
     return trimesh.Trimesh(vertices[used], mapping.reshape(-1, 3), process=False)
 
 
-def _closed_surfaces(mesh, label):
+def _closed_shells(mesh, label):
+    """Check topology before splitting, without repairing or reorienting faces."""
     edges = mesh.edges_sorted
     if np.any(np.unique(edges, axis=0, return_counts=True)[1] != 2):
         raise ValueError(f"{label}: open or nonmanifold edges")
@@ -70,13 +82,71 @@ def _closed_surfaces(mesh, label):
                 pending.extend(graph[vertex] - reached)
         if len(reached) != len(graph):
             raise ValueError(f"{label}: disconnected vertex fans")
-    shells = mesh.split(only_watertight=False, repair=False)
+    return mesh.split(only_watertight=False, repair=False)
+
+
+def _closed_surfaces(mesh, label):
+    shells = _closed_shells(mesh, label)
     outer = [s for s in shells if s.volume > 0]
     inner = [s for s in shells if s.volume < 0]
     if (len(shells) != 2 or len(outer) != 1 or len(inner) != 1
             or not np.isfinite(mesh.volume) or mesh.volume <= 0):
         raise ValueError(f"{label}: expected one positive exterior and one negative fluid cavity")
     return outer[0], inner[0]
+
+
+def _positive_shells(mesh, label):
+    shells = _closed_shells(mesh, label)
+    if not len(shells) or any(not np.isfinite(s.volume) or s.volume <= 0 for s in shells):
+        raise ValueError(f"{label}: expected positive, outward-oriented closed solids; cavities are unsupported")
+    return shells
+
+
+def validate_rigid_parts(mesh):
+    """Validate each source solid before union can remove internal surfaces.
+
+    Preserve index-connected parts first: touching solids can have coincident
+    vertices/faces that must not be welded together before their boolean union.
+    If OBJ seams split a surface into open pieces, join exact duplicate vertices
+    and validate the resulting shells. No holes or normals are repaired.
+    """
+    checked = _triangles(np.asarray(mesh.vertices), np.asarray(mesh.faces), "rigid input", weld=False)
+    parts = checked.split(only_watertight=False, repair=False)
+    if any(not part.is_watertight for part in parts):
+        checked = _triangles(np.asarray(mesh.vertices), np.asarray(mesh.faces), "rigid input")
+        parts = _closed_shells(checked, "rigid input")
+    solids = []
+    for index, part in enumerate(parts):
+        label = f"rigid input part {index}"
+        part = _triangles(np.asarray(part.vertices), np.asarray(part.faces), label)
+        solids.extend(_positive_shells(part, label))
+    if not solids:
+        raise ValueError("Rigid input must contain at least one closed solid")
+    return solids
+
+
+def _warn_thin_triangles(mesh):
+    minimum = np.rad2deg(mesh.face_angles.min())
+    if minimum < 1:
+        warnings.warn(f"Thin triangles: minimum angle {minimum:.6g} degrees; baking remains enabled",
+                      RuntimeWarning, stacklevel=3)
+
+
+def validate_solid(mesh):
+    """Check a union of positive closed solids at source and GPU precision."""
+    vertices, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
+    if len(vertices) > np.iinfo(np.int32).max:
+        raise ValueError("Too many vertices for int32 GPU indices")
+    for label, dtype in (("source solid", np.float64), ("float32 GPU solid", np.float32)):
+        with np.errstate(over="ignore", invalid="ignore"):
+            checked = _triangles(vertices.astype(dtype), faces, label)
+        _positive_shells(checked, label)
+    _warn_thin_triangles(checked)
+    return ValidatedSolidMesh(
+        np.ascontiguousarray(checked.vertices, dtype=np.float32),
+        np.ascontiguousarray(checked.faces, dtype=np.int32),
+        checked.bounds.copy(),
+    )
 
 
 def _outline(outer, inner, bounds, tolerance, label):
@@ -101,10 +171,7 @@ def validate_container(mesh, outer_bounds, *, tolerance=0.001):
             checked = _triangles(vertices.astype(dtype), faces, label)
         outer, inner = _closed_surfaces(checked, label)
         _outline(outer, inner, outer_bounds, max(1e-6, tolerance), label)
-    minimum = np.rad2deg(checked.face_angles.min())
-    if minimum < 1:
-        warnings.warn(f"Thin triangles: minimum angle {minimum:.6g} degrees; baking remains enabled",
-                      RuntimeWarning, stacklevel=2)
+    _warn_thin_triangles(checked)
     return ValidatedMesh(
         np.ascontiguousarray(checked.vertices, dtype=np.float32),
         np.ascontiguousarray(checked.faces, dtype=np.int32),

@@ -2,6 +2,7 @@
 
 import math
 import os
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 
@@ -57,6 +58,22 @@ def check_options(options):
         raise ValueError("Padding must be a positive integer number of voxels")
     if not math.isfinite(options.max_support_radius) or options.max_support_radius <= 0:
         raise ValueError("Maximum support radius must be finite and positive")
+
+
+def bake_rigid(mesh, *, options=BakeOptions(), device="cuda:0"):
+    """Cover an independent solid's exterior for PBF volume-map integration.
+
+    The existing baker still controls sparse tiles and distance values. Only
+    the sampling domain changes; container padding and caller options remain
+    untouched. The occupancy extension and integration each reach h_max.
+    """
+    check_options(options)
+    spacing = options.voxel_size
+    margin = 2.0 * options.max_support_radius + 2.0 * math.sqrt(3.0) * spacing
+    if not math.isfinite(margin / spacing):
+        raise ValueError("Rigid SDF padding exceeds finite voxel coordinates")
+    padding = max(options.padding_voxels, math.ceil(margin / spacing))
+    return bake(mesh, options=replace(options, padding_voxels=padding), device=device)
 
 
 def bake(mesh, *, options=BakeOptions(), device="cuda:0"):

@@ -1,4 +1,4 @@
-"""Defaults and destinations for the standalone, Y-up asset pipeline."""
+"""Defaults and destinations shared by container and local-frame rigid flows."""
 
 from dataclasses import dataclass
 from pathlib import Path
