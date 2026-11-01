@@ -15,9 +15,9 @@ python -m demos.fluid.PBF.render_opengl --device cuda:0 --particle-radius 0.01 -
 | `pressure_iterations` | `3` | 每个子步的压力迭代次数 |
 | `lambda_regularization` | `2.0` | 正则化系数，ε = α / h² |
 | `gravity` | `(0.0, -9.81, 0.0)` | 初始重力加速度，m/s² |
-| `viscosity` | `0.25` | XSPH 速度修正系数 |
+| `viscosity` | `0.25 or 0.5` | XSPH 速度修正系数 |
 | `vorticity_confinement` | `0.5` | 涡量补偿系数 |
-| `max_speed` | `7.5` | 速度上限，m/s |
+| `max_speed` | `7.5 or 6.5` | 速度上限，m/s |
 | `artificial_pressure_strength` | `0.0005` | 人工压力强度，0 关闭 |
 | `artificial_pressure_q` | `0.1` | 人工压力参考距离与 h 的比例 |
 | `clamp_negative_pressure` | `True` | 将负密度约束钳制为 0 |
