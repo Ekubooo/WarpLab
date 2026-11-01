@@ -11,7 +11,7 @@ PBF_ASSETS = ROOT.parent / "fluid" / "PBF" / "Assets"
 # Filesystem destinations only: this package never imports its consumers.
 OUTPUT_DIRECTORIES = (OUTPUT, PBF_ASSETS)
 RIGID_OUTPUT = OUTPUT / "rigid"
-RIGID_OUTPUT_DIRECTORIES = (RIGID_OUTPUT, PBF_ASSETS / "rigid")
+RIGID_OUTPUT_DIRECTORIES = (RIGID_OUTPUT, PBF_ASSETS / "Rigid")
 DEFAULT_NAME = "stairs_scene"
 
 

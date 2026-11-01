@@ -1,6 +1,6 @@
 # sim_Ready 离线资产管线
 
-包含两条独立流程：默认容器流程将模型放置在程序化阶梯中央；刚体流程处理保留局部原点的独立实体。两条流程均输出同名 OBJ 和单网格 SDF NVDB；容器发布到资产根目录，刚体发布到 `rigid` 子目录。几何生成与仿真通过资产文件衔接；PBF 只复用 SimReady 独立的 NVDB 写入工具，不启动几何生成管线。
+包含两条独立流程：默认容器流程将模型放置在程序化阶梯中央；刚体流程处理保留局部原点的独立实体。两条流程均输出同名 OBJ 和单网格 SDF NVDB；容器发布到资产根目录，刚体发布到 `Rigid` 子目录。几何生成与仿真通过资产文件衔接；PBF 只复用 SimReady 独立的 NVDB 写入工具，不启动几何生成管线。
 
 容器流程的 `NAME.obj` 是无墙景观，`NAME.nvdb` 是含四墙与顶盖的碰撞距离场，使用 Y-up 世界坐标和米制单位。刚体流程的两份文件表示同一独立实体，使用一致的资产局部坐标。
 
@@ -45,7 +45,7 @@ python demos/sim_Ready/rigid_pipeline.py --obj path/to/part.obj --name rigid_par
 | `--scale` | `1.0` | 显式等比缩放，必须为有限正数；输入单位按米解释，可用于单位换算 |
 | `--obj-up-axis Y\|Z` | 不指定 | 默认保留模型局部轴；仅显式指定 Z 时绕原点旋转为 Y-up |
 
-不自动居中、按平台缩放、放置到地形或简化模型。输出为 `output/rigid/NAME.obj` 与 `output/rigid/NAME.nvdb`，由 `config.RIGID_OUTPUT` 和 `config.RIGID_OUTPUT_DIRECTORIES` 控制，默认发布到 `PBF/Assets/rigid`。mesh、SDF 和后续体积图始终按同一名称配对；不为每份资产增加子目录或单独的体积图文件。旧根目录下的刚体资产不会自动搬移，可重新烘焙或手动成对移动。
+不自动居中、按平台缩放、放置到地形或简化模型。输出为 `output/rigid/NAME.obj` 与 `output/rigid/NAME.nvdb`，由 `config.RIGID_OUTPUT` 和 `config.RIGID_OUTPUT_DIRECTORIES` 控制，默认发布到 `PBF/Assets/Rigid`。mesh、SDF 和后续体积图始终按同一名称配对；不为每份资产增加子目录或单独的体积图文件。旧根目录下的刚体资产不会自动搬移，可重新烘焙或手动成对移动。
 
 ```text
 rigid_pipeline.build_rigid_asset()
@@ -77,7 +77,7 @@ result = build_rigid_asset(
 print(result.mesh, result.sdf, result.destinations)
 ```
 
-本流程只生产几何与 SDF，不导入 Newton／MimicKit，不处理关节、质量惯量或动态位姿。PBF 扫描 `Assets/rigid` 下的 OBJ，并加载启用资产的同名 NVDB，生成并缓存体积图到同一文件。重新运行刚体流程会重新发布单网格 SDF，下次 PBF 加载时重新生成体积图。当前 PBF 只完成动态资产与实例管理；动态实例尚不参与流体压力、碰撞投影或渲染。
+本流程只生产几何与 SDF，不导入 Newton／MimicKit，不处理关节、质量惯量或动态位姿。PBF 扫描 `Assets/Rigid` 下的 OBJ，并加载启用资产的同名 NVDB，生成并缓存体积图到同一文件。重新运行刚体流程会重新发布单网格 SDF，下次 PBF 加载时重新生成体积图。当前 PBF 只完成动态资产与实例管理；动态实例尚不参与流体压力、碰撞投影或渲染。
 
 ## 容器阶段与职责
 
@@ -127,7 +127,7 @@ __main__.py：CLI 参数
 
 `config.OUTPUT_DIRECTORIES` 默认包含本目录 `output` 和静态路径 `PBF_ASSETS`。以后新增目的地，直接在该配置元组中追加路径；不需要新增 CLI 参数。默认根输出目录必须保留在元组中。
 
-刚体流程独立使用 `RIGID_OUTPUT`（默认 `output/rigid`）和 `RIGID_OUTPUT_DIRECTORIES`（默认包含本地目录与 `PBF_ASSETS/rigid`）；新增刚体发布目的地时修改该元组。两条流程共用路径保护、原子保存和发布回滚工具。
+刚体流程独立使用 `RIGID_OUTPUT`（默认 `output/rigid`）和 `RIGID_OUTPUT_DIRECTORIES`（默认包含本地目录与 `PBF_ASSETS/Rigid`）；新增刚体发布目的地时修改该元组。两条流程共用路径保护、原子保存和发布回滚工具。
 
 - 每次运行重新生成、检查和烘焙，同名覆盖；SimReady 自身没有文件存在即复用的缓存逻辑，输出为单网格 SDF。
 - 本地景观在首阶段原子替换。后续检查或烘焙失败时，这份新景观保留，既有 NVDB 不变，消费者目录不发布新文件。
@@ -156,7 +156,7 @@ python -m demos.fluid.PBF.render_opengl --device cuda:0
 python -m demos.fluid.PBF.render_opengl --device cuda:0
 ```
 
-PBF 从自身 `Assets` 根目录读取静态场景，由 `boundary_model.py` 模块级常量 `SDF_FILENAME = "stairs_scene.nvdb"` 选择；OpenGL 从 `BoundarySys` 的资产记录取得同名 OBJ 路径。动态资产从 `Assets/rigid` 发现，实例数量由同一模块中的 `DEFAULT_RIGID_COUNT` 和 `RIGID_COUNTS` 控制。PBF 启动 CLI 不接受 SDF 文件名，仿真构造函数只向默认加载入口传入平滑半径，结果保存为 `self.BoundarySys`。静态 USD 输出只要求 NVDB；动态资产发现要求存在配对 OBJ，但本阶段只记录其路径，不解析 mesh。现有静态渲染和流体物理配置保持原状。
+PBF 从自身 `Assets` 根目录读取静态场景，由 `boundary_model.py` 模块级常量 `SDF_FILENAME = "stairs_scene.nvdb"` 选择；OpenGL 从 `BoundarySys` 的资产记录取得同名 OBJ 路径。动态资产从 `Assets/Rigid` 发现，实例数量由同一模块中的 `DEFAULT_RIGID_COUNT` 和 `RIGID_COUNTS` 控制。PBF 启动 CLI 不接受 SDF 文件名，仿真构造函数只向默认加载入口传入平滑半径，结果保存为 `self.BoundarySys`。静态 USD 输出只要求 NVDB；动态资产发现要求存在配对 OBJ，但本阶段只记录其路径，不解析 mesh。现有静态渲染和流体物理配置保持原状。
 
 SimReady 已自动发布文件到 PBF 的资产目录，无需手动移动。PBF 首次读取单网格 SDF 时预计算体积图，并把两份网格原子写回它读取的同一 NVDB；之后参数匹配时直接读取缓存。该缓存写回不会反向同步到 `sim_Ready/output`。重新运行 SimReady 会再次发布单网格 SDF，下次 PBF 启动自动补齐体积图。
 

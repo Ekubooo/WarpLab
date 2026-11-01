@@ -56,7 +56,7 @@ class BoundarySystemTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.rigid = self.root / "rigid"
+        self.rigid = self.root / "Rigid"
         mocker = patch.object(boundary, "ASSET_DIR", self.root)
         mocker.start()
         self.addCleanup(mocker.stop)

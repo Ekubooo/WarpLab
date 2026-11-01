@@ -90,7 +90,7 @@ SDF_FILENAME = "stairs_scene.nvdb"
 
 ### 动态资产与实例管理
 
-SimReady 刚体流程发布同名文件到 `Assets/rigid/NAME.obj` 和 `NAME.nvdb`。加载器非递归扫描其中的 OBJ，以同名 NVDB 配对，按文件名排序；不读取 OBJ 内容，也不导入 Newton。无刚体目录或目录为空时，动态实例数为零。代码中的数量配置位于 `boundary_model.py`，例如：
+SimReady 刚体流程发布同名文件到 `Assets/Rigid/NAME.obj` 和 `NAME.nvdb`。加载器非递归扫描其中的 OBJ，以同名 NVDB 配对，按文件名排序；不读取 OBJ 内容，也不导入 Newton。无刚体目录或目录为空时，动态实例数为零。代码中的数量配置位于 `boundary_model.py`，例如：
 
 ```python
 DEFAULT_RIGID_COUNT = 1
@@ -118,7 +118,7 @@ system = boundary.load_boundaries(
 
 `system.reset()` 原位恢复初始单位变换，PBF 的重置操作也会调用它；资源与设备缓冲不重建。`sample_instance_sdf()` 返回世界坐标下的距离与梯度，`sample_instance_volume()` 返回边界体积，供独立验证和后续求解接入使用。
 
-**本阶段的动态实例尚不参与 PBF 压力、SDF 碰撞投影或渲染，也不推进刚体动力学。** 现有 kernel 继续查询默认静态容器。运行中增删、Newton 后端和反作用力属于后续扩展。旧根目录下的刚体资产不自动搬移；请重新烘焙或将同名 OBJ／NVDB 成对移入 `rigid`。
+**本阶段的动态实例尚不参与 PBF 压力、SDF 碰撞投影或渲染，也不推进刚体动力学。** 现有 kernel 继续查询默认静态容器。运行中增删、Newton 后端和反作用力属于后续扩展。旧根目录下的刚体资产不自动搬移；请重新烘焙或将同名 OBJ／NVDB 成对移入 `Rigid`。
 
 首次读取 SimReady 发布的单网格 SDF 时，boundary_model 调用现有体积图预计算，然后调用 SimReady 的 `nvdb_io.save_volumes()` 原子写回当前 NVDB。文件使用一个 segment，依次保存 SDF 和体积图两个 float32 grid；写回后释放临时资源，再通过统一读取路径返回两个 Volume。此过程不安装额外 NanoVDB 库、不修改压力或碰撞算法，也不手动复制资产。再次启动若缓存有效则直接读取，不再积分。仅 PBF 正在读取的资产副本会补齐缓存，SimReady 的 output 副本仍可保持单网格。
 

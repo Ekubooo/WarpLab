@@ -158,7 +158,7 @@ class RigidPublicationTests(unittest.TestCase):
         box.apply_translation((1, 2, 3))
         box.export(self.source)
         self.source_bytes = self.source.read_bytes()
-        self.output, self.consumer = self.root / "output/rigid", self.root / "consumer/rigid"
+        self.output, self.consumer = self.root / "output/rigid", self.root / "consumer/Rigid"
         for mocker in (patch.object(config, "RIGID_OUTPUT", self.output),
                        patch.object(config, "RIGID_OUTPUT_DIRECTORIES", (self.output, self.consumer))):
             mocker.start()

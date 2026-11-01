@@ -151,7 +151,7 @@ class RigidSDFTests(unittest.TestCase):
             source = root / "source.obj"
             self.mesh.export(source, digits=17)
             original = source.read_bytes()
-            output, consumer = root / "output/rigid", root / "consumer/rigid"
+            output, consumer = root / "output/rigid", root / "consumer/Rigid"
             with patch.object(config, "RIGID_OUTPUT", output), \
                     patch.object(config, "RIGID_OUTPUT_DIRECTORIES", (output, consumer)), \
                     contextlib.redirect_stdout(io.StringIO()):

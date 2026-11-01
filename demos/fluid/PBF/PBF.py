@@ -333,10 +333,12 @@ class PBF:
 
         fn.init_parameters(self)
         fn.init_device_buffers(self)
-        self.BoundarySys = boundary_model.load_default_boundaries(self.smoothing_length)
+
         # Existing fluid kernels still query only the default static container.
+        self.BoundarySys = boundary_model.load_default_boundaries(self.smoothing_length)
         self.static_sdf = self.BoundarySys.assets[0].sdf
         self.volume_map = self.BoundarySys.assets[0].volume_map
+        
         global SDF_id, VMAP_id
         SDF_id = wp.constant(wp.uint64(self.static_sdf.id))
         VMAP_id = wp.constant(wp.uint64(self.volume_map.id))
