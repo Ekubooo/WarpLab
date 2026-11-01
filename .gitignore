@@ -5,6 +5,17 @@ outputs/
 profiles/
 ExampleSource/
 
+# Simulation exports written in the repository working directory.
+# USD assets in application/model subdirectories remain eligible for versioning.
+/*.usd
+/*.usda
+/*.usdc
+/*.usdz
+
+# Atomic NanoVDB saves and asset publication staging files.
+*.nvdb.tmp
+*.asset.tmp
+
 # Python bytecode and native extension artifacts
 __pycache__/
 *.py[codz]
@@ -59,8 +70,7 @@ _deps/
 .usd_cache/
 .warp_cache/
 *.o
-*.obj
-!demos/fluid/PBF2WayCoupling/assets/*.obj
+*.[oO][bB][jJ]
 *.exp
 *.dll
 *.lib
