@@ -27,7 +27,10 @@ def build_rigid_asset(obj_path, *, name, scale=1.0, obj_up_axis=None,
     receive a matching pair only after successful baking. PBF owns volume-map
     generation and its cache; this pipeline writes just the SDF grid.
     """
-    paths = pipeline.resolve_asset_paths(obj_path, name)
+    paths = pipeline.resolve_asset_paths(
+        obj_path, name, output=config.RIGID_OUTPUT,
+        destinations=config.RIGID_OUTPUT_DIRECTORIES,
+    )
     # CLI help and argument validation must not import Warp or initialize CUDA.
     from demos.sim_Ready import geometry, sdf, validation
 

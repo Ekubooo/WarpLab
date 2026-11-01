@@ -55,37 +55,41 @@ class BoundaryInterfaceTest(unittest.TestCase):
 
     def test_missing_selection_does_not_fall_back_to_old_directory(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             old = root / "Boundary"
             old.mkdir()
-            (old / solver.SDF_FILENAME).write_bytes(b"old grid")
+            (old / boundary.SDF_FILENAME).write_bytes(b"old grid")
             container = root / "Container"
             container.mkdir()
-            (container / solver.SDF_FILENAME).write_bytes(b"old grid")
+            (container / boundary.SDF_FILENAME).write_bytes(b"old grid")
             with patch.object(boundary, "ASSET_DIR", root), \
                     patch.object(wp, "get_device", side_effect=AssertionError("GPU touched")):
                 with self.assertRaises(FileNotFoundError) as caught:
-                    boundary.load_static_sdf(solver.SDF_FILENAME)
-            self.assertIn(str(root / solver.SDF_FILENAME), str(caught.exception))
+                    boundary.load_static_sdf(boundary.SDF_FILENAME)
+            self.assertIn(str(root / boundary.SDF_FILENAME), str(caught.exception))
 
     def test_opengl_selects_matching_obj_and_reports_its_path(self):
         import trimesh
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with patch.object(boundary, "ASSET_DIR", root), patch.object(solver, "SDF_FILENAME", "spot.nvdb"):
+            root = Path(directory).resolve()
+            system = SimpleNamespace(
+                assets=(SimpleNamespace(mesh_path=root / "spot.obj"),),
+                instances=(boundary.BoundaryInstance(asset_id=0),),
+            )
+            # The renderer must use the loaded asset, even if the defaults change.
+            with patch.object(boundary, "ASSET_DIR", root), patch.object(boundary, "SDF_FILENAME", "other.nvdb"):
                 self.assertEqual(boundary.resolve_scene_path("spot.nvdb"), root / "spot.obj")
-                self.assertEqual(boundary.resolve_scene_path(solver.SDF_FILENAME), root / "spot.obj")
                 with self.assertRaises(FileNotFoundError) as caught:
-                    frontend.load_static_scene()
+                    frontend.load_static_scene(system)
                 self.assertIn(str(root / "spot.obj"), str(caught.exception))
                 expected = trimesh.creation.box()
                 expected.export(root / "spot.obj")
-                points, faces = frontend.load_static_scene()
+                points, faces = frontend.load_static_scene(system)
                 np.testing.assert_allclose(points, expected.vertices)
                 np.testing.assert_array_equal(faces, expected.faces)
                 (root / "spot.obj").write_text("invalid mesh", encoding="utf-8")
                 with self.assertRaisesRegex(RuntimeError, "spot.obj"):
-                    frontend.load_static_scene()
+                    frontend.load_static_scene(system)
 
     def test_minimal_signatures_and_removed_baking_options(self):
         self.assertEqual(list(inspect.signature(solver.PBF).parameters),
@@ -134,12 +138,12 @@ class BoundaryInterfaceTest(unittest.TestCase):
             try:
                 os.chdir(elsewhere)
                 with patch.object(boundary, "ASSET_DIR", root), \
-                        patch.object(solver, "SDF_FILENAME", source.name), \
+                        patch.object(boundary, "SDF_FILENAME", source.name), \
                         patch.object(wp, "get_device", return_value=selected), \
                         patch.object(wp.Volume, "load_from_nvdb", side_effect=read), \
                         patch.object(wp, "synchronize_device"), \
                         contextlib.redirect_stdout(io.StringIO()):
-                    self.assertIs(boundary.load_static_sdf(solver.SDF_FILENAME, device="cuda:0"), volume)
+                    self.assertIs(boundary.load_static_sdf(boundary.SDF_FILENAME, device="cuda:0"), volume)
             finally:
                 os.chdir(previous)
             self.assertEqual(read_paths, [source])
@@ -149,47 +153,44 @@ class BoundaryInterfaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "static.nvdb"
             with patch.object(boundary, "ASSET_DIR", source.parent), \
-                    patch.object(solver, "SDF_FILENAME", source.name), \
+                    patch.object(boundary, "SDF_FILENAME", source.name), \
                     patch.object(wp, "get_device", side_effect=AssertionError("GPU touched")):
                 with self.assertRaisesRegex(FileNotFoundError, "Static SDF not found"):
-                    boundary.load_static_sdf(solver.SDF_FILENAME)
+                    boundary.load_static_sdf(boundary.SDF_FILENAME)
             source.write_bytes(b"broken")
             with patch.object(boundary, "ASSET_DIR", source.parent), \
-                    patch.object(solver, "SDF_FILENAME", source.name), \
+                    patch.object(boundary, "SDF_FILENAME", source.name), \
                     patch.object(wp, "get_device", return_value=SimpleNamespace(is_cuda=False)):
                 with self.assertRaisesRegex(ValueError, "CUDA"):
-                    boundary.load_static_sdf(solver.SDF_FILENAME, device="cpu")
+                    boundary.load_static_sdf(boundary.SDF_FILENAME, device="cpu")
             with patch.object(boundary, "ASSET_DIR", source.parent), \
-                    patch.object(solver, "SDF_FILENAME", source.name), \
+                    patch.object(boundary, "SDF_FILENAME", source.name), \
                     patch.object(wp, "get_device", return_value=SimpleNamespace(is_cuda=True)), \
                     patch.object(wp.Volume, "load_from_nvdb", side_effect=ValueError("bad grid")):
                 with self.assertRaisesRegex(RuntimeError, "Cannot load static SDF.*bad grid"):
-                    boundary.load_static_sdf(solver.SDF_FILENAME)
+                    boundary.load_static_sdf(boundary.SDF_FILENAME)
             with patch.object(boundary, "ASSET_DIR", source.parent), \
-                    patch.object(solver, "SDF_FILENAME", source.name), \
+                    patch.object(boundary, "SDF_FILENAME", source.name), \
                     patch.object(wp, "get_device", return_value=SimpleNamespace(is_cuda=True)), \
                     patch.object(wp.Volume, "load_from_nvdb", return_value=SimpleNamespace(dtype=wp.int32)):
                 with self.assertRaisesRegex(RuntimeError, "float32 scalar"):
-                    boundary.load_static_sdf(solver.SDF_FILENAME)
+                    boundary.load_static_sdf(boundary.SDF_FILENAME)
             self.assertEqual(source.read_bytes(), b"broken")
 
     def test_constructor_owns_volume_until_instance_is_released(self):
         class Resource:
             id = 1
         refs = []
-        def load(path, support_radius, *, device):
+        def load(support_radius):
             resources = (Resource(), Resource())
             refs.extend(weakref.ref(resource) for resource in resources)
-            return resources
-        device = object()
+            return SimpleNamespace(assets=(SimpleNamespace(sdf=resources[0], volume_map=resources[1]),))
         with patch.object(solver.fn, "init_parameters",
                           side_effect=lambda sim: setattr(sim, "smoothing_length", 0.05)), \
                 patch.object(solver.fn, "init_device_buffers"), \
-                patch.object(wp, "get_device", return_value=device), \
-                patch.object(boundary, "load_boundary_volumes", side_effect=load) as loading:
+                patch.object(boundary, "load_default_boundaries", side_effect=load) as loading:
             sim = solver.PBF(stage_path=None)
-        loading.assert_called_once_with(boundary.resolve_sdf_path(solver.SDF_FILENAME),
-                                       sim.smoothing_length, device=device)
+        loading.assert_called_once_with(sim.smoothing_length)
         # Mock call history must not hold the SDF alive after the instance dies.
         loading.reset_mock()
         gc.collect()
@@ -208,12 +209,13 @@ class BoundaryInterfaceTest(unittest.TestCase):
                 fake = SimpleNamespace(renderer=None, render=Mock(), step=Mock())
             else:
                 constructor = "create_pbf_simulation"
-                fake = SimpleNamespace(width=3.0, length=2.0, particle_radius=0.01)
+                fake = SimpleNamespace(width=3.0, length=2.0, particle_radius=0.01,
+                                       pos=object(), BoundarySys=object())
             renderer = Mock()
             renderer.is_running.return_value = False
             with patch.object(entry, "parse_args", return_value=args), \
                     patch.object(entry.wp, "ScopedDevice", return_value=contextlib.nullcontext()), \
-                    patch.object(boundary, "load_boundary_volumes",
+                    patch.object(boundary, "load_default_boundaries",
                                  side_effect=AssertionError("Entry loaded SDF twice")) as loading, \
                     patch.object(entry, constructor, return_value=fake) as creating, \
                     contextlib.ExitStack() as stack:
@@ -257,7 +259,7 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                 path = baked.cache_path
                 del baked
                 with patch.object(boundary, "ASSET_DIR", root), \
-                        patch.object(solver, "SDF_FILENAME", path.name), \
+                        patch.object(boundary, "SDF_FILENAME", path.name), \
                         patch.object(sdf_baker, "load_or_bake_sdf", side_effect=AssertionError("Startup baked")):
                     sim = solver.PBF(stage_path=None, config=config)
                 volume_ref = weakref.ref(sim.static_sdf)
@@ -285,12 +287,12 @@ class BoundaryGPUIntegrationTest(unittest.TestCase):
                     other_source, cache_dir=root, options=sdf_baker.SDFOptions(voxel_size=0.05))
                 other_source.unlink()
                 del other_baked
-                default_name = solver.SDF_FILENAME
+                default_name = boundary.SDF_FILENAME
                 with patch.object(boundary, "ASSET_DIR", root), \
-                        patch.object(solver, "SDF_FILENAME", "other.nvdb"), \
+                        patch.object(boundary, "SDF_FILENAME", "other.nvdb"), \
                         patch.object(sdf_baker, "load_or_bake_sdf", side_effect=AssertionError("Startup baked")):
                     other = create_pbf_simulation(config=config)
-                self.assertEqual(solver.SDF_FILENAME, default_name)
+                self.assertEqual(boundary.SDF_FILENAME, default_name)
                 self.assertNotEqual(other.static_sdf.id, sim.static_sdf.id)
                 other_data = boundary.SDFDeviceData()
                 other_data.volume_id = other.static_sdf.id

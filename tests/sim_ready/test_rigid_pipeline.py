@@ -158,9 +158,9 @@ class RigidPublicationTests(unittest.TestCase):
         box.apply_translation((1, 2, 3))
         box.export(self.source)
         self.source_bytes = self.source.read_bytes()
-        self.output, self.consumer = self.root / "output", self.root / "consumer"
-        for mocker in (patch.object(config, "OUTPUT", self.output),
-                       patch.object(config, "OUTPUT_DIRECTORIES", (self.output, self.consumer))):
+        self.output, self.consumer = self.root / "output/rigid", self.root / "consumer/rigid"
+        for mocker in (patch.object(config, "RIGID_OUTPUT", self.output),
+                       patch.object(config, "RIGID_OUTPUT_DIRECTORIES", (self.output, self.consumer))):
             mocker.start()
             self.addCleanup(mocker.stop)
 
@@ -177,7 +177,7 @@ class RigidPublicationTests(unittest.TestCase):
 
     def old_assets(self):
         for target in (self.output, self.consumer):
-            target.mkdir(exist_ok=True)
+            target.mkdir(parents=True, exist_ok=True)
             (target / "rigid_test.obj").write_bytes(b"old mesh")
             (target / "rigid_test.nvdb").write_bytes(b"old SDF")
 
@@ -230,8 +230,8 @@ class RigidPublicationTests(unittest.TestCase):
         self.assert_consumer_unchanged()
 
     def test_input_overwrite_is_rejected_before_geometry_or_cuda(self):
-        with patch.object(config, "OUTPUT", self.root), \
-                patch.object(config, "OUTPUT_DIRECTORIES", (self.root,)), \
+        with patch.object(config, "RIGID_OUTPUT", self.root), \
+                patch.object(config, "RIGID_OUTPUT_DIRECTORIES", (self.root,)), \
                 patch.object(geometry, "prepare_rigid", side_effect=AssertionError("geometry touched")), \
                 self.assertRaisesRegex(ValueError, "overwrite"):
             rigid_pipeline.build_rigid_asset(self.source, name="input")

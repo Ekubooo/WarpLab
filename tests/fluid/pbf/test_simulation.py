@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
 import numpy as np
@@ -25,7 +26,7 @@ class SimulationResetTest(unittest.TestCase):
             n=8, config=config, particle_spacing=0.1,
             block_counts=wp.vec3i(2, 2, 2), smoothing_length=0.2,
             sim_time=12.0, gravity=wp.vec3(*config.gravity),
-            static_sdf=object(), volume_map=object(), renderer=object(),
+            static_sdf=object(), volume_map=object(), renderer=object(), BoundarySys=Mock(),
         )
         with wp.ScopedDevice(device):
             for name in ("pos", "v", "pre_Pos", "delta_Pos", "delta_Vel",
@@ -79,6 +80,7 @@ class SimulationResetTest(unittest.TestCase):
                     (sim.config, sim.grid, sim.static_sdf, sim.volume_map, sim.renderer), resources
                 ):
                     self.assertIs(current, original)
+        self.assertEqual(sim.BoundarySys.reset.call_count, 2)
 
 
 if __name__ == "__main__":

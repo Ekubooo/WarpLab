@@ -151,9 +151,9 @@ class RigidSDFTests(unittest.TestCase):
             source = root / "source.obj"
             self.mesh.export(source, digits=17)
             original = source.read_bytes()
-            output, consumer = root / "output", root / "consumer"
-            with patch.object(config, "OUTPUT", output), \
-                    patch.object(config, "OUTPUT_DIRECTORIES", (output, consumer)), \
+            output, consumer = root / "output/rigid", root / "consumer/rigid"
+            with patch.object(config, "RIGID_OUTPUT", output), \
+                    patch.object(config, "RIGID_OUTPUT_DIRECTORIES", (output, consumer)), \
                     contextlib.redirect_stdout(io.StringIO()):
                 result = rigid_pipeline.build_rigid_asset(source, name="rigid_box", bake_options=self.options)
                 self.assertEqual(nvdb_io.grid_count(result.sdf), 1)

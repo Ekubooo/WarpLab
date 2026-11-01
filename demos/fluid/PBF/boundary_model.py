@@ -1,6 +1,12 @@
-"""Load static NanoVDB SDFs and precompute their boundary volume maps."""
+"""Load shared boundary assets and manage static/rigid instances.
 
+Volume-map generation and file caching are independent of instance counts and
+poses. This module owns boundary resources, not rigid-body dynamics or rendering.
+"""
+
+from collections.abc import Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 import math
 from numbers import Integral
 from pathlib import Path
@@ -11,7 +17,46 @@ import warp as wp
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
+# Default PBF scene. Rigid keys are filename stems; zero disables an asset.
+SDF_FILENAME = "stairs_scene.nvdb"
+DEFAULT_RIGID_COUNT = 1
+RIGID_COUNTS = {}
 VOLUME_MAP_ALGORITHM_VERSION = 1
+
+
+@dataclass(frozen=True)
+class BoundaryScene:
+    """Static filenames and per-asset instance counts under Assets/rigid."""
+
+    static_assets: tuple[str, ...] = ()
+    default_rigid_count: int = 1
+    rigid_counts: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BoundaryLoadOptions:
+    support_radius: float
+    device: str | wp.Device | None = None
+    quadrature_points: int = 16
+
+
+@dataclass(frozen=True)
+class BoundaryAsset:
+    sdf_path: Path
+    mesh_path: Path
+    sdf: wp.Volume
+    volume_map: wp.Volume
+
+
+@dataclass(frozen=True)
+class BoundaryInstance:
+    asset_id: int
+    # Internal rigid index, not a Newton body_id. Static instances use -1.
+    rigid_id: int = -1
+
+    @property
+    def is_dynamic(self):
+        return self.rigid_id >= 0
 
 
 def _nvdb_io():
@@ -241,6 +286,211 @@ def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=
         return sdf, volume_map
     except Exception as error:
         raise RuntimeError(f"Cannot load boundary volumes {path}: {error}") from error
+
+
+@wp.struct
+class BoundaryDeviceData:
+    """Stable device buffers; resource ownership remains in BoundarySystem."""
+
+    sdf_ids: wp.array(dtype=wp.uint64)
+    volume_map_ids: wp.array(dtype=wp.uint64)
+    inverse_voxel_sizes: wp.array(dtype=wp.vec3)
+    asset_ids: wp.array(dtype=int)
+    rigid_ids: wp.array(dtype=int)
+    transforms: wp.array(dtype=wp.transform)
+    rigid_instance_ids: wp.array(dtype=int)
+    count: int
+    rigid_count: int
+
+
+@wp.func
+def sample_instance_sdf(data: BoundaryDeviceData, instance_id: int, position: wp.vec3):
+    """Sample in asset coordinates; return distance and world-space gradient."""
+    transform = data.transforms[instance_id]
+    local = wp.transform_point(wp.transform_inverse(transform), position)
+    asset_id = data.asset_ids[instance_id]
+    boundary = SDFDeviceData()
+    boundary.volume_id = data.sdf_ids[asset_id]
+    boundary.inverse_voxel_size = data.inverse_voxel_sizes[asset_id]
+    distance, gradient = sample_boundary_sdf(boundary, local)
+    return distance, wp.transform_vector(transform, gradient)
+
+
+@wp.func
+def sample_instance_volume(data: BoundaryDeviceData, instance_id: int, position: wp.vec3):
+    """Return the cached boundary volume [m^3] at a world-space position."""
+    local = wp.transform_point(wp.transform_inverse(data.transforms[instance_id]), position)
+    volume_id = data.volume_map_ids[data.asset_ids[instance_id]]
+    index = wp.volume_world_to_index(volume_id, local)
+    return wp.volume_sample_f(volume_id, index, wp.Volume.LINEAR)
+
+
+@wp.kernel
+def _set_rigid_poses(poses: wp.array(dtype=wp.transform), instance_ids: wp.array(dtype=int),
+                     transforms: wp.array(dtype=wp.transform)):
+    i = wp.tid()
+    transforms[instance_ids[i]] = poses[i]
+
+
+class BoundarySystem:
+    """Shared Volumes plus a fixed-size instance table on one CUDA device.
+
+    Mesh paths are recorded, not read. Transforms map asset-local coordinates
+    to world coordinates and initially equal identity. GPU pose inputs must
+    contain finite translations and normalized XYZW quaternions.
+    """
+
+    def __init__(self, assets, instances, device):
+        self.assets = tuple(assets)
+        self.instances = tuple(instances)
+        self.device = wp.get_device(device)
+        rigid_indices = [i for i, instance in enumerate(self.instances) if instance.is_dynamic]
+        self.rigid_count = len(rigid_indices)
+        self.static_count = len(self.instances) - self.rigid_count
+        data = BoundaryDeviceData()
+        data.sdf_ids = wp.array([a.sdf.id for a in self.assets], dtype=wp.uint64, device=self.device)
+        data.volume_map_ids = wp.array([a.volume_map.id for a in self.assets], dtype=wp.uint64, device=self.device)
+        spacing = np.array([a.sdf.get_voxel_size() for a in self.assets], dtype=np.float32).reshape(-1, 3)
+        data.inverse_voxel_sizes = wp.array(1.0 / spacing, dtype=wp.vec3, device=self.device)
+        data.asset_ids = wp.array([i.asset_id for i in self.instances], dtype=int, device=self.device)
+        data.rigid_ids = wp.array([i.rigid_id for i in self.instances], dtype=int, device=self.device)
+        data.rigid_instance_ids = wp.array(rigid_indices, dtype=int, device=self.device)
+        data.transforms = wp.empty(len(self.instances), dtype=wp.transform, device=self.device)
+        data.count = len(self.instances)
+        data.rigid_count = self.rigid_count
+        self.device_data = data
+        self.reset()
+
+    def set_rigid_poses(self, poses):
+        """Update by internal rigid order, preserving every static transform.
+
+        CPU inputs are N x 7 arrays (XYZ, XYZW); quaternions are normalized on
+        a copy. Warp inputs are one-dimensional transform arrays and are copied
+        on device, without downloading data or reallocating instance buffers.
+        """
+        if isinstance(poses, wp.array):
+            if poses.dtype != wp.transform or poses.shape != (self.rigid_count,):
+                raise ValueError(f"Expected {self.rigid_count} Warp transforms")
+            source = poses.to(self.device)
+        else:
+            with np.errstate(over="ignore", invalid="ignore"):
+                values = np.array(poses, dtype=np.float32, copy=True)
+            if values.shape != (self.rigid_count, 7) or not np.isfinite(values).all():
+                raise ValueError(f"Expected finite rigid poses with shape ({self.rigid_count}, 7)")
+            norms = np.linalg.norm(values[:, 3:].astype(np.float64), axis=1)
+            if np.any(norms == 0):
+                raise ValueError("Rigid pose quaternions must be nonzero")
+            values[:, 3:] /= norms[:, None]
+            source = wp.array(values, dtype=wp.transform, device=self.device)
+        if self.rigid_count:
+            wp.launch(_set_rigid_poses, self.rigid_count,
+                inputs=[source, self.device_data.rigid_instance_ids],
+                outputs=[self.device_data.transforms], device=self.device)
+
+    def reset(self):
+        """Restore identity poses in place, retaining all loaded resources."""
+        if self.device_data.count:
+            self.device_data.transforms.fill_(wp.transform_identity())
+
+
+@dataclass(frozen=True)
+class _BoundaryRequest:
+    path: Path
+    mesh_path: Path
+    count: int
+    dynamic: bool
+
+
+def _instance_count(value, label):
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+        raise ValueError(f"{label} must be a nonnegative integer")
+    return int(value)
+
+
+def _resolve_boundary_requests(scene):
+    """Preflight discovery/counts before loading or rewriting any NVDB cache."""
+    default = _instance_count(scene.default_rigid_count, "default_rigid_count")
+    if not isinstance(scene.rigid_counts, Mapping) or any(not isinstance(k, str) for k in scene.rigid_counts):
+        raise ValueError("rigid_counts must map asset stems to nonnegative integers")
+    counts = {name: _instance_count(value, f"rigid_counts[{name!r}]")
+              for name, value in scene.rigid_counts.items()}
+    if isinstance(scene.static_assets, (str, Path)):
+        raise ValueError("static_assets must be a sequence of NVDB filenames")
+    requests = []
+    for filename in scene.static_assets:
+        path = resolve_sdf_path(filename)
+        if not path.is_file():
+            raise FileNotFoundError(f"Static SDF not found: {path}")
+        requests.append(_BoundaryRequest(path, path.with_suffix(".obj"), 1, False))
+    directory = Path(ASSET_DIR) / "rigid"
+    meshes = {}
+    if directory.exists():
+        if not directory.is_dir():
+            raise ValueError(f"Rigid asset directory is not a directory: {directory}")
+        for path in sorted(directory.iterdir(), key=lambda p: p.name):
+            if path.is_file() and path.suffix.lower() == ".obj":
+                meshes[path.stem] = path
+    unknown = counts.keys() - meshes.keys()
+    if unknown:
+        raise ValueError(f"Unknown rigid assets in rigid_counts: {sorted(unknown)}")
+    for name, mesh in meshes.items():
+        count = counts.get(name, default)
+        if count == 0:
+            continue
+        path = mesh.with_suffix(".nvdb").resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing paired NVDB for rigid mesh {mesh}: {path}")
+        requests.append(_BoundaryRequest(path, mesh.resolve(), count, True))
+    if sum(request.count for request in requests) > np.iinfo(np.int32).max:
+        raise ValueError("Boundary instance count exceeds int32 indexing")
+    return requests
+
+
+def load_boundaries(scene: BoundaryScene, options: BoundaryLoadOptions) -> BoundarySystem:
+    """Load a scene once per asset, returning owned resources and device data.
+
+    Rigid OBJ/NVDB pairs are discovered only under Assets/rigid. A missing or
+    empty rigid directory is valid. Geometry is not loaded or baked here.
+    """
+    requests = _resolve_boundary_requests(scene)
+    if not math.isfinite(options.support_radius) or options.support_radius <= 0:
+        raise ValueError("support_radius must be finite and positive")
+    if (isinstance(options.quadrature_points, bool) or not isinstance(options.quadrature_points, Integral)
+            or options.quadrature_points < 1):
+        raise ValueError("quadrature_points must be a positive integer")
+    device = wp.get_device(options.device)
+    if not device.is_cuda:
+        raise ValueError("Boundary Volume loading requires a CUDA device")
+    assets, instances, asset_ids = [], [], {}
+    rigid_id = 0
+    for request in requests:
+        if request.path not in asset_ids:
+            sdf, volume_map = load_boundary_volumes(
+                request.path, options.support_radius,
+                quadrature_points=options.quadrature_points, device=device,
+            )
+            asset_ids[request.path] = len(assets)
+            assets.append(BoundaryAsset(request.path, request.mesh_path, sdf, volume_map))
+        asset_id = asset_ids[request.path]
+        for _ in range(request.count):
+            instances.append(BoundaryInstance(asset_id, rigid_id if request.dynamic else -1))
+            if request.dynamic:
+                rigid_id += 1
+    return BoundarySystem(assets, instances, device)
+
+
+def load_default_boundaries(support_radius: float) -> BoundarySystem:
+    """Load the configured PBF scene on the current Warp device.
+
+    Asset selection and loading defaults stay here; PBF supplies only its
+    smoothing length. Use load_boundaries for an explicitly configured scene.
+    """
+    scene = BoundaryScene(
+        static_assets=(SDF_FILENAME,),
+        default_rigid_count=DEFAULT_RIGID_COUNT,
+        rigid_counts=RIGID_COUNTS,
+    )
+    return load_boundaries(scene, BoundaryLoadOptions(support_radius))
 
 
 def _build_volume_quadrature(support_radius, quadrature_points):

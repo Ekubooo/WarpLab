@@ -23,20 +23,21 @@ except ModuleNotFoundError:
 try:
     from .pbf_helper import PBFConfig
     from . import config_io
-    from . import boundary_model
     from . import PBF as pbf
     from .simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 except ImportError:
     from pbf_helper import PBFConfig
     import config_io
-    import boundary_model
     import PBF as pbf
     from simulation import create_pbf_simulation, reset_simulation, reverse_gravity
 
 
-def load_static_scene():
-    """Load the wall-free Y-up mesh once, independently of the working directory."""
-    path = boundary_model.resolve_scene_path(pbf.SDF_FILENAME)
+def load_static_scene(boundary_system):
+    """Load the mesh paired with the system's first static boundary asset."""
+    instance = next((item for item in boundary_system.instances if not item.is_dynamic), None)
+    if instance is None:
+        raise ValueError("Static rendering requires a static boundary instance")
+    path = boundary_system.assets[instance.asset_id].mesh_path
     if not path.is_file():
         raise FileNotFoundError(f"Static scene not found: {path}; generate the container assets first")
     try:
@@ -366,12 +367,11 @@ def main():
     if args.speed_color_max <= args.speed_color_mid:
         raise SystemExit("--speed-color-max must be greater than --speed-color-mid")
 
-    scene_points, scene_indices = load_static_scene()
-
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
             verbose=args.verbose, config=args.config,
         )
+        scene_points, scene_indices = load_static_scene(simulation.BoundarySys)
         # Focus on the fluid near the floor; distance follows the container footprint.
         camera_azimuth_deg = 35.0
         camera_elevation_deg = 25.0

@@ -51,12 +51,13 @@ def _protect_input(source, paths):
             raise ValueError(f"Output would overwrite the input model: {path}")
 
 
-def resolve_asset_paths(obj_path, name):
+def resolve_asset_paths(obj_path, name, *, output=None, destinations=None):
     """Resolve shared input/output rules without touching output files."""
     name = validate_name(name)
     source = resolve_obj(obj_path)
-    directories = tuple(dict.fromkeys(Path(p).resolve() for p in config.OUTPUT_DIRECTORIES))
-    output = config.OUTPUT.resolve()
+    destinations = config.OUTPUT_DIRECTORIES if destinations is None else destinations
+    directories = tuple(dict.fromkeys(Path(p).resolve() for p in destinations))
+    output = Path(config.OUTPUT if output is None else output).resolve()
     if output not in directories:
         raise ValueError("Output destinations must include the primary output directory")
     paths = [directory / (name + extension) for directory in directories for extension in (".obj", ".nvdb")]

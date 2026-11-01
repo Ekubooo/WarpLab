@@ -43,4 +43,5 @@ def reset_simulation(sim: PBFSolver) -> None:
         sim.n_Cache.NeighborCount.zero_()
         sim.gravity = wp.vec3(*sim.config.gravity)
         sim.sim_time = 0.0
+        sim.BoundarySys.reset()
         sim.grid.build(sim.pos, sim.smoothing_length)
