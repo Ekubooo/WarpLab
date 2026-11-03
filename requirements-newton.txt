@@ -1,0 +1,12 @@
+# Python 3.11; validated WarpSim environment for Lab_Solver / Lab_Framework.
+# The historical demo snapshot remains in requirement.txt.
+newton==1.7.0
+warp-lang==1.18.0
+mujoco==3.15.0
+mujoco-warp==3.15.0
+numpy==2.4.6
+pyglet==2.1.16
+trimesh==5.1.1
+manifold3d==3.5.4
+scipy==1.17.1
+usd-core==26.8

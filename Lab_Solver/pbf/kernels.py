@@ -4,14 +4,17 @@ from types import SimpleNamespace
 
 import warp as wp
 from . import pbf_helper as fn
+from .boundary_model import (BoundaryCouplingData, query_instance_boundary,
+                             query_instance_normal, sample_instance_volume)
 
 
-def create_kernels(parameters, grid_id, sdf_id, volume_map_id):
+def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
     config = parameters.config
     h = parameters.support_radius
     GRID_id = wp.constant(wp.uint64(grid_id))
     SDF_id = wp.constant(wp.uint64(sdf_id))
     VMAP_id = wp.constant(wp.uint64(volume_map_id))
+    Rigid_Count = wp.constant(rigid_count)
     Smoothing_Radius = wp.constant(h)
     Particle_Radius = wp.constant(parameters.particle_radius)
     Fluid_Mass = wp.constant(parameters.fluid_mass)
@@ -52,7 +55,6 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id):
         v_new = v + gravity * dt
         # if external force: gravity+ext_force
 
-        vel[tid] = v_new
         predicit = pos[tid] + dt * v_new
         prePos[tid] = predicit
 
@@ -81,6 +83,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id):
     @wp.kernel(module="unique")
     def volume_query(
         pre_Pos: wp.array[wp.vec3],
+        boundary: BoundaryCouplingData,
         volume_Rho: wp.array[float],
         volume_Grad: wp.array[wp.vec3]
     ):
@@ -98,6 +101,16 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id):
             boundaryOffset = dirVM * projDst
             volumeRho = vmapValue * Rho_0 * Poly6(wp.vec3(0.0), boundaryOffset)
             gradVMap = vmapValue * GradPow3(wp.vec3(0.0), boundaryOffset)
+
+        for rigid in range(Rigid_Count):
+            instance = boundary.instances.rigid_instance_ids[rigid]
+            valid, distance, direction = query_instance_boundary(
+                boundary.instances, instance, currPos, Smoothing_Radius)
+            if valid:
+                volume = sample_instance_volume(boundary.instances, instance, currPos)
+                offset = direction * distance
+                volumeRho += volume * Rho_0 * Poly6(wp.vec3(0.0), offset)
+                gradVMap += volume * GradPow3(wp.vec3(0.0), offset)
 
         volume_Rho[i] = volumeRho
         volume_Grad[i] = gradVMap
@@ -158,6 +171,8 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id):
         lambda_Opt: wp.array[float],
         Neighbor: fn.NeighborCache,
         volume_Grad: wp.array[wp.vec3],
+        dt: float,
+        boundary: BoundaryCouplingData,
         delta_Pos: wp.array[wp.vec3]
     ):
         i = wp.tid()
@@ -201,16 +216,40 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id):
         delta_boundary = -lambda_i * volume_Grad[i]
         delta_Pos[i] = delta_Movement * pressure_scale + delta_boundary
 
+        # SPlisHSPlasH's weak coupling: each pressure correction contributes
+        # -m*delta_x/dt^2 at its equivalent boundary point, across all iterations.
+        for rigid in range(Rigid_Count):
+            instance = boundary.instances.rigid_instance_ids[rigid]
+            valid, distance, direction = query_instance_boundary(
+                boundary.instances, instance, currPos, Smoothing_Radius)
+            if valid:
+                volume = sample_instance_volume(boundary.instances, instance, currPos)
+                offset = direction * distance
+                grad = volume * GradPow3(wp.vec3(0.0), offset)
+                force = (Fluid_Mass * lambda_i / (dt * dt)) * grad
+                arm = currPos + offset - boundary.instances.world_com[rigid]
+                wrench = wp.spatial_vector(force, wp.cross(arm, force))
+                wp.atomic_add(boundary.forces, boundary.instances.body_ids[rigid], wrench)
+
 
     @wp.kernel(module="unique")
     def update_prePos(
         delta_Pos: wp.array[wp.vec3],
+        boundary: BoundaryCouplingData,
         pre_Pos: wp.array[wp.vec3]
     ):
         # can this kernel fusion into last kernel?
         tid = wp.tid()
         currPos = delta_Pos[tid] + pre_Pos[tid]
-        pre_Pos[tid] = apply_SDF(SDF_id, currPos, Particle_Radius)
+        currPos = apply_SDF(SDF_id, currPos, Particle_Radius)
+        # Penetration projection is the existing numerical fallback, without
+        # rigid feedback. It is deliberately separate from pressure forces.
+        for rigid in range(Rigid_Count):
+            instance = boundary.instances.rigid_instance_ids[rigid]
+            valid, distance, normal = query_instance_normal(boundary.instances, instance, currPos)
+            if valid and distance < Particle_Radius:
+                currPos += normal * (Particle_Radius - distance)
+        pre_Pos[tid] = currPos
 
     @wp.kernel(module="unique")
     def update_position(

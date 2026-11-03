@@ -42,7 +42,7 @@ class LegacyParityTests(unittest.TestCase):
             bind_solver(config, reference.grid, reference.static_sdf, reference.volume_map)
             for _ in range(5):
                 reference.step()
-                current.solver.step(current.state, current.state, None, None, reference.dt)
+                current._substep(reference.dt)
                 for name in ("pos", "v", "pre_Pos", "delta_Pos", "lambda_Opt", "volume_Rho",
                              "volume_Grad", "delta_Vel", "curl"):
                     actual = getattr(current.solver, name).numpy()

@@ -27,10 +27,13 @@ class SolverTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.boundaries = make_boundaries(directory.name)
 
-    def test_in_place_state_and_exact_original_launch_order(self):
+    def test_two_states_and_exact_original_launch_order(self):
         solver, state = make_solver(self.boundaries)
         self.assertIsInstance(solver, newton.solvers.SolverBase)
         velocity = state.particle_qd
+        output = solver.model.state()
+        output_positions, output_velocities = output.particle_q, output.particle_qd
+        input_positions, input_velocities = state.particle_q.numpy(), state.particle_qd.numpy()
         before = solver.get_buffer_bindings()
         launched = []
         original_launch = wp.launch
@@ -39,32 +42,38 @@ class SolverTests(unittest.TestCase):
                 launched.append(next(name for name, value in vars(solver.kernels).items() if value is kernel))
             return original_launch(kernel, *args, **kwargs)
         with patch.object(wp, "launch", side_effect=record), contextlib.redirect_stdout(io.StringIO()):
-            solver.step(state, state, None, None, 1./450.)
+            solver.step(state, output, None, None, 1./450.)
         expected = ["apply_predict", "reorder", "cache_neighbors"]
         expected += ["volume_query", "calc_lambda", "calc_deltaPos", "update_prePos"] * 3
         expected += ["update_position", "calc_curl", "calc_visvor", "update_velocity"]
         self.assertEqual(launched, expected)
-        self.assertIs(state.particle_q, before[2])
+        self.assertIs(output.particle_q, output_positions)
+        self.assertIs(output.particle_qd, output_velocities)
+        np.testing.assert_array_equal(state.particle_q.numpy(), input_positions)
+        np.testing.assert_array_equal(state.particle_qd.numpy(), input_velocities)
         self.assertIs(state.particle_qd, velocity)
         self.assertEqual({a.ptr for a in before}, {a.ptr for a in solver.get_buffer_bindings()})
-        self.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+        self.assertTrue(np.isfinite(output.particle_q.numpy()).all())
 
     def test_explicitly_reject_unsupported_step_modes(self):
         solver, state = make_solver(self.boundaries)
-        with self.assertRaisesRegex(ValueError, "in-place"):
-            solver.step(state, solver.model.state(), None, None, .01)
+        output = solver.model.state()
+        with self.assertRaises(ValueError):
+            solver.step(state, state, None, None, .01)
         with self.assertRaises(NotImplementedError):
-            solver.step(state, state, None, object(), .01)
+            solver.step(state, output, None, object(), .01)
         for dt in (0., -1., float("nan")):
             with self.assertRaises(ValueError):
-                solver.step(state, state, None, None, dt)
+                solver.step(state, output, None, None, dt)
 
     def test_reset_reuses_buffers_and_respects_state_flags_and_mask(self):
         solver, state = make_solver(self.boundaries)
         initial = state.particle_q.numpy()
         buffers = {a.ptr for a in solver.get_buffer_bindings()}
+        output = solver.model.state()
         with contextlib.redirect_stdout(io.StringIO()):
-            solver.step(state, state, None, None, .002)
+            solver.step(state, output, None, None, .002)
+        state = output
         changed = state.particle_q.numpy()
         mask = wp.zeros(solver.model.world_count + 1, dtype=wp.bool, device=solver.device)
         solver.reset(state, world_mask=mask)
@@ -80,15 +89,19 @@ class SolverTests(unittest.TestCase):
         first, state = make_solver(self.boundaries)
         config = replace(SolverPBF.Config(), viscosity=.1, artificial_pressure_strength=.002)
         second, other = make_solver(self.boundaries, radius=.01, config=config)
+        output, other_output = first.model.state(), second.model.state()
         with contextlib.redirect_stdout(io.StringIO()):
             for _ in range(2):
-                first.step(state, state, None, None, .002)
+                first.step(state, output, None, None, .002)
+                state, output = output, state
         expected = state.particle_q.numpy()
         first.reset(state)
         with contextlib.redirect_stdout(io.StringIO()):
-            first.step(state, state, None, None, .002)
-            second.step(other, other, None, None, .001)
-            first.step(state, state, None, None, .002)
+            first.step(state, output, None, None, .002)
+            state, output = output, state
+            second.step(other, other_output, None, None, .001)
+            first.step(state, output, None, None, .002)
+            state = output
         np.testing.assert_array_equal(state.particle_q.numpy(), expected)
 
     def test_model_change_updates_gravity_or_requires_recreation(self):
@@ -117,7 +130,7 @@ class SolverTests(unittest.TestCase):
         solver, _ = make_solver(self.boundaries)
         unbound = SolverPBF(solver.model, boundaries=self.boundaries)
         with self.assertRaisesRegex(ValueError, "differentiation"):
-            unbound.bind_state(solver.model.state(requires_grad=True))
+            unbound.step(solver.model.state(requires_grad=True), solver.model.state(), None, None, .002)
 
 
 if __name__ == "__main__":

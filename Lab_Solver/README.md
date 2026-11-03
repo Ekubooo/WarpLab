@@ -10,26 +10,26 @@ neighbor-cache layout. It does not import a framework or anything under `demos`.
 from Lab_Solver.pbf import SolverPBF
 
 # The caller builds a Newton Model and loads its BoundarySystem explicitly.
-state = model.state()
+state_in, state_out = model.state(), model.state()
 solver = SolverPBF(
     model, config=SolverPBF.Config(), boundaries=boundaries,
     grid_bounds=((0.0, 0.0, 0.0), (3.0, 5.0, 2.0)),
 )
-solver.bind_state(state)
-solver.step(state, state, control=None, contacts=None, dt=1.0 / 450.0)
-positions = state.particle_q
-velocities = state.particle_qd
+solver.step(state_in, state_out, control=None, contacts=None, dt=1.0 / 450.0)
+state_in, state_out = state_out, state_in
+positions = state_in.particle_q
+velocities = state_in.particle_qd
 ```
 
 One call advances one substep. Frame scheduling and simulation time belong to
-the caller. The supported mode is **in-place only**: distinct input and output
-State objects raise an error, rather than trigger hidden copies.
+the caller. Input and output States must be distinct, with non-aliasing particle
+arrays. Input particle positions and velocities are read-only.
 
-The existing spatial reorder swaps array bindings. Read `state.particle_q` after
-each step, and do not retain a Torch/NumPy/Warp view of an older position buffer
-as if it were the current state. No original-ID restoration or independent ID
-mapping buffer is created. Particle slots follow spatial ordering rather than
-stable cross-step identities.
+The existing spatial reorder gathers old positions directly into the output
+State, which becomes the updated position buffer. Each State retains its array
+bindings; the caller swaps States. No extra full-particle copy, original-ID
+restoration or ID mapping is performed. Slots follow spatial ordering, not
+stable cross-step identities. Consumers must select the current State.
 
 ## Ownership and configuration
 
@@ -61,25 +61,48 @@ Configuration is an immutable dataclass; construct another solver to change its
 compile-time physical parameters.
 
 `prepare_graph()`, `get_buffer_bindings()` and
-`set_buffer_bindings(bindings, state)` let a caller capture both existing buffer
-parities. The new framework uses these to avoid whole-state copies for odd
-substep counts. Changing gravity or time step requires recapture; the framework
-checks the solver's revision and its captured time step.
+`set_buffer_bindings(bindings)` expose only the two predicted-position scratch
+buffers. The framework captures state/scratch parities without whole-state
+copies. Gravity, time step or substep-count changes require recapture.
 
 Current support: CUDA NanoVDB, one homogeneous active fluid world, exactly one
-static volume boundary, and one bound in-place State per solver. Unsupported:
+static volume boundary plus body-bound dynamic instances. Unsupported:
 fixed-ID particle inputs, per-particle external forces/constraints, automatic
 differentiation, native Newton Contacts and SolverCoupled integration. `control`
 is unused. No automatic scanning or per-step validation of `particle_f` is added
 to the hot path; callers must not use it as a supported force channel.
 
-Boundary asset/instance management and the rigid asset baker are retained, but
-dynamic boundaries do not yet participate in this fluid solve. Rigid dynamics,
-reaction forces and robot policies are later extensions.
+## Weak rigid coupling
+
+`BoundarySystem.bind_bodies(model, body_ids, local_transforms=None)` maps internal
+rigid-instance order to Newton bodies. Call once before constructing the solver.
+An asset-to-body transform preserves non-COM asset origins; `sync_body_poses`
+updates world transforms and COMs on the GPU without reallocating buffers.
+
+`SolverPBFMuJoCo` in `pbf.solver_coupled` composes PBF and MuJoCo Warp on the same
+Model and State pair. PBF writes particles; MuJoCo writes bodies/joints. One step
+freezes input boundary poses, solves PBF, adds pressure reactions to input
+`body_f`, steps MuJoCo by the same dt, and updates boundary poses. The caller
+clears external forces once before the next substep. Existing external wrenches
+are added to, not erased. `feedback=False` provides a one-way diagnostic mode.
+
+`fluid.boundary_forces` is a persistent body-indexed world-COM wrench buffer in
+Newton `[force, torque]` order. Every pressure iteration accumulates
+`F = -m * delta_x_boundary / dt**2` and `(equivalent_point - COM) x F`.
+The buffer clears once per fluid substep, not per pressure iteration.
+
+This follows SPlisHSPlasH's PBF/Bender2019 pressure-feedback weak coupling:
+[pressure reactions](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH/blob/master/SPlisHSPlasH/PBF/TimeStepPBF.cpp)
+and [outer stepping](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH/blob/master/Simulator/SimulatorBase.cpp).
+The existing SDF projection remains a correction without reaction feedback.
+Speed clipping and vorticity are unchanged; the complete scheme is not claimed
+to conserve momentum when these corrections act. Boundary viscosity, strong
+coupling, Newton SolverCoupled integration and robot policies remain future work.
 
 ## Validation
 
-Validated in WarpSim with Newton 1.7.0, Warp 1.18.0 and RTX 5070. The verification
+Validated in WarpSim with Newton 1.7.0, Warp 1.18.0, MuJoCo/MuJoCo Warp 3.15.0
+and RTX 5070. See `requirements-newton.txt`. The verification
 tool intentionally imports the old demo; production code does not:
 
 ```powershell
@@ -91,8 +114,10 @@ The default 195,525-particle scene was bitwise equal to the archived solver at
 initialization and across five substeps for positions, velocities, predicted
 positions, corrections, lambda, boundary density/gradient, velocity corrections
 and curl. The interface test checks the original fluid launch sequence and the
-absence of new mapping/copy kernels. Graph tests compare even/odd substep replay
-with eager execution using exact array equality.
+absence of new mapping/copy kernels. Static Graph tests compare even/odd substep
+replay with eager execution using exact array equality. Coupled tests use
+identical MuJoCo warm-start inputs and floating-point tolerances; spatially sorted
+particles are matched by position when atomic roundoff changes their cell order.
 
 GPU benchmark: 12 warm-up pairs, 60 alternating frozen-stage graph trials,
 CUDA events, identical configuration/resources. Snapshot restores are outside
@@ -101,11 +126,29 @@ complete substep:
 
 | Stage | Archived median | New median | New/archived | Paired ratio 95% CI |
 | --- | ---: | ---: | ---: | --- |
-| Neighborhood | 271.82 | 275.10 | 1.0121 | 0.9813–1.0155 |
-| Pressure iterations | 677.87 | 675.57 | 0.9966 | 0.9867–1.0084 |
-| Complete substep | 1187.47 | 1178.77 | 0.9927 | 0.9913–1.0024 |
+| Neighborhood | 271.73 | 283.26 | 1.0425 | 0.9919–1.0592 |
+| Pressure iterations | 677.44 | 682.75 | 1.0078 | 1.0058–1.0203 |
+| Complete substep | 1183.39 | 1169.50 | 0.9883 | 0.9877–0.9988 |
 
-All intervals contain 1: these measurements do not establish a stable slowdown
-or speedup. They are evidence for parity on this configuration, not a universal
-zero-overhead guarantee. Full samples are in
-`outputs/newton-pbf-migration/performance.json` after running the tool.
+These measurements (2026-11-03) meet the complete-substep 5% regression target
+for this configuration; they are not a universal zero-overhead guarantee. Full
+samples are in `outputs/pbf-mujoco-coupling/performance.json` when running the
+benchmark with `--output` set to that path.
+
+The default 24,500-particle tank/box scene took 1.691 ms per coupled frame
+(three substeps, 563.70 us amortized per substep), measured with CUDA events over
+240 advancing frames after 60 warm-up frames, excluding rendering and capture.
+At two simulated seconds the box center was at y=0.400 m and all motion arrays
+were finite. Reproduce with:
+
+```powershell
+python -m tests.lab_framework.benchmark_coupling
+python -m unittest tests.lab_framework.test_coupled_simulation -v
+```
+
+The coarse integration fixture additionally compares feedback off/on over two
+seconds (box center y=0.120/0.474 m), tests free fall and rigid floor collision,
+and covers field ownership, capture without advancement, reset and gravity/dt
+changes. Controlled kernel tests check pressure impulse balance, translated and
+rotated asset offsets, nonzero COM, torque, dt-squared scaling, iteration
+accumulation, and force clearing independently of projection and speed limits.

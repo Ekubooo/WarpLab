@@ -1,0 +1,19 @@
+{
+  "particle_radius": 0.0125,
+  "rest_density": 1000.0,
+  "frame_dt": 0.006666666666666667,
+  "substeps": 3,
+  "pressure_iterations": 3,
+  "lambda_regularization": 2.0,
+  "gravity": [0.0, -9.81, 0.0],
+  "viscosity": 0.5,
+  "vorticity_confinement": 0.5,
+  "max_speed": 6.5,
+  "artificial_pressure_strength": 0.0005,
+  "artificial_pressure_q": 0.1,
+  "clamp_negative_pressure": true,
+  "container_size": [1.0, 1.0, 1.0],
+  "block_start": [0.05, 0.025, 0.05],
+  "block_end": [0.95, 0.55, 0.95],
+  "initial_velocity": [0.0, 0.0, 0.0]
+}

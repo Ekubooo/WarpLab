@@ -1,6 +1,7 @@
 """Executable OpenGL billboard frontend for the Warp PBF simulation."""
 
 import argparse
+from dataclasses import replace
 import math
 import sys
 import time
@@ -24,6 +25,11 @@ def load_static_scene(boundary_system):
     if instance is None:
         raise ValueError("Static rendering requires a static boundary instance")
     path = boundary_system.assets[instance.asset_id].mesh_path
+    return load_boundary_mesh(path)
+
+
+def load_boundary_mesh(path):
+    """Load geometry once; dynamic instance poses are updated independently."""
     if not path.is_file():
         raise FileNotFoundError(f"Static scene not found: {path}; generate the container assets first")
     try:
@@ -37,11 +43,31 @@ def load_static_scene(boundary_system):
     return mesh.vertices, mesh.faces
 
 
+def load_rigid_scene(simulation):
+    """Host geometry and fixed local transforms, never per-frame GPU downloads."""
+    boundaries = simulation.BoundarySys
+    if not boundaries.rigid_count:
+        return []
+    data = boundaries.device_data
+    body_ids = data.body_ids.numpy()
+    local_transforms = data.local_transforms.numpy()
+    meshes = {}
+    instances = []
+    for index, instance in enumerate(boundaries.instances):
+        if instance.is_dynamic:
+            if instance.asset_id not in meshes:
+                meshes[instance.asset_id] = load_boundary_mesh(boundaries.assets[instance.asset_id].mesh_path)
+            instances.append((f"rigid_{index}", int(body_ids[instance.rigid_id]),
+                              local_transforms[instance.rigid_id], meshes[instance.asset_id]))
+    return instances
+
+
 class PBFRenderer(BillboardRenderer):
     """Let the PBF main loop handle pause and deferred reset requests."""
 
     def __init__(self, *args, particle_positions: wp.array | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.body_transforms = None
         # Snapshot the initialized array's host metadata without retaining its buffer.
         self._particle_count = None if particle_positions is None else len(particle_positions)
         self._particle_count_label = None
@@ -104,6 +130,8 @@ class PBFRenderer(BillboardRenderer):
             self.allocate_shape_instances()
         if self._update_shape_instances:
             self.update_shape_instances()
+        if self.body_transforms is not None:
+            self.update_body_transforms(self.body_transforms)
         self.update()
 
     def update(self):
@@ -244,15 +272,20 @@ def config_from_args(args):
         if overrides:
             raise ValueError("--config cannot be combined with PBF configuration arguments")
         return config_io.load_config(args.config_path)
+    if args.scene == "tank-box":
+        from Lab_Framework.pbf.scenes import tank_box_config
+        return replace(tank_box_config(), **overrides)
     return PBFConfig(**overrides) if overrides else None
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
+    parser.add_argument("--scene", choices=("static", "tank-box"), default="static",
+                        help="Static stairs or the pressure-coupled tank and box prototype.")
     parser.add_argument("--headless", action="store_true", help="Advance without an OpenGL window.")
     parser.add_argument("--stage-path", default=None, help="Optional USD output path for headless execution.")
-    parser.add_argument("--cuda-graph", action="store_true", help="Capture and replay complete fluid frames.")
+    parser.add_argument("--cuda-graph", action="store_true", help="Capture and replay complete simulation frames.")
     parser.add_argument(
         "--num-frames",
         type=nonnegative_int,
@@ -356,7 +389,7 @@ def main():
 
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
-            verbose=args.verbose, config=args.config,
+            verbose=args.verbose, config=args.config, scene=args.scene,
         )
         if args.cuda_graph:
             simulation.capture_graph()
@@ -369,7 +402,12 @@ def main():
         camera_elevation_deg = 25.0
         camera_distance_scale = 1.75
         camera_target = wp.vec3(0.5 * simulation.width, 0.25 * simulation.width, 0.25 * simulation.length)
-        # camera_target = wp.vec3(0.0, 0.0, 0.0)
+        if simulation.scene == "tank-box":
+            # View through the open top; the opaque walls hide the fluid at
+            # the stairs scene's low viewing angle. Camera controls are shared.
+            camera_elevation_deg = 65.0
+            camera_distance_scale = 2.3
+            camera_target = wp.vec3(.5 * simulation.width, .45, .5 * simulation.length)
         azimuth = math.radians(camera_azimuth_deg)
         elevation = math.radians(camera_elevation_deg)
         camera_offset = wp.vec3(
@@ -406,6 +444,12 @@ def main():
                 scale=(1.0, 1.0, 1.0),
                 smooth_shading=False,
             )
+            for body in range(simulation.model.body_count):
+                renderer.register_body(f"body_{body}")
+            for name, body, local, (points, indices) in load_rigid_scene(simulation):
+                renderer.render_mesh(name, points, indices, colors=(.85, .45, .15),
+                    pos=tuple(local[:3]), rot=tuple(local[3:]), parent_body=f"body_{body}",
+                    smooth_shading=False)
             register_keyboard_controls(
                 renderer, simulation, on_reset=request_reset,
             )
@@ -416,6 +460,7 @@ def main():
                     renderer.paused = True
                 # Render first so the initialized PBF particles are visible.
                 renderer.begin_frame(simulation.sim_time)
+                renderer.body_transforms = simulation.state.body_q
                 renderer.render_billboards(
                     name="points",
                     points=simulation.pos,
@@ -428,8 +473,7 @@ def main():
 
                 if not renderer.paused and not reset_requested and renderer.is_running():
                     if args.cuda_graph:
-                        if (simulation.dt != simulation._graph_dt
-                                or simulation._graph_revision != simulation.solver._graph_revision):
+                        if simulation.graph_needs_recapture():
                             simulation.capture_graph()
                         simulation.launch_graph()
                     else:
@@ -445,11 +489,22 @@ def run_headless(simulation, args):
     if args.stage_path is not None:
         import warp.render
         renderer = wp.render.UsdRenderer(args.stage_path)
+        rigid_meshes = load_rigid_scene(simulation)
+        if rigid_meshes:
+            points, indices = load_static_scene(simulation.BoundarySys)
+            renderer.render_mesh("terrain", points, indices, colors=(.55, .55, .55))
     for _ in range(args.num_frames):
         if renderer is not None:
             renderer.begin_frame(simulation.sim_time)
             renderer.render_points(name="points", points=simulation.pos.numpy(),
                                    radius=simulation.particle_radius, colors=(.8, .3, .2))
+            if rigid_meshes:
+                body_q = simulation.state.body_q.numpy()
+                for name, body, local, (points, indices) in rigid_meshes:
+                    transform = wp.transform_multiply(wp.transform(*body_q[body]), wp.transform(*local))
+                    renderer.render_mesh(name, points, indices, colors=(.85, .45, .15),
+                        pos=tuple(wp.transform_get_translation(transform)),
+                        rot=tuple(wp.transform_get_rotation(transform)), smooth_shading=False)
             renderer.end_frame()
         if args.cuda_graph:
             simulation.launch_graph()

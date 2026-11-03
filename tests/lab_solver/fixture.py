@@ -48,5 +48,4 @@ def make_solver(boundaries, *, radius=.0125, config=None):
     state = model.state()
     solver = SolverPBF(model, config=config, boundaries=boundaries,
         grid_bounds=((0., 0., 0.), (1., 1., 1.)))
-    solver.bind_state(state)
     return solver, state

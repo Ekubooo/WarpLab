@@ -4,7 +4,8 @@ These applications use the Newton-compatible PBF solver from `Lab_Solver`.
 Existing programs under `demos` remain independent snapshots.
 
 Run commands from the repository root in the `WarpSim` environment. No editable
-installation is needed. Newton 1.7.0 and Warp 1.18.0 are the validation baseline.
+installation is needed. `requirements-newton.txt` records the Newton 1.7.0,
+Warp 1.18.0 and MuJoCo/MuJoCo Warp 3.15.0 validation environment.
 
 ## Prepare assets
 
@@ -51,16 +52,60 @@ The billboard frontend retains speed coloring, camera controls, particle count,
 pause, reset, gravity controls and slow motion from the original application.
 Keyboard controls include G (reverse gravity), Q/E (select X gravity), X (slow
 motion), R (reset), and P (toggle grid). Particle arrays are read from the current
-Newton State each frame because spatial sorting can exchange their bindings.
+Newton State each frame. Each State retains its array bindings, while the
+simulation exchanges its two States and particles remain spatially sorted.
 
-## Current scope
+## Tank and box prototype
 
-The application initializes one static boundary and advances one homogeneous
-fluid in place using `solver.step(state, state, ..., dt)` for each substep.
-The spatial sorting and GPU algorithm remain unchanged. Public particle ordering
-can change: fixed particle-ID interoperability, out-of-place stepping and
-SolverCoupled compatibility are not claimed.
+```powershell
+python -m Lab_Framework.pbf --scene tank-box --device cuda:0
+python -m Lab_Framework.pbf --scene tank-box --device cuda:0 --cuda-graph
+python -m Lab_Framework.pbf --scene tank-box --headless --num-frames 300 --cuda-graph
+python -m Lab_Framework.pbf --scene tank-box --headless --num-frames 30 --stage-path output/tank.usd
+```
 
-The rigid asset pipeline is available, but this application does not yet simulate
-or render rigid dynamics, query dynamic bodies in the pressure solver, or return
-fluid reaction forces. Robot policies and GUI extensions remain later work.
+The default `static` scene remains unchanged. The optional `tank-box` scene uses
+one unified Newton Model and two States, with fluid-first pressure-feedback weak
+coupling and native MuJoCo Warp rigid collisions. The open one-meter tank has
+0.1 m walls; the 0.24 m box starts at (0.5, 0.75, 0.5), with half the fluid rest
+density. `config/tank_box.json` is the matching fluid preset. CLI fluid overrides
+apply over this preset; an explicit `--config` retains the existing JSON semantics.
+
+Tank/box meshes and SDFs are created on first use in `.cache/pbf/tank-box/` using
+the existing solid validation and bake utilities. Geometry, voxel size and
+support radius select the cache. Existing stairs/Spot assets are not changed.
+First-run volume integration and MuJoCo kernel compilation can take substantially
+longer than subsequent starts. Mesh poses update on the GPU in the existing GL
+renderer; optional USD exports include the tank and moving box.
+The tank preset starts with an elevated view through its open top. Camera
+controls and the original static scene's initial viewpoint remain unchanged.
+
+Gravity keys affect both fluid and rigid bodies, and slow motion changes their
+common dt. Reset restores both States and the MuJoCo history before rendering the
+initial state. Graph capture covers the whole coupled frame; the frontend
+recaptures after gravity/time-step changes.
+
+This scene deliberately establishes the physical coupling before imported
+assets are enabled. Follow-up work is to connect sim-ready OBJ/NVDB assets to
+Newton collision proxies, explicit mass/inertia and body-local transforms;
+represent complex static containers with valid rigid collision geometry; then
+support multi-link assets and check overlap/double-counting between boundaries.
+The existing asset pipeline remains available, but discovery alone does not
+create a dynamic body. Fixed particle IDs, multi-world RL and general
+SolverCoupled integration are outside this prototype.
+
+Validation and timing commands (CUDA required):
+
+```powershell
+python -m unittest discover -s tests/lab_solver -t . -v
+python -m unittest discover -s tests/lab_framework -t . -v
+python -m tests.lab_solver.benchmark_migration --output outputs/pbf-mujoco-coupling/performance.json
+python -m tests.lab_framework.benchmark_coupling
+```
+
+The 2026-11-03 validation passed 27 solver tests and 66 framework tests, including
+OpenGL camera controls, free fall/contact, floating-box feedback, off-center
+pressure rotation, shared-State ownership and Graph/reset lifecycle. Default
+tank rendering and USD motion export were also checked. See
+[`Lab_Solver/README.md`](../Lab_Solver/README.md#validation) for measured static
+regression and coupled timings.

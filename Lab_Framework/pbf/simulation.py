@@ -13,17 +13,25 @@ SDF_FILENAME = "stairs_scene.nvdb"
 
 
 class Simulation:
-    """Own one Newton state and advance its fluid particles in place.
+    """One model, two complete states, and a common fluid/rigid substep clock.
 
-    Particle arrays may change bindings during spatial sorting. Consumers must
-    read pos/v (or the current Newton State) each frame rather than cache them.
+    Each State keeps its array bindings. Particle slots retain spatial ordering;
+    consumers read the current state through pos/v after each frame.
     """
 
-    def __init__(self, *, config=None, verbose=False, boundaries=None):
+    def __init__(self, *, config=None, verbose=False, boundaries=None, scene="static",
+                 feedback=True):
         import newton
         from Lab_Solver.pbf import SolverPBF, boundary_model
 
-        self.config = config if config is not None else PBFConfig()
+        if scene not in ("static", "tank-box"):
+            raise ValueError(f"Unknown scene: {scene}")
+        self.scene = scene
+        if scene == "tank-box":
+            from .scenes import tank_box_config, add_tank_box, load_tank_box_boundaries
+            from newton.solvers import SolverMuJoCo
+        self.config = config if config is not None else (
+            tank_box_config() if scene == "tank-box" else PBFConfig())
         self.verbose = verbose
         self.sim_time = 0.0
         self.frame_dt = self.config.frame_dt
@@ -43,6 +51,9 @@ class Simulation:
                      + float(np.float32(spacing)) * (lattice + 1)).astype(np.float32)
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         builder.gravity = tuple(self.config.gravity)
+        if scene == "tank-box":
+            SolverMuJoCo.register_custom_attributes(builder)
+            box_body = add_tank_box(builder, self.config)
         builder.add_particles(
             pos=positions.tolist(),
             vel=[self.config.initial_velocity] * len(positions),
@@ -50,14 +61,22 @@ class Simulation:
             radius=[self.particle_radius] * len(positions),
         )
         self.model = builder.finalize(device=wp.get_device())
-        self.state = self.model.state()
+        self.states = (self.model.state(), self.model.state())
+        self._state_index = 0
+        self.control = self.model.control()
         if boundaries is None:
-            scene = boundary_model.BoundaryScene(
-                asset_dir=ASSET_DIR, static_assets=(SDF_FILENAME,), default_rigid_count=0,
-            )
-            boundaries = boundary_model.load_boundaries(
-                scene, boundary_model.BoundaryLoadOptions(self.smoothing_length, device=self.model.device),
-            )
+            if scene == "tank-box":
+                boundaries = load_tank_box_boundaries(self.config, self.model.device)
+            else:
+                request = boundary_model.BoundaryScene(
+                    asset_dir=ASSET_DIR, static_assets=(SDF_FILENAME,), default_rigid_count=0)
+                boundaries = boundary_model.load_boundaries(request,
+                    boundary_model.BoundaryLoadOptions(self.smoothing_length, device=self.model.device))
+        if scene == "tank-box":
+            boundaries.bind_bodies(self.model, [box_body])
+            for state in self.states:
+                newton.eval_fk(self.model, state.joint_q, state.joint_qd, state)
+            boundaries.sync_body_poses(self.state)
         self.BoundarySys = boundaries
         solver_config = SolverPBF.Config(
             rest_density=self.config.rest_density,
@@ -70,14 +89,30 @@ class Simulation:
             artificial_pressure_q=self.config.artificial_pressure_q,
             clamp_negative_pressure=self.config.clamp_negative_pressure,
         )
-        self.solver = SolverPBF(
+        solver_type = SolverPBF
+        solver_options = {}
+        if scene == "tank-box":
+            from Lab_Solver.pbf.solver_coupled import SolverPBFMuJoCo
+            solver_type = SolverPBFMuJoCo
+            solver_options["feedback"] = feedback
+        self.solver = solver_type(
             self.model, config=solver_config, boundaries=boundaries,
             grid_bounds=((0., 0., 0.), self.config.container_size),
+            **solver_options,
         )
-        self.solver.bind_state(self.state)
+        self.fluid_solver = self.solver.fluid if scene == "tank-box" else self.solver
         self._gravity = wp.vec3(*self.config.gravity)
         self.n = self.model.particle_count
         self.step_graphs = None
+        self._initial_bindings = self.fluid_solver.get_buffer_bindings()
+
+    @property
+    def state(self):
+        return self.states[self._state_index]
+
+    @property
+    def state_out(self):
+        return self.states[1 - self._state_index]
 
     @property
     def pos(self):
@@ -93,8 +128,13 @@ class Simulation:
 
     @gravity.setter
     def gravity(self, value):
+        import newton
+        values = np.asarray(value, dtype=float)
+        if values.shape != (3,) or not np.isfinite(values).all():
+            raise ValueError("gravity must have three finite components")
         self._gravity = wp.vec3(*value)
-        self.solver.set_gravity(self._gravity)
+        self.model.set_gravity(values)
+        self.solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
 
     @property
     def dt(self):
@@ -102,7 +142,12 @@ class Simulation:
 
     def _advance_frame(self):
         for _ in range(self.substep):
-            self.solver.step(self.state, self.state, control=None, contacts=None, dt=self.dt)
+            self._substep(self.dt)
+
+    def _substep(self, dt):
+        self.state.clear_forces()
+        self.solver.step(self.state, self.state_out, self.control, None, dt)
+        self._state_index = 1 - self._state_index
 
     def step(self):
         with wp.ScopedDevice(self.model.device), wp.ScopedTimer(
@@ -113,55 +158,84 @@ class Simulation:
 
     def reset(self):
         with wp.ScopedDevice(self.model.device):
-            self.solver.reset(self.state)
-            self.BoundarySys.reset()
+            for state in self.states:
+                self.solver.reset(state)
+                state.clear_forces()
+            self._state_index = 0
+            self.fluid_solver.set_buffer_bindings(self._initial_bindings)
+            self.fluid_solver.pos, self.fluid_solver.v = self.pos, self.v
+            if self.scene == "tank-box":
+                self.BoundarySys.sync_body_poses(self.state)
+            else:
+                self.BoundarySys.reset()
             self.gravity = self.config.gravity
         self.frame_dt = self.config.frame_dt
         self.sim_time = 0.0
 
     def capture_graph(self):
-        """Capture both buffer parities without restoring particle order or copies."""
+        """Capture both state and scratch parities; no physics is advanced."""
         if not self.model.device.is_cuda:
             raise RuntimeError("PBF graph capture requires a CUDA device")
-        original = self.solver.get_buffer_bindings()
+        original = self.fluid_solver.get_buffer_bindings()
+        state_index = self._state_index
+        rigid_step = self.solver.rigid._step if self.scene == "tank-box" else None
         graphs = {}
         with wp.ScopedDevice(self.model.device):
             self.solver.prepare_graph()
             try:
-                for start in (original, (original[2], original[3], original[0], original[1])):
-                    self.solver.set_buffer_bindings(start, self.state)
-                    with wp.ScopedCapture() as capture:
-                        self._advance_frame()
-                    key = (start[0].ptr, start[1].ptr)
-                    graphs[key] = (capture.graph, self.solver.get_buffer_bindings())
+                # Four variants also support capturing after externally inspected
+                # substeps/reset, without assuming state and scratch parity match.
+                for index in (0, 1):
+                    for start in (original, original[::-1]):
+                        self._state_index = index
+                        self.fluid_solver.set_buffer_bindings(start)
+                        with wp.ScopedCapture() as capture:
+                            self._advance_frame()
+                        key = (index, start[0].ptr)
+                        graphs[key] = (capture.graph, self._state_index,
+                                       self.fluid_solver.get_buffer_bindings())
             finally:
-                self.solver.set_buffer_bindings(original, self.state)
+                self._state_index = state_index
+                self.fluid_solver.set_buffer_bindings(original)
+                if rigid_step is not None:
+                    self.solver.rigid._step = rigid_step
+                self.fluid_solver.pos, self.fluid_solver.v = self.pos, self.v
         self.step_graphs = graphs
         self._graph_dt = self.dt
+        self._graph_substeps = self.substep
         self._graph_revision = self.solver._graph_revision
+
+    def graph_needs_recapture(self):
+        return (self.step_graphs is None or self.dt != self._graph_dt
+                or self.substep != self._graph_substeps
+                or self._graph_revision != self.solver._graph_revision)
 
     def launch_graph(self):
         if self.step_graphs is None:
             raise RuntimeError("Call capture_graph() before launch_graph()")
-        if self.dt != self._graph_dt:
+        if self.dt != self._graph_dt or self.substep != self._graph_substeps:
             raise RuntimeError("Time step changed; call capture_graph() again")
         if self._graph_revision != self.solver._graph_revision:
             raise RuntimeError("Solver parameters changed; call capture_graph() again")
-        bindings = self.solver.get_buffer_bindings()
-        key = (bindings[0].ptr, bindings[1].ptr)
+        bindings = self.fluid_solver.get_buffer_bindings()
+        key = (self._state_index, bindings[0].ptr)
         if key not in self.step_graphs:
             raise RuntimeError("Particle buffers changed; call capture_graph() again")
-        graph, end = self.step_graphs[key]
+        graph, end_index, end = self.step_graphs[key]
         with wp.ScopedDevice(self.model.device), wp.ScopedTimer(
             "PBF frame", active=self.verbose, synchronize=False,
         ):
             wp.capture_launch(graph)
-            self.solver.set_buffer_bindings(end, self.state)
+            self._state_index = end_index
+            self.fluid_solver.set_buffer_bindings(end)
+            self.fluid_solver.pos, self.fluid_solver.v = self.pos, self.v
+            if self.scene == "tank-box":
+                self.solver.rigid._step += self.substep
         self.sim_time += self.frame_dt
 
 
-def create_pbf_simulation(verbose=False, config=None):
-    return Simulation(verbose=verbose, config=config)
+def create_pbf_simulation(verbose=False, config=None, scene="static"):
+    return Simulation(verbose=verbose, config=config, scene=scene)
 
 
 def reset_simulation(simulation):

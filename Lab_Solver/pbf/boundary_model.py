@@ -83,8 +83,19 @@ class BoundaryDeviceData:
     rigid_ids: wp.array(dtype=int)
     transforms: wp.array(dtype=wp.transform)
     rigid_instance_ids: wp.array(dtype=int)
+    body_ids: wp.array(dtype=int)
+    local_transforms: wp.array(dtype=wp.transform)
+    world_com: wp.array(dtype=wp.vec3)
     count: int
     rigid_count: int
+
+
+@wp.struct
+class BoundaryCouplingData:
+    """Instance queries and a solver-owned Newton world-COM wrench buffer."""
+
+    instances: BoundaryDeviceData
+    forces: wp.array(dtype=wp.spatial_vector)
 
 
 @wp.func
@@ -123,6 +134,25 @@ def sample_instance_volume(data: BoundaryDeviceData, instance_id: int, position:
     return wp.volume_sample_f(volume_id, index, wp.Volume.LINEAR)
 
 
+@wp.func
+def query_instance_normal(data: BoundaryDeviceData, instance_id: int, position: wp.vec3):
+    distance, gradient = sample_instance_sdf(data, instance_id, position)
+    length_squared = wp.dot(gradient, gradient)
+    if not wp.isfinite(distance) or not wp.isfinite(length_squared) or length_squared <= 1.0e-12:
+        return False, 0.0, wp.vec3(0.0)
+    return True, distance, gradient / wp.sqrt(length_squared)
+
+
+@wp.func
+def query_instance_boundary(data: BoundaryDeviceData, instance_id: int,
+                            position: wp.vec3, support_radius: float):
+    valid, distance, normal = query_instance_normal(data, instance_id, position)
+    if not valid or distance <= 0.0 or distance >= support_radius:
+        return False, 0.0, wp.vec3(0.0)
+    pressure_distance = wp.max(distance + 0.125 * support_radius, 0.5 * support_radius)
+    return True, pressure_distance, -normal
+
+
 # =============================================================================
 # Instance management and pose updates
 # BoundarySystem owns resources and fixed-size device buffers, updates rigid
@@ -134,6 +164,16 @@ def _set_rigid_poses(poses: wp.array(dtype=wp.transform), instance_ids: wp.array
                      transforms: wp.array(dtype=wp.transform)):
     i = wp.tid()
     transforms[instance_ids[i]] = poses[i]
+
+
+@wp.kernel
+def _sync_body_poses(data: BoundaryDeviceData, body_q: wp.array(dtype=wp.transform),
+                     body_com: wp.array(dtype=wp.vec3)):
+    rigid = wp.tid()
+    body = data.body_ids[rigid]
+    transform = body_q[body]
+    data.transforms[data.rigid_instance_ids[rigid]] = transform * data.local_transforms[rigid]
+    data.world_com[rigid] = wp.transform_point(transform, body_com[body])
 
 
 class BoundarySystem:
@@ -150,6 +190,8 @@ class BoundarySystem:
         self.device = wp.get_device(device)
         rigid_indices = [i for i, instance in enumerate(self.instances) if instance.is_dynamic]
         self.rigid_count = len(rigid_indices)
+        if [self.instances[i].rigid_id for i in rigid_indices] != list(range(self.rigid_count)):
+            raise ValueError("Dynamic instances must have consecutive rigid IDs in instance order")
         self.static_count = len(self.instances) - self.rigid_count
         data = BoundaryDeviceData()
         data.sdf_ids = wp.array([a.sdf.id for a in self.assets], dtype=wp.uint64, device=self.device)
@@ -159,11 +201,55 @@ class BoundarySystem:
         data.asset_ids = wp.array([i.asset_id for i in self.instances], dtype=int, device=self.device)
         data.rigid_ids = wp.array([i.rigid_id for i in self.instances], dtype=int, device=self.device)
         data.rigid_instance_ids = wp.array(rigid_indices, dtype=int, device=self.device)
+        data.body_ids = wp.full(self.rigid_count, -1, dtype=int, device=self.device)
+        data.local_transforms = wp.empty(self.rigid_count, dtype=wp.transform, device=self.device)
+        data.local_transforms.fill_(wp.transform_identity())
+        data.world_com = wp.zeros(self.rigid_count, dtype=wp.vec3, device=self.device)
         data.transforms = wp.empty(len(self.instances), dtype=wp.transform, device=self.device)
         data.count = len(self.instances)
         data.rigid_count = self.rigid_count
         self.device_data = data
+        self.bound_model = None
         self.reset()
+
+    def bind_bodies(self, model, body_ids, local_transforms=None):
+        """Bind internal rigid order to Newton bodies once, before specialization.
+
+        Local transforms map asset coordinates into the body frame. The body's
+        origin need not coincide with its center of mass. All buffers remain
+        allocated when poses are synchronized during a step.
+        """
+        if self.bound_model is not None:
+            raise ValueError("Boundary bodies are already bound; create a new BoundarySystem to rebind")
+        if model.device != self.device:
+            raise ValueError("Boundary and Newton model devices must match")
+        ids = np.asarray(body_ids)
+        if ids.shape != (self.rigid_count,) or not np.issubdtype(ids.dtype, np.integer):
+            raise ValueError(f"Expected {self.rigid_count} integer Newton body IDs")
+        if np.any(ids < 0) or np.any(ids >= model.body_count):
+            raise ValueError("Boundary body ID is outside the Newton model")
+        if local_transforms is not None:
+            if isinstance(local_transforms, wp.array):
+                local_transforms = local_transforms.numpy()
+            values = np.array(local_transforms, dtype=np.float32, copy=True)
+            if values.shape != (self.rigid_count, 7) or not np.isfinite(values).all():
+                raise ValueError(f"Expected finite asset-to-body transforms with shape ({self.rigid_count}, 7)")
+            norms = np.linalg.norm(values[:, 3:].astype(np.float64), axis=1)
+            if np.any(norms == 0):
+                raise ValueError("Asset-to-body quaternions must be nonzero")
+            values[:, 3:] /= norms[:, None]
+            self.device_data.local_transforms.assign(values)
+        self.device_data.body_ids.assign(ids.astype(np.int32))
+        self.bound_model = model
+
+    def sync_body_poses(self, state):
+        """Update asset transforms and world COMs from the current Newton State."""
+        if not self.rigid_count:
+            return
+        if self.bound_model is None:
+            raise RuntimeError("Bind dynamic boundaries to Newton bodies before stepping")
+        wp.launch(_sync_body_poses, self.rigid_count,
+            inputs=[self.device_data, state.body_q, self.bound_model.body_com], device=self.device)
 
     def set_rigid_poses(self, poses):
         """Update by internal rigid order, preserving every static transform.
