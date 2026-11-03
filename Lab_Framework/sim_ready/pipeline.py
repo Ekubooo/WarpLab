@@ -90,18 +90,25 @@ def publish_pair(sources, directories):
     There is no cross-file atomic visibility guarantee. Run publication with
     consumers stopped; rollback protects previous assets on handled I/O failures.
     """
+    publish_files([(source, directory / source.name) for directory in directories for source in sources])
+
+
+def publish_files(destinations):
+    """Publish explicit (source, target) pairs as one rollback-protected group.
+
+    Supports OBJ/NVDB plus physical/collision attachments across subdirectories.
+    Like publish_pair, consumers must be stopped during publication.
+    """
     prepared, replaced, recovery_files, rollback_errors = [], [], set(), []
     try:
-        for directory in directories:
-            for source in sources:
-                destination = directory / source.name
-                temporary = _temporary(destination)
-                entry = [destination, temporary, None]
-                prepared.append(entry)
-                shutil.copyfile(source, temporary)
-                if destination.exists():
-                    entry[2] = _temporary(destination)
-                    shutil.copyfile(destination, entry[2])
+        for source, destination in destinations:
+            temporary = _temporary(destination)
+            entry = [destination, temporary, None]
+            prepared.append(entry)
+            shutil.copyfile(source, temporary)
+            if destination.exists():
+                entry[2] = _temporary(destination)
+                shutil.copyfile(destination, entry[2])
         for destination, temporary, backup in prepared:
             os.replace(temporary, destination)
             replaced.append((destination, backup))

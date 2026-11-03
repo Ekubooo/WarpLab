@@ -55,14 +55,20 @@ def prepare_boundary(mesh, name, root, *, support_radius, voxel_size, device):
         warp=version("warp-lang"), sdf_algorithm=1)
     directory = cache_directory(root, name, description)
     mesh_path, sdf_path = directory / f"{name}.obj", directory / f"{name}.nvdb"
+    checked = validation.validate_solid(mesh)
     if not mesh_path.is_file() or not sdf_path.is_file():
         print(f"Preparing {name} boundary: {directory}", flush=True)
-        checked = validation.validate_solid(mesh)
         volume = sdf.bake_rigid(checked,
             options=BakeOptions(voxel_size=voxel_size, max_support_radius=support_radius), device=device)
         pipeline.save_mesh_obj(mesh, mesh_path, digits=17)
         sdf.save_volume(volume, sdf_path)
         (directory / "recipe.json").write_text(json.dumps(description, indent=2) + "\n", encoding="utf-8")
+    else:
+        cached = trimesh.load(mesh_path, force="mesh", process=False)
+        if (cached.vertices.shape != mesh.vertices.shape or cached.faces.shape != mesh.faces.shape
+                or not np.allclose(cached.vertices, mesh.vertices, rtol=0., atol=1e-15)
+                or not np.array_equal(cached.faces, mesh.faces)):
+            raise ValueError(f"Cached boundary mesh differs from its recipe: {mesh_path}")
     return RigidAsset(mesh, mesh_path, sdf_path)
 
 

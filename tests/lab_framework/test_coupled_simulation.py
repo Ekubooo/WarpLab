@@ -13,6 +13,7 @@ from scipy.spatial import cKDTree
 
 from Lab_Framework.pbf.scenes import BOX_HALF_EXTENTS, tank_box_config, load_tank_box_boundaries
 from Lab_Framework.pbf.simulation import Simulation
+from Lab_Framework.sim_ready.pbf_assets import build_scene_assets
 from Lab_Solver.pbf.boundary_model import BoundarySystem
 
 
@@ -26,8 +27,10 @@ class CoupledSimulationTests(unittest.TestCase):
         cls.addClassCleanup(cls.directory.cleanup)
         cls.config = replace(tank_box_config(), particle_radius=.025)
         with wp.ScopedDevice("cuda:0"), contextlib.redirect_stdout(io.StringIO()):
+            build_scene_assets("tank-box", cls.config, asset_dir=cls.directory.name,
+                               voxel_size=.025)
             cls.template = load_tank_box_boundaries(cls.config, "cuda:0",
-                cache_dir=cls.directory.name, voxel_size=.025)
+                asset_dir=cls.directory.name)
 
     def make_simulation(self, *, substeps=3, feedback=True):
         with wp.ScopedDevice("cuda:0"), contextlib.redirect_stdout(io.StringIO()):

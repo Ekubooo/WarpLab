@@ -11,8 +11,9 @@ import trimesh
 import warp as wp
 
 from Lab_Framework.pbf.config import PBFConfig
-from Lab_Framework.pbf import rigid_assets, stairs_scene
-from Lab_Framework.sim_ready import config, geometry
+from Lab_Framework.pbf import stairs_scene
+from Lab_Framework.sim_ready import config, geometry, rigid_assets
+from Lab_Framework.sim_ready.pbf_assets import build_scene_assets
 
 
 class StairGeometryTests(unittest.TestCase):
@@ -54,7 +55,8 @@ class StairsAssetsTests(unittest.TestCase):
             raise unittest.SkipTest("CUDA volume assets are required")
         cls.config = PBFConfig()
         with wp.ScopedDevice("cuda:0"):
-            cls.assets = stairs_scene.prepare_stairs_assets(cls.config, "cuda:0")
+            build_scene_assets("stairs-rigids", cls.config)
+            cls.assets = stairs_scene.load_stairs_assets(cls.config)
 
     def build(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
@@ -78,7 +80,7 @@ class StairsAssetsTests(unittest.TestCase):
         builder, ids = self.build()
         np.testing.assert_allclose(builder.body_mass[:2], [.3**3 * 500., .3**3 * 1200.], rtol=2e-6)
         self.assertAlmostEqual(builder.body_mass[2], 4 / 3 * np.pi * .15**3 * 750., places=4)
-        mesh = self.assets.boundaries["spot"].mesh
+        mesh = trimesh.load(self.assets.boundaries["spot"].mesh_path, force="mesh", process=False)
         self.assertAlmostEqual(mesh.extents.max(), .35, places=8)
         self.assertAlmostEqual(builder.body_mass[3], mesh.volume * 500., places=5)
         np.testing.assert_allclose(builder.body_com[3], mesh.center_mass, atol=1e-7)
@@ -90,13 +92,20 @@ class StairsAssetsTests(unittest.TestCase):
             center = wp.transform_point(builder.body_q[body], wp.vec3(*builder.body_com[body]))
             np.testing.assert_allclose(center, item.center, atol=2e-7)
 
-    def test_proxy_validation_and_cache_hit(self):
+    def test_published_proxies_and_runtime_never_prepare_geometry(self):
         for hulls in (self.assets.bunny_hulls, self.assets.spot_hulls):
             self.assertGreater(len(hulls), 1)
-            rigid_assets._validate_hulls(hulls)
+            rigid_assets._validate_hulls([trimesh.Trimesh(h.vertices, h.faces, process=False) for h in hulls])
         with patch("coacd.run_coacd", side_effect=AssertionError("cached decomposition reran")), \
-                patch("Lab_Framework.sim_ready.sdf.bake_rigid", side_effect=AssertionError("cached SDF rebaked")):
-            cached = stairs_scene.prepare_stairs_assets(self.config, "cuda:0")
+                patch("Lab_Framework.sim_ready.sdf.bake_rigid", side_effect=AssertionError("SDF rebaked")), \
+                patch.object(geometry, "prepare_scene", side_effect=AssertionError("terrain regenerated")), \
+                patch.object(geometry, "prepare_rigid", side_effect=AssertionError("source geometry loaded")), \
+                patch.object(geometry, "union", side_effect=AssertionError("geometry union ran")), \
+                patch.object(trimesh.Trimesh, "mass_properties",
+                             new=property(lambda mesh: self.fail("runtime mass integration"))):
+            cached = stairs_scene.load_stairs_assets(self.config)
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+            stairs_scene.add_stairs_rigids(builder, cached)
         self.assertEqual([v.sdf_path for v in cached.boundaries.values()],
                          [v.sdf_path for v in self.assets.boundaries.values()])
 

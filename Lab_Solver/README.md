@@ -129,13 +129,13 @@ complete substep:
 
 | Stage | Archived median | New median | New/archived | Paired ratio 95% CI |
 | --- | ---: | ---: | ---: | --- |
-| Neighborhood | 262.24 | 255.34 | 0.9737 | 0.9518–0.9789 |
-| Pressure iterations | 684.03 | 684.98 | 1.0014 | 0.9973–1.0243 |
-| Complete substep | 1168.00 | 1166.58 | 0.9988 | 0.9979–1.0047 |
+| Neighborhood | 267.62 | 250.54 | 0.9362 | 0.9261–0.9699 |
+| Pressure iterations | 677.41 | 682.61 | 1.0077 | 0.9950–1.0274 |
+| Complete substep | 1178.75 | 1175.01 | 0.9968 | 0.9893–1.0014 |
 
 These measurements (2026-11-03) meet the complete-substep 5% regression target
 for this configuration; they are not a universal zero-overhead guarantee. Full
-samples are in `outputs/stairs-rigids/static-performance.json` when running the
+samples are in `outputs/offline-assets/static-performance.json` when running the
 benchmark with `--output` set to that path.
 
 The default 24,500-particle tank/box scene took 1.691 ms per coupled frame
@@ -155,3 +155,10 @@ and covers field ownership, capture without advancement, reset and gravity/dt
 changes. Controlled kernel tests check pressure impulse balance, translated and
 rotated asset offsets, nonzero COM, torque, dt-squared scaling, iteration
 accumulation, and force clearing independently of projection and speed limits.
+
+
+Project-owned PBF/force/boundary kernels are compiled forward-only. This removes
+unused generated backward entry points; it does not change the equations or
+make the current solver differentiable. Framework asset production is offline;
+`load_boundary_volumes` still refreshes only the in-file volume map when its
+support radius, quadrature or algorithm version changes.

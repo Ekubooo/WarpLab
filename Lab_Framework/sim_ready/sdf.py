@@ -12,6 +12,10 @@ import warp as wp
 from .config import BakeOptions
 
 
+# This forward-only path never records or consumes simulation gradients.
+wp.set_module_options({"enable_backward": False})
+
+
 @wp.kernel
 def _select_tiles(mesh: wp.uint64, tiles: wp.array(dtype=wp.vec3i), origin: wp.vec3,
                   spacing: float, threshold: float, search_radius: float,

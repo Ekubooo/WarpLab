@@ -16,8 +16,9 @@ import warp as wp
 
 from Lab_Framework.pbf.config import PBFConfig
 from Lab_Framework.pbf.stairs_scene import (
-    prepare_stairs_assets, add_stairs_rigids, load_stairs_boundaries,
+    load_stairs_assets, add_stairs_rigids, load_stairs_boundaries,
 )
+from Lab_Framework.sim_ready.pbf_assets import build_scene_assets
 from Lab_Solver.pbf import SolverPBF
 
 
@@ -31,7 +32,8 @@ class StairsCouplingTests(unittest.TestCase):
         cls.config = PBFConfig()
         cls.dt = cls.config.frame_dt / cls.config.substeps
         with wp.ScopedDevice(cls.device), contextlib.redirect_stdout(io.StringIO()):
-            cls.assets = prepare_stairs_assets(cls.config, cls.device)
+            build_scene_assets("stairs-rigids", cls.config, device=cls.device)
+            cls.assets = load_stairs_assets(cls.config)
             builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
             builder.gravity = (0., 0., 0.)
             SolverMuJoCo.register_custom_attributes(builder)

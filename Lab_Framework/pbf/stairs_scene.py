@@ -4,34 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import trimesh
 import warp as wp
 
-from .rigid_assets import RigidAsset, prepare_boundary, prepare_hulls
+from .asset_io import ASSET_DIR, PublishedAsset, load_asset, load_asset_volumes, build_command
+from .scene_data import BOX_SIZE, SPHERE_RADIUS, SPOT_LENGTH, RIGIDS, asset_geometry
 
 
 ROOT = Path(__file__).resolve().parent
-CACHE_DIR = ROOT.parents[1] / ".cache" / "pbf" / "stairs-rigids"
-VOXEL_SIZE = .005
-BOX_SIZE = .30
-SPHERE_RADIUS = .15
-SPOT_LENGTH = .35
-
-
-@dataclass(frozen=True)
-class RigidInstance:
-    name: str
-    asset: str
-    density: float
-    center: tuple[float, float, float]
-
-
-RIGIDS = (
-    RigidInstance("box_a", "box", 500., (2.10, 1.15, .55)),
-    RigidInstance("box_b", "box", 1200., (2.45, 1.50, .55)),
-    RigidInstance("sphere", "sphere", 750., (2.45, 1.15, 1.02)),
-    RigidInstance("spot", "spot", 500., (2.10, 1.55, 1.02)),
-)
 
 
 @dataclass
@@ -39,35 +18,26 @@ class StairsAssets:
     static_boxes: tuple
     bunny_hulls: tuple
     spot_hulls: tuple
-    boundaries: dict[str, RigidAsset]
+    boundaries: dict[str, PublishedAsset]
     static_mesh: Path
     static_sdf: Path
+    static_asset: PublishedAsset
 
 
-def prepare_stairs_assets(config, device, *, cache_dir=None):
-    """Prepare the fixed reference geometry before building a Newton Model."""
-    from Lab_Framework.sim_ready import config as asset_config, geometry, validation
-
-    root = CACHE_DIR if cache_dir is None else Path(cache_dir)
-    options = asset_config.GeometryOptions()
-    scene = geometry.prepare_scene(asset_config.ASSETS / "bunny_flat_bottom.obj", options=options)
-    boxes = geometry.terrain_boxes(options)
-    walls, _ = geometry.container_parts(scene.terrain, options)
-    static_boxes = tuple((tuple(mesh.bounds.mean(axis=0)), tuple(mesh.extents / 2))
-                         for mesh in [*boxes, *walls])
-    source = geometry.prepare_rigid(asset_config.ASSETS / "spot_triangulated_good.obj")
-    source.apply_scale(SPOT_LENGTH / source.extents.max())
-    spot = geometry.union(validation.validate_rigid_parts(source))
-    validation.validate_solid(spot)
-    bunny_hulls = prepare_hulls(scene.model, "bunny", root)
-    spot_hulls = prepare_hulls(spot, "spot", root)
-    meshes = dict(box=trimesh.creation.box(extents=(BOX_SIZE,) * 3),
-                  sphere=trimesh.creation.icosphere(subdivisions=3, radius=SPHERE_RADIUS), spot=spot)
-    boundaries = {name: prepare_boundary(mesh, name, root,
-        support_radius=max(.05, 4. * config.particle_radius), voxel_size=VOXEL_SIZE, device=device)
-        for name, mesh in meshes.items()}
-    return StairsAssets(static_boxes, bunny_hulls, spot_hulls, boundaries,
-                        ROOT / "Assets" / "stairs_scene.obj", ROOT / "Assets" / "stairs_scene.nvdb")
+def load_stairs_assets(config, *, asset_dir=None):
+    """Read published geometry and physical properties; no mesh processing."""
+    root = ASSET_DIR if asset_dir is None else Path(asset_dir)
+    command = build_command("stairs-rigids", config)
+    static = load_asset(root / "stairs_scene", asset_geometry("stairs_scene", config), command=command)
+    boundaries = {name: load_asset(root / "Rigid" / f"stairs_{name}",
+        asset_geometry(f"stairs_{name}", config), command=command) for name in ("box", "sphere", "spot")}
+    if not static.hulls or not boundaries["spot"].hulls or not boundaries["spot"].metadata.get("mass"):
+        raise ValueError(f"Missing published convex collision or Spot mass properties. Build offline:\n{command}")
+    boxes = np.asarray(static.metadata.get("static_boxes"), dtype=float)
+    if boxes.shape != (24, 2, 3) or not np.isfinite(boxes).all() or np.any(boxes[:, 1] <= 0):
+        raise ValueError(f"Invalid published stair boxes. Build offline:\n{command}")
+    return StairsAssets(tuple((tuple(c), tuple(h)) for c, h in boxes), static.hulls,
+        boundaries["spot"].hulls, boundaries, static.mesh_path, static.sdf_path, static)
 
 
 def _add_hulls(builder, body, hulls, label):
@@ -91,12 +61,12 @@ def add_stairs_rigids(builder, assets):
     for instance in RIGIDS:
         cfg = builder.ShapeConfig(density=instance.density, mu=.5, restitution=0.)
         if instance.asset == "spot":
-            mesh = assets.boundaries["spot"].mesh
-            com = mesh.center_mass
+            mass = assets.boundaries["spot"].metadata["mass"]
+            com = np.asarray(mass["com"])
             body = builder.add_body(
                 xform=wp.transform(np.asarray(instance.center) - com, wp.quat_identity()),
-                mass=instance.density * mesh.volume, com=wp.vec3(*com),
-                inertia=wp.mat33(*(instance.density * mesh.moment_inertia).reshape(-1)),
+                mass=instance.density * mass["volume"], com=wp.vec3(*com),
+                inertia=wp.mat33(*(instance.density * np.asarray(mass["inertia_unit_density"])).reshape(-1)),
                 lock_inertia=True, label=instance.name)
             _add_hulls(builder, body, assets.spot_hulls, "spot_proxy")
         else:
@@ -113,16 +83,15 @@ def add_stairs_rigids(builder, assets):
 def load_stairs_boundaries(assets, config, device):
     """Load each volume once and map the explicit body order to four instances."""
     from Lab_Solver.pbf.boundary_model import (
-        BoundaryAsset, BoundaryInstance, BoundarySystem, load_boundary_volumes,
+        BoundaryAsset, BoundaryInstance, BoundarySystem,
     )
 
     names = ("box", "sphere", "spot")
-    paths = [(assets.static_sdf, assets.static_mesh)]
-    paths += [(assets.boundaries[name].sdf_path, assets.boundaries[name].mesh_path) for name in names]
+    sources = [assets.static_asset, *(assets.boundaries[name] for name in names)]
     loaded = []
-    for sdf_path, mesh_path in paths:
-        sdf, volume_map = load_boundary_volumes(sdf_path, 4. * config.particle_radius, device=device)
-        loaded.append(BoundaryAsset(sdf_path, mesh_path, sdf, volume_map))
+    for asset in sources:
+        sdf, volume_map = load_asset_volumes(asset, 4. * config.particle_radius, device)
+        loaded.append(BoundaryAsset(asset.sdf_path, asset.mesh_path, sdf, volume_map))
     asset_ids = {name: i + 1 for i, name in enumerate(names)}
     instances = [BoundaryInstance(0)]
     instances += [BoundaryInstance(asset_ids[item.asset], i) for i, item in enumerate(RIGIDS)]

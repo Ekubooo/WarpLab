@@ -14,6 +14,10 @@ import warp.render
 from warp._src.render.render_opengl import ShapeInstancer, arr_pointer
 
 
+# This forward-only path never records or consumes simulation gradients.
+wp.set_module_options({"enable_backward": False})
+
+
 LOW_SPEED_COLOR = (29.0 / 255.0, 119.0 / 255.0, 231.0 / 255.0)
 MID_SPEED_COLOR = (160.0 / 255.0, 221.0 / 255.0, 1.0)
 HIGH_SPEED_COLOR = (1.0, 1.0, 1.0)

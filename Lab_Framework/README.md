@@ -1,5 +1,9 @@
 # Independent lab applications
 
+```
+conda run -n WarpSim --no-capture-output python -m Lab_Framework.pbf --scene stairs-rigids --device cuda:0 --cuda-graph --particle-radius 0.0125 --substeps 3 --pressure-iterations 3
+```
+
 These applications use the Newton-compatible PBF solver from `Lab_Solver`.
 Existing programs under `demos` remain independent snapshots.
 
@@ -9,31 +13,74 @@ Warp 1.18.0 and MuJoCo/MuJoCo Warp 3.15.0 validation environment.
 
 ## Prepare assets
 
-Source OBJ inputs stay local and are excluded from Git. Supply the required
-models in `Lab_Framework/sim_ready/Assets` after cloning the repository. Build
-the default container before starting PBF:
+Source OBJ inputs stay local and are excluded from Git. The producer is
+`Lab_Framework.sim_ready`; the PBF application consumes published files in
+`Lab_Framework/pbf/Assets` and its `Rigid` subdirectory.
+
+For an exact copy of the archived default stairs, run the explicit reference
+synchronization once. A fresh installation without the archived resources can
+instead build a container using the existing standalone OBJ-to-SDF tool; a
+new bake is not promised to reproduce archived SDF rounding bit for bit.
 
 ```powershell
-conda run -n WarpSim --no-capture-output python -m Lab_Framework.sim_ready --obj bunny_flat_bottom.obj --name stairs_scene --device cuda:0
+python -m tests.lab_solver.sync_reference_assets
+# Alternative for freshly generated geometry:
+# python -m Lab_Framework.sim_ready --obj bunny_flat_bottom.obj --name stairs_scene
+
+python -m Lab_Framework.sim_ready.pbf_assets --scene static
+python -m Lab_Framework.sim_ready.pbf_assets --scene tank-box
+python -m Lab_Framework.sim_ready.pbf_assets --scene stairs-rigids
 ```
 
-The input directory is `sim_ready/Assets`. Bare OBJ names resolve there; relative
-paths containing a directory resolve against the working directory. The pipeline
-uses Newton's public `Mesh.create_terrain()` API and retains the existing union,
-container validation and CUDA SDF baking.
+The scene publisher validates source geometry and reuses matching existing
+baked/CoACD caches. Missing geometry caches are generated **offline**, then all
+consumer files are staged and published with rollback on handled failures.
+Stop running consumers while publishing. Output copies are kept under
+`sim_ready/output/pbf_assets/<scene>`; `.cache/pbf` is only a producer cache.
+The runtime never imports the geometry baker or CoACD.
 
-Container outputs are saved under `sim_ready/output` and published to `pbf/Assets`.
-Rigid outputs use local `output/rigid` and published `pbf/Assets/Rigid`:
+Each asset keeps its original-style filename stem, with these attachments:
+
+| File | Content |
+| --- | --- |
+| `.obj` | Complete render mesh, preserving the asset frame |
+| `.nvdb` | SDF and the current support-radius volume-map cache |
+| `.collision.npz` | Convex pieces for imported solids; primitives use native shapes |
+| `.json` | Geometry recipe, file/SDF identities, provenance and physical properties |
+
+`stairs_scene` stays at its existing path. Published dynamic stems are
+`Rigid/tank_box`, `Rigid/stairs_box`, `Rigid/stairs_sphere`, and `Rigid/stairs_spot`;
+the tank boundary is `tank_scene`. The two stair boxes share one asset.
+Spot metadata stores volume, local COM and the complete unit-density COM inertia.
+Runtime instance density scales these properties; convex pieces add no mass.
+
+Startup only reads and assembles assets, with one deliberate exception inherited
+from the demo: a changed support radius, quadrature or volume-map algorithm
+recomputes the **volume map**, writes it beside the unchanged SDF in the same
+NVDB, and reuses it on the next launch. No geometric SDF bake occurs at startup.
+A support radius beyond the sparse SDF's baked band requires offline publication
+with a larger particle radius. SDF identity is checked independently of the
+mutable volume-map grid and grid-pair header fields.
 
 ```powershell
-conda run -n WarpSim --no-capture-output python -m Lab_Framework.sim_ready.rigid_pipeline --obj spot_triangulated_good.obj --name rigid_spot --device cuda:0
+# Same configuration selection rules as the runtime (JSON excludes CLI overrides).
+python -m Lab_Framework.sim_ready.pbf_assets --scene tank-box --config my_fluid.json
+python -m Lab_Framework.sim_ready.pbf_assets --scene tank-box --particle-radius 0.02 --container-size 1.2 1 1
 ```
 
-Rigid inputs preserve their local origin and axes unless an explicit transform is
-requested. The output is a matching OBJ and single-grid SDF NVDB. Publication
-protects the input source and rolls back handled publication failures. Existing
-output names are replaced. PBF adds or refreshes the volume map in the same new
-NVDB; no original demo cache is read or modified.
+Changing tank dimensions requires republishing; changing density, time step or
+pressure iterations does not. Missing, incomplete or geometrically mismatched
+assets stop startup with an offline command, without silently repairing them.
+
+The original standalone container and rigid tools remain available:
+
+```powershell
+python -m Lab_Framework.sim_ready.rigid_pipeline --obj spot_triangulated_good.obj --name rigid_spot
+```
+
+They publish OBJ/SDF pairs. The scene publisher adds the collision/physical
+attachments required by the coupled recipes. No USD asset import is involved;
+USD remains an optional animation export.
 
 ## Run PBF
 
@@ -71,9 +118,8 @@ coupling and native MuJoCo Warp rigid collisions. The open one-meter tank has
 density. `config/tank_box.json` is the matching fluid preset. CLI fluid overrides
 apply over this preset; an explicit `--config` retains the existing JSON semantics.
 
-Tank/box meshes and SDFs are created on first use in `.cache/pbf/tank-box/` using
-the existing solid validation and bake utilities. Geometry, voxel size and
-support radius select the cache. Existing stairs/Spot assets are not changed.
+Tank/box meshes and SDFs are prepared with the offline command above and loaded
+from published Assets. Existing stairs/Spot assets are not changed.
 First-run volume integration and MuJoCo kernel compilation can take substantially
 longer than subsequent starts. Mesh poses update on the GPU in the existing GL
 renderer; optional USD exports include the tank and moving box.
@@ -111,6 +157,7 @@ them once instead of rebaking the scene (rebaking can change SDF rounding):
 
 ```powershell
 python -m tests.lab_solver.sync_reference_assets
+python -m Lab_Framework.sim_ready.pbf_assets --scene stairs-rigids
 ```
 
 This explicit migration tool backs up the previous framework resources to
@@ -131,11 +178,11 @@ Spot also uses convex pieces for rigid collision, but one complete mesh/SDF
 for rendering and PBF. Imported-solid mass comes from the complete closed mesh,
 not the overlapping convex pieces. Collision pieces add no mass.
 
-First use creates cached CoACD 1.0.14 hulls and 0.005 m dynamic SDFs under
-`.cache/pbf/stairs-rigids`. Convex decomposition can take several minutes;
-generation progress is printed and subsequent launches reuse the cache.
-Geometry, scale, sampling parameters, decomposition options and version select
-the cache. No asset preparation occurs during a physics step. Decomposition
+Offline publication prepares CoACD 1.0.14 hulls and 0.005 m dynamic SDFs, reusing
+`.cache/pbf/stairs-rigids` when available. Convex decomposition can take several
+minutes on a cache miss; progress is printed by the producer. Geometry, scale,
+sampling parameters, decomposition options and version select its cache.
+Startup and physics steps never prepare geometry or recompute imported mass. Decomposition
 errors are reported instead of silently falling back to a whole-object hull.
 Cached `metrics.json` files record piece counts, volume and sampled distances;
 these distances are diagnostics, not a certified Hausdorff error bound.
@@ -166,7 +213,8 @@ python -m tests.lab_solver.benchmark_migration --output outputs/pbf-mujoco-coupl
 python -m tests.lab_framework.benchmark_coupling
 ```
 
-The 2026-11-03 regression run passed 27 solver tests and 77 framework tests.
+The earlier multi-rigid baseline (before the offline-assets refactor) passed
+27 solver tests and 77 framework tests.
 Each suite skipped one opt-in full-scale test; both full-scale tests were run
 separately and passed. Coverage includes native box/box, sphere/box, Spot/box,
 stairs/wall/bunny contacts and motion response, shared-asset force ownership,
@@ -195,3 +243,90 @@ initial rendering before physics, G/Q/E/X/R/P, paused reset, and all four USD
 mesh animations; screenshots and logs are in the same output directory. See
 [`Lab_Solver/README.md`](../Lab_Solver/README.md#validation) for measured static
 regression and coupled timings.
+
+## Forward-only compilation and startup measurements
+
+Project PBF kernels explicitly disable backward generation, including their
+unique module options. Boundary/force helpers, SDF baking and billboard kernels
+also disable backward at their own module scope. No global Warp setting or
+third-party module is changed. `requires_grad=True` remains unsupported.
+MuJoCo's `derivative` module can still appear in load logs: it contains
+derivatives used by forward integration and already disables backward code.
+
+`tests.lab_framework.benchmark_startup` measures each scene in fresh processes:
+three empty-Warp-cache trials and five trials reusing the first cache. The CUDA
+driver cache is not cleared. Asset production is excluded and reported
+separately; volume-map-miss startup must also be distinguished from cache hits.
+Results include imports/device initialization, asset loading, model assembly,
+solver creation, Graph capture and the first hidden OpenGL frame, plus generated
+project CUDA backward-entry counts. Use its `--help` for isolated code/cache roots.
+
+```powershell
+# Use a new cache directory for each run; existing caches are never cleared.
+python -m tests.lab_framework.benchmark_startup --cold 3 --warm 5 --cache-root .cache/startup-check --output outputs/offline-assets/startup-check.json
+# Separate volume-map miss/hit trials on private copies, reusing those Warp caches.
+python -m tests.lab_framework.benchmark_volume_map_startup --startup-report outputs/offline-assets/startup-check.json --output outputs/offline-assets/volume-map-check
+```
+
+The offline-assets refactor passed 92 framework tests (including full-scale
+Graph/lifecycle), all 30 solver cases across the suite and parity retry, the
+30-substep independent bitwise reference comparison, the real GL/key/USD
+verifier, and a 10-second four-body trajectory. One initial archived-reference
+test hit a transient Windows file-replacement denial; its isolated rerun and
+the subsequent independent benchmark both passed without changing the demo.
+Published meshes and complete NVDB pairs are byte-identical to the pre-change
+snapshot; convex arrays and Spot physical properties also match. Evidence is
+in `outputs/offline-assets/asset-migration.json`, `parity-tests.log`,
+`framework-tests.log`, `acceptance.json`, and `static-performance.json`.
+
+Measured on the RTX 5070 / WarpSim environment, with the original scene sizes,
+prepared assets and volume-map hits. Each row reports seconds as median
+(minimum to maximum); cold has three fresh-process samples and warm has five.
+Cold means an empty isolated **Warp** cache; the CUDA driver cache was not cleared.
+
+| Scene | Warp cache | Before | After |
+| --- | --- | ---: | ---: |
+| static | cold | 10.644 (10.625 to 10.646) | 7.603 (7.561 to 7.670) |
+| static | warm | 6.405 (6.377 to 6.564) | 4.968 (4.853 to 5.259) |
+| tank-box | cold | 60.947 (59.338 to 61.186) | 51.522 (51.393 to 51.749) |
+| tank-box | warm | 20.394 (20.185 to 20.946) | 16.656 (15.769 to 16.767) |
+| stairs-rigids | cold | 148.184 (129.832 to 149.682) | 77.289 (77.054 to 78.214) |
+| stairs-rigids | warm | 54.729 (54.036 to 69.055) | 23.623 (23.203 to 25.771) |
+
+The 48 canonical trials and per-phase samples are in
+`outputs/offline-assets/startup-before.json` and `startup-after.json`;
+`startup-comparison.json` separates asset work, project module loading and
+third-party module loading. Project cold module-load medians fell from
+4.950 to 1.968 s (static), 11.893 to 3.103 s (tank), and 56.729 to 6.284 s
+(stairs). These timings include source generation, compilation and loading,
+and overlap their enclosing startup phases. The after-cache audit found
+122 project CUDA sources with **zero backward kernel entries**, versus 142
+entries across 124 baseline sources.
+
+Third-party cold module loading still costs about 1.32 / 44.02 / 65.58 s
+respectively, mostly inside rigid-solver initialization and Graph capture.
+Third-party code is unchanged; its timing variation is not attributed directly
+to disabling project AD. Some early coupled baseline imports put trimesh work
+in a different phase (about one second); total first-frame and module-load sums
+remain comparable, but asset-phase differences alone are not net savings.
+
+Cached offline migration/publication took 4.037 / 0.209 / 2.135 s for static,
+tank and stairs in one process (static includes initial CUDA setup). These are
+**cache-reuse** measurements, not fresh SDF/CoACD production times, and are not
+counted as compilation savings. See `outputs/offline-assets/publication.json`.
+
+Separate volume-map trials used private copies seeded at h=0.04 m, then the
+default h=0.05 m launch followed by a second launch. The existing Warp caches
+were reused. These are one diagnostic miss/hit pair per scene, not the repeated
+startup samples above; they include volume-map compilation on the first use.
+
+| Scene | Refresh + first frame (s) | Next launch + first frame (s) | Maps rebuilt on first / second launch |
+| --- | ---: | ---: | ---: |
+| static | 11.786 | 5.036 | 1 / 0 |
+| tank-box | 18.932 | 16.937 | 2 / 0 |
+| stairs-rigids | 31.334 | 23.646 | 4 / 0 |
+
+The reproducible driver is `tests.lab_framework.benchmark_volume_map_startup`;
+results and individual logs are in `outputs/offline-assets/volume-map`.
+Its copied SDFs pass published identity checks before and after refresh.
+The original published files are untouched by this diagnostic.

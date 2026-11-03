@@ -1,46 +1,10 @@
-"""Small coupling reference scene, separate from the sim-ready asset workflow.
+"""Native tank assembly and loading of independently published boundaries."""
 
-The tank and box use the same dimensions for Newton collision, the rendered
-mesh and the baked volume boundary. Generated assets belong to this scene's
-cache; the existing stairs and imported rigid assets are never overwritten.
-"""
-
-from dataclasses import replace
-import hashlib
-import json
 from pathlib import Path
 
-from .config import PBFConfig
-
-
-WALL_THICKNESS = .1
-BOX_HALF_EXTENTS = (.12, .12, .12)
-BOX_POSITION = (.5, .75, .5)
-VOXEL_SIZE = .0075
-ASSET_VERSION = 1
-CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "pbf" / "tank-box"
-
-
-def tank_box_config():
-    """Fluid defaults for the open, one-meter tank."""
-    return replace(PBFConfig(), container_size=(1., 1., 1.),
-                   block_start=(.05, .025, .05), block_end=(.95, .55, .95))
-
-
-def tank_walls(config):
-    """Return world-space (center, half extents) for the five solid walls."""
-    x, y, z = config.container_size
-    t = WALL_THICKNESS
-    for center, half, size in zip(BOX_POSITION, BOX_HALF_EXTENTS, (x, y, z)):
-        if center - half <= 0. or center + half >= size:
-            raise ValueError("tank-box requires the initial box to fit inside container_size")
-    return (
-        ((x / 2., -t / 2., z / 2.), (x / 2. + t, t / 2., z / 2. + t)),
-        ((-t / 2., y / 2., z / 2.), (t / 2., y / 2., z / 2. + t)),
-        ((x + t / 2., y / 2., z / 2.), (t / 2., y / 2., z / 2. + t)),
-        ((x / 2., y / 2., -t / 2.), (x / 2., y / 2., t / 2.)),
-        ((x / 2., y / 2., z + t / 2.), (x / 2., y / 2., t / 2.)),
-    )
+from .asset_io import ASSET_DIR, load_asset, load_asset_volumes, build_command
+from .scene_data import (WALL_THICKNESS, BOX_HALF_EXTENTS, BOX_POSITION,
+                         tank_box_config, tank_walls, asset_geometry)
 
 
 def add_tank_box(builder, config):
@@ -60,54 +24,15 @@ def add_tank_box(builder, config):
     return body_id
 
 
-def asset_cache_path(config, *, cache_dir=None, voxel_size=VOXEL_SIZE):
-    """Geometry and sampling changes select an independent asset directory."""
-    import math
-    if not math.isfinite(voxel_size) or voxel_size <= 0.:
-        raise ValueError("voxel_size must be finite and positive")
-    description = dict(version=ASSET_VERSION, walls=tank_walls(config),
-                       box_half=BOX_HALF_EXTENTS, voxel_size=voxel_size,
-                       support_radius=4. * config.particle_radius)
-    digest = hashlib.sha256(json.dumps(description, sort_keys=True).encode()).hexdigest()[:20]
-    return Path(CACHE_DIR if cache_dir is None else cache_dir) / digest
+def load_tank_box_boundaries(config, device, *, asset_dir=None):
+    """Load the published tank/box pair; only volume-map refresh is allowed."""
+    from Lab_Solver.pbf.boundary_model import BoundaryAsset, BoundaryInstance, BoundarySystem
 
-
-def _box_mesh(center, half):
-    import trimesh
-    mesh = trimesh.creation.box(extents=[2. * value for value in half])
-    mesh.apply_translation(center)
-    return mesh
-
-
-def _prepare_assets(config, directory, voxel_size, device):
-    from Lab_Framework.sim_ready import geometry, pipeline, sdf, validation
-    from Lab_Framework.sim_ready.config import BakeOptions
-
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "Rigid").mkdir(exist_ok=True)
-    options = BakeOptions(voxel_size=voxel_size, max_support_radius=4. * config.particle_radius)
-    for name in ("tank", "Rigid/box"):
-        mesh_path = directory / f"{name}.obj"
-        sdf_path = directory / f"{name}.nvdb"
-        if mesh_path.is_file() and sdf_path.is_file():
-            continue
-        if name == "tank":
-            mesh = geometry.union([_box_mesh(center, half) for center, half in tank_walls(config)])
-        else:
-            mesh = _box_mesh((0., 0., 0.), BOX_HALF_EXTENTS)
-        checked = validation.validate_solid(mesh)
-        volume = sdf.bake_rigid(checked, options=options, device=device)
-        pipeline.save_mesh_obj(mesh, mesh_path, digits=17)
-        sdf.save_volume(volume, sdf_path)
-
-
-def load_tank_box_boundaries(config, device, *, cache_dir=None, voxel_size=VOXEL_SIZE):
-    """Bake on a cache miss, then load static tank and local-frame box volumes."""
-    from Lab_Solver.pbf.boundary_model import BoundaryScene, BoundaryLoadOptions, load_boundaries
-
-    directory = asset_cache_path(config, cache_dir=cache_dir, voxel_size=voxel_size)
-    _prepare_assets(config, directory, voxel_size, device)
-    return load_boundaries(
-        BoundaryScene(directory, static_assets=("tank.nvdb",), default_rigid_count=1),
-        BoundaryLoadOptions(4. * config.particle_radius, device=device),
-    )
+    root = ASSET_DIR if asset_dir is None else Path(asset_dir)
+    command = build_command("tank-box", config)
+    loaded = []
+    for relative, name in (("tank_scene", "tank_scene"), ("Rigid/tank_box", "tank_box")):
+        asset = load_asset(root / relative, asset_geometry(name, config), command=command)
+        sdf, volume_map = load_asset_volumes(asset, 4. * config.particle_radius, device)
+        loaded.append(BoundaryAsset(asset.sdf_path, asset.mesh_path, sdf, volume_map))
+    return BoundarySystem(loaded, [BoundaryInstance(0), BoundaryInstance(1, 0)], device)

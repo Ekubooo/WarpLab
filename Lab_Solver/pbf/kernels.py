@@ -33,7 +33,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
     sorted_index = fn.sorted_index
     square = fn.square
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def reorder(pos: wp.array(dtype=wp.vec3), pre_Pos: wp.array(dtype=wp.vec3),
                 pos_temp: wp.array(dtype=wp.vec3), pPos_temp: wp.array(dtype=wp.vec3)):
         i = wp.tid()
@@ -41,7 +41,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
         pos_temp[i] = pos[original]
         pPos_temp[i] = pre_Pos[original]
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def apply_predict(
         pos: wp.array[wp.vec3],
         dt: float,
@@ -58,7 +58,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
         predicit = pos[tid] + dt * v_new
         prePos[tid] = predicit
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def cache_neighbors(
         pos: wp.array(dtype=wp.vec3),
         NCache: fn.NeighborCache,
@@ -80,7 +80,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
 
         NCache.NeighborCount[i] = wp.min(fluid_count, cap)
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def volume_query(
         pre_Pos: wp.array[wp.vec3],
         boundary: BoundaryCouplingData,
@@ -115,7 +115,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
         volume_Rho[i] = volumeRho
         volume_Grad[i] = gradVMap
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def calc_lambda(
         pre_Pos: wp.array[wp.vec3],
         Neighbor: fn.NeighborCache,
@@ -165,7 +165,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
 
         lambda_Opt[i] = lambdaCurr
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def calc_deltaPos(
         pre_Pos: wp.array[wp.vec3],
         lambda_Opt: wp.array[float],
@@ -232,7 +232,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
                 wp.atomic_add(boundary.forces, boundary.instances.body_ids[rigid], wrench)
 
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def update_prePos(
         delta_Pos: wp.array[wp.vec3],
         boundary: BoundaryCouplingData,
@@ -251,7 +251,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
                 currPos += normal * (Particle_Radius - distance)
         pre_Pos[tid] = currPos
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def update_position(
         dt: float,
         pre_Pos: wp.array[wp.vec3],
@@ -272,7 +272,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
         pos[tid] = pPos
         vel[tid] = reconstructedVel
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def calc_curl(
         pre_Pos: wp.array[wp.vec3],
         vel: wp.array[wp.vec3],
@@ -311,7 +311,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
 
         curl[i] = wp.vec4(omega_i[0], omega_i[1], omega_i[2], wp.length(omega_i))
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def calc_visvor(
         dt: float,
         pre_Pos: wp.array[wp.vec3],
@@ -375,7 +375,7 @@ def create_kernels(parameters, grid_id, sdf_id, volume_map_id, rigid_count=0):
         impulse += visStrength * vel_corr
         delta_Vel[i] = impulse
 
-    @wp.kernel(module="unique")
+    @wp.kernel(module="unique", enable_backward=False, module_options={"enable_backward": False})
     def update_velocity(
         delta_Vel: wp.array[wp.vec3],
         vel: wp.array[wp.vec3]

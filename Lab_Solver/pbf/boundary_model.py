@@ -15,6 +15,9 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
+# This forward-only path never records or consumes simulation gradients.
+wp.set_module_options({"enable_backward": False})
+
 
 # =============================================================================
 # Scene requests and shared resources
@@ -609,7 +612,7 @@ def _check_volume_map_layout(sdf, volume_map):
         raise ValueError("Volume map coordinate transform or allocated tiles differ from SDF")
 
 
-def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=None):
+def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=None, validate_sdf=None):
     """Load a matched grid pair, or compute, atomically cache and reload it.
 
     Only the selected NVDB is updated. Geometry baking and asset publication
@@ -630,6 +633,8 @@ def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=
     try:
         sdf, volume_map = _read_boundary_volumes(path, selected)
         _check_sdf_support(sdf, support_radius)
+        if validate_sdf is not None:
+            validate_sdf(sdf)
         if volume_map is not None and volume_map.get_grid_info().name == expected:
             _check_volume_map_layout(sdf, volume_map)
             print(f"Boundary cache hit: {path} (h={support_radius:g} m, q={quadrature_points})")

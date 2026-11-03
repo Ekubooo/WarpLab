@@ -7,6 +7,10 @@ from newton.solvers import SolverBase, SolverMuJoCo
 from .solver_pbf import SolverPBF
 
 
+# This forward-only path never records or consumes simulation gradients.
+wp.set_module_options({"enable_backward": False})
+
+
 @wp.kernel
 def add_boundary_forces(boundary_forces: wp.array(dtype=wp.spatial_vector),
                         body_f: wp.array(dtype=wp.spatial_vector)):

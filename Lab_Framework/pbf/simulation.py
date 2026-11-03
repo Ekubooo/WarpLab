@@ -58,8 +58,8 @@ class Simulation:
         if scene == "tank-box":
             body_ids = [add_tank_box(builder, self.config)]
         elif scene == "stairs-rigids":
-            from .stairs_scene import prepare_stairs_assets, add_stairs_rigids, load_stairs_boundaries
-            scene_assets = prepare_stairs_assets(self.config, wp.get_device())
+            from .stairs_scene import load_stairs_assets, add_stairs_rigids, load_stairs_boundaries
+            scene_assets = load_stairs_assets(self.config)
             body_ids = add_stairs_rigids(builder, scene_assets)
         self.is_coupled = bool(body_ids)
         builder.add_particles(
@@ -78,10 +78,14 @@ class Simulation:
             elif scene == "stairs-rigids":
                 boundaries = load_stairs_boundaries(scene_assets, self.config, self.model.device)
             else:
-                request = boundary_model.BoundaryScene(
-                    asset_dir=ASSET_DIR, static_assets=(SDF_FILENAME,), default_rigid_count=0)
-                boundaries = boundary_model.load_boundaries(request,
-                    boundary_model.BoundaryLoadOptions(self.smoothing_length, device=self.model.device))
+                from .asset_io import load_asset, load_asset_volumes, build_command
+                from .scene_data import asset_geometry
+                asset = load_asset(ASSET_DIR / "stairs_scene", asset_geometry("stairs_scene", self.config),
+                                   command=build_command("static", self.config))
+                sdf, volume_map = load_asset_volumes(asset, self.smoothing_length, self.model.device)
+                boundaries = boundary_model.BoundarySystem(
+                    [boundary_model.BoundaryAsset(asset.sdf_path, asset.mesh_path, sdf, volume_map)],
+                    [boundary_model.BoundaryInstance(0)], self.model.device)
         if self.is_coupled:
             boundaries.bind_bodies(self.model, body_ids)
             for state in self.states:
