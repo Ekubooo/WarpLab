@@ -111,9 +111,12 @@ conda run -n WarpSim --no-capture-output python -m tests.lab_solver.benchmark_mi
 ```
 
 The default 195,525-particle scene was bitwise equal to the archived solver at
-initialization and across five substeps for positions, velocities, predicted
+initialization and across thirty substeps for positions, velocities, predicted
 positions, corrections, lambda, boundary density/gradient, velocity corrections
-and curl. The interface test checks the original fluid launch sequence and the
+and curl. This uses independently loaded archived and framework assets, after
+explicit reference synchronization, and retains all 1,411 initially overlapping
+particles. Enable `PBF_FULL_SCENE_TESTS=1` to run the full-scene unit test.
+The interface test checks the original fluid launch sequence and the
 absence of new mapping/copy kernels. Static Graph tests compare even/odd substep
 replay with eager execution using exact array equality. Coupled tests use
 identical MuJoCo warm-start inputs and floating-point tolerances; spatially sorted
@@ -126,13 +129,13 @@ complete substep:
 
 | Stage | Archived median | New median | New/archived | Paired ratio 95% CI |
 | --- | ---: | ---: | ---: | --- |
-| Neighborhood | 271.73 | 283.26 | 1.0425 | 0.9919–1.0592 |
-| Pressure iterations | 677.44 | 682.75 | 1.0078 | 1.0058–1.0203 |
-| Complete substep | 1183.39 | 1169.50 | 0.9883 | 0.9877–0.9988 |
+| Neighborhood | 262.24 | 255.34 | 0.9737 | 0.9518–0.9789 |
+| Pressure iterations | 684.03 | 684.98 | 1.0014 | 0.9973–1.0243 |
+| Complete substep | 1168.00 | 1166.58 | 0.9988 | 0.9979–1.0047 |
 
 These measurements (2026-11-03) meet the complete-substep 5% regression target
 for this configuration; they are not a universal zero-overhead guarantee. Full
-samples are in `outputs/pbf-mujoco-coupling/performance.json` when running the
+samples are in `outputs/stairs-rigids/static-performance.json` when running the
 benchmark with `--output` set to that path.
 
 The default 24,500-particle tank/box scene took 1.691 ms per coupled frame

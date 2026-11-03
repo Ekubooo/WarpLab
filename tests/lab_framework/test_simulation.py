@@ -65,6 +65,12 @@ assert not any(name == 'demos' or name.startswith('demos.') for name in sys.modu
             self.assertEqual(config_io.load_config(config_io.save_config(config, "preset.json")), config)
         self.assertTrue(render_opengl.parse_args(["--headless", "--num-frames", "2"]).headless)
 
+    def test_stairs_rigids_keeps_original_default_config_and_overrides(self):
+        args = render_opengl.parse_args(["--scene", "stairs-rigids"])
+        self.assertEqual(args.config or PBFConfig(), PBFConfig())
+        args = render_opengl.parse_args(["--scene", "stairs-rigids", "--substeps", "2"])
+        self.assertEqual(args.config, replace(PBFConfig(), substeps=2))
+
 
 class SimulationTests(unittest.TestCase):
     @classmethod

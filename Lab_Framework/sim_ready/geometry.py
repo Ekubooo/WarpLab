@@ -107,8 +107,11 @@ def _check_options(options):
         raise ValueError("Terrain must accommodate both the platform and the cavity")
 
 
-def terrain_mesh(options):
-    """Union the generator's boxes after aligning its float32 grid boundaries."""
+def terrain_boxes(options):
+    """Return generator boxes with shared float32 boundaries aligned once.
+
+    Both the solid terrain and native rigid collisions use these coordinates.
+    """
     _check_options(options)
     terrain = Mesh.create_terrain(
         grid_size=(1, 1), block_size=options.size, terrain_types="pyramid_stairs",
@@ -138,7 +141,12 @@ def terrain_mesh(options):
     for block in faces.reshape(-1, 12, 3):
         ids, local = np.unique(block, return_inverse=True)
         boxes.append(trimesh.Trimesh(points[ids], local.reshape(-1, 3), process=False))
-    return union(boxes)
+    return boxes
+
+
+def terrain_mesh(options):
+    """Union the same aligned boxes used by the rigid collision scene."""
+    return union(terrain_boxes(options))
 
 
 def platform_bounds(terrain):

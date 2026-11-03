@@ -8,5 +8,8 @@ numpy==2.4.6
 pyglet==2.1.16
 trimesh==5.1.1
 manifold3d==3.5.4
+coacd==1.0.14
 scipy==1.17.1
 usd-core==26.8
+# Screenshot verification for the real OpenGL frontend.
+pillow==11.3.0

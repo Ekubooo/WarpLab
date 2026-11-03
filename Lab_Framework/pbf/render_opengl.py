@@ -62,6 +62,25 @@ def load_rigid_scene(simulation):
     return instances
 
 
+def register_rigid_meshes(renderer, simulation):
+    """Upload each rigid asset once, then attach independent body instances."""
+    bodies = [renderer.register_body(f"body_{body}") for body in range(simulation.model.body_count)]
+    shapes = {}
+    color = (.85, .45, .15)
+    for name, body, local, mesh in load_rigid_scene(simulation):
+        # load_rigid_scene shares the same host mesh tuple for each asset.
+        # Repeating Warp's render_mesh on a flat-shaded shape updates its
+        # expanded GPU vertices with the unexpanded source vertex array.
+        key = id(mesh)
+        if key not in shapes:
+            shapes[key] = renderer.render_mesh(name, *mesh, colors=color,
+                pos=tuple(local[:3]), rot=tuple(local[3:]), parent_body=f"body_{body}",
+                smooth_shading=False)
+        else:
+            renderer.add_shape_instance(name, shapes[key], bodies[body],
+                tuple(local[:3]), tuple(local[3:]), color1=color, color2=color)
+
+
 class PBFRenderer(BillboardRenderer):
     """Let the PBF main loop handle pause and deferred reset requests."""
 
@@ -281,8 +300,8 @@ def config_from_args(args):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
-    parser.add_argument("--scene", choices=("static", "tank-box"), default="static",
-                        help="Static stairs or the pressure-coupled tank and box prototype.")
+    parser.add_argument("--scene", choices=("static", "tank-box", "stairs-rigids"), default="static",
+                        help="Original stairs, coupled tank/box, or stairs with four free rigid bodies.")
     parser.add_argument("--headless", action="store_true", help="Advance without an OpenGL window.")
     parser.add_argument("--stage-path", default=None, help="Optional USD output path for headless execution.")
     parser.add_argument("--cuda-graph", action="store_true", help="Capture and replay complete simulation frames.")
@@ -444,12 +463,7 @@ def main():
                 scale=(1.0, 1.0, 1.0),
                 smooth_shading=False,
             )
-            for body in range(simulation.model.body_count):
-                renderer.register_body(f"body_{body}")
-            for name, body, local, (points, indices) in load_rigid_scene(simulation):
-                renderer.render_mesh(name, points, indices, colors=(.85, .45, .15),
-                    pos=tuple(local[:3]), rot=tuple(local[3:]), parent_body=f"body_{body}",
-                    smooth_shading=False)
+            register_rigid_meshes(renderer, simulation)
             register_keyboard_controls(
                 renderer, simulation, on_reset=request_reset,
             )

@@ -10,7 +10,6 @@ from dataclasses import asdict
 import io
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -18,10 +17,7 @@ import warp as wp
 from demos.fluid.PBF import PBF as legacy
 from demos.fluid.PBF import pbf_helper as old_fn
 from demos.fluid.PBF.simulation import reset_simulation
-from tests.fluid.pbf.solver_fixture import bind_solver
-from Lab_Framework.pbf.config import PBFConfig
-from Lab_Framework.pbf.simulation import Simulation, ASSET_DIR, SDF_FILENAME
-from Lab_Solver.pbf import boundary_model as boundary
+from .test_legacy_parity import independent_default_pair, verify_default_pair
 
 
 def neighborhood(solver, kernels):
@@ -122,30 +118,16 @@ def main():
     parser.add_argument("--trials", type=int, default=60)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
-    with wp.ScopedDevice(args.device), contextlib.redirect_stdout(io.StringIO()):
-        config = old_fn.PBFConfig()
-        resources = boundary.load_boundaries(
-            boundary.BoundaryScene(ASSET_DIR, static_assets=(SDF_FILENAME,), default_rigid_count=0),
-            boundary.BoundaryLoadOptions(4*config.particle_radius, device=args.device))
-        with patch.object(legacy.boundary_model, "load_default_boundaries", return_value=resources):
-            old = legacy.PBF(stage_path=None, config=config)
-        new = Simulation(config=PBFConfig(**asdict(config)), boundaries=resources)
-        np.testing.assert_array_equal(old.pos.numpy(), new.pos.numpy())
-        old.substep = 1
-        bind_solver(config, old.grid, old.static_sdf, old.volume_map)
-        for _ in range(5):
-            old.step()
-            new._substep(old.dt)
-            for name in ("pos", "v", "pre_Pos", "delta_Pos", "lambda_Opt", "volume_Rho",
-                         "volume_Grad", "delta_Vel", "curl"):
-                np.testing.assert_array_equal(getattr(old, name).numpy(),
-                                              getattr(new.solver, name).numpy(), err_msg=name)
+    with contextlib.redirect_stdout(io.StringIO()), independent_default_pair(args.device) as (old, new):
+        config = old.config
+        verification = verify_default_pair(old, new)
         old_kernels = type("LegacyKernels", (), dict(
             reorder=old_fn.by_cache_reordering, cache_neighbors=legacy.cache_neighbors,
             volume_query=legacy.volume_query, calc_lambda=legacy.calc_lambda,
             calc_deltaPos=legacy.calc_deltaPos, update_prePos=legacy.update_prePos))
         result = dict(particles=old.n, device=wp.get_device().name, dtype="float32",
-                      numerical_parity="bitwise equal: initialization and nine arrays over five substeps",
+                      numerical_parity="bitwise equal: independent assets and nine arrays over 30 substeps",
+                      verification=verification,
                       timing="CUDA events around frozen-stage graphs; restores excluded; alternating order",
                       config=asdict(config), trials=args.trials, stages={})
         for label in ("neighborhood", "pressure", "substep"):

@@ -24,11 +24,12 @@ class Simulation:
         import newton
         from Lab_Solver.pbf import SolverPBF, boundary_model
 
-        if scene not in ("static", "tank-box"):
+        if scene not in ("static", "tank-box", "stairs-rigids"):
             raise ValueError(f"Unknown scene: {scene}")
         self.scene = scene
         if scene == "tank-box":
             from .scenes import tank_box_config, add_tank_box, load_tank_box_boundaries
+        if scene != "static":
             from newton.solvers import SolverMuJoCo
         self.config = config if config is not None else (
             tank_box_config() if scene == "tank-box" else PBFConfig())
@@ -51,9 +52,16 @@ class Simulation:
                      + float(np.float32(spacing)) * (lattice + 1)).astype(np.float32)
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         builder.gravity = tuple(self.config.gravity)
-        if scene == "tank-box":
+        body_ids = []
+        if scene != "static":
             SolverMuJoCo.register_custom_attributes(builder)
-            box_body = add_tank_box(builder, self.config)
+        if scene == "tank-box":
+            body_ids = [add_tank_box(builder, self.config)]
+        elif scene == "stairs-rigids":
+            from .stairs_scene import prepare_stairs_assets, add_stairs_rigids, load_stairs_boundaries
+            scene_assets = prepare_stairs_assets(self.config, wp.get_device())
+            body_ids = add_stairs_rigids(builder, scene_assets)
+        self.is_coupled = bool(body_ids)
         builder.add_particles(
             pos=positions.tolist(),
             vel=[self.config.initial_velocity] * len(positions),
@@ -67,13 +75,15 @@ class Simulation:
         if boundaries is None:
             if scene == "tank-box":
                 boundaries = load_tank_box_boundaries(self.config, self.model.device)
+            elif scene == "stairs-rigids":
+                boundaries = load_stairs_boundaries(scene_assets, self.config, self.model.device)
             else:
                 request = boundary_model.BoundaryScene(
                     asset_dir=ASSET_DIR, static_assets=(SDF_FILENAME,), default_rigid_count=0)
                 boundaries = boundary_model.load_boundaries(request,
                     boundary_model.BoundaryLoadOptions(self.smoothing_length, device=self.model.device))
-        if scene == "tank-box":
-            boundaries.bind_bodies(self.model, [box_body])
+        if self.is_coupled:
+            boundaries.bind_bodies(self.model, body_ids)
             for state in self.states:
                 newton.eval_fk(self.model, state.joint_q, state.joint_qd, state)
             boundaries.sync_body_poses(self.state)
@@ -91,16 +101,18 @@ class Simulation:
         )
         solver_type = SolverPBF
         solver_options = {}
-        if scene == "tank-box":
+        if self.is_coupled:
             from Lab_Solver.pbf.solver_coupled import SolverPBFMuJoCo
             solver_type = SolverPBFMuJoCo
             solver_options["feedback"] = feedback
+            if scene == "stairs-rigids":
+                solver_options.update(nconmax=512, njmax=2048)
         self.solver = solver_type(
             self.model, config=solver_config, boundaries=boundaries,
             grid_bounds=((0., 0., 0.), self.config.container_size),
             **solver_options,
         )
-        self.fluid_solver = self.solver.fluid if scene == "tank-box" else self.solver
+        self.fluid_solver = self.solver.fluid if self.is_coupled else self.solver
         self._gravity = wp.vec3(*self.config.gravity)
         self.n = self.model.particle_count
         self.step_graphs = None
@@ -164,7 +176,7 @@ class Simulation:
             self._state_index = 0
             self.fluid_solver.set_buffer_bindings(self._initial_bindings)
             self.fluid_solver.pos, self.fluid_solver.v = self.pos, self.v
-            if self.scene == "tank-box":
+            if self.is_coupled:
                 self.BoundarySys.sync_body_poses(self.state)
             else:
                 self.BoundarySys.reset()
@@ -178,7 +190,7 @@ class Simulation:
             raise RuntimeError("PBF graph capture requires a CUDA device")
         original = self.fluid_solver.get_buffer_bindings()
         state_index = self._state_index
-        rigid_step = self.solver.rigid._step if self.scene == "tank-box" else None
+        rigid_step = self.solver.rigid._step if self.is_coupled else None
         graphs = {}
         with wp.ScopedDevice(self.model.device):
             self.solver.prepare_graph()
@@ -229,7 +241,7 @@ class Simulation:
             self._state_index = end_index
             self.fluid_solver.set_buffer_bindings(end)
             self.fluid_solver.pos, self.fluid_solver.v = self.pos, self.v
-            if self.scene == "tank-box":
+            if self.is_coupled:
                 self.solver.rigid._step += self.substep
         self.sim_time += self.frame_dt
 

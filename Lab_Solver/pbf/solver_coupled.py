@@ -30,14 +30,15 @@ class SolverPBFMuJoCo(SolverBase):
     """
 
     def __init__(self, model, *, boundaries, config=None, grid_bounds=None,
-                 feedback=True):
+                 feedback=True, nconmax=None, njmax=None):
         super().__init__(model)
         self.boundaries = boundaries
         self.feedback = feedback
         self.fluid = SolverPBF(model, boundaries=boundaries, config=config,
                                grid_bounds=grid_bounds)
         self.rigid = SolverMuJoCo(model, use_mujoco_cpu=False,
-            use_mujoco_contacts=True, update_data_interval=1, enable_sleeping=False)
+            use_mujoco_contacts=True, update_data_interval=1, enable_sleeping=False,
+            nconmax=nconmax, njmax=njmax)
 
     @property
     def _graph_revision(self):

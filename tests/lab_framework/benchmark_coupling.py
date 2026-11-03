@@ -1,4 +1,4 @@
-"""CUDA-event timings for the complete default tank/box frame, excluding rendering."""
+"""CUDA-event timings for complete coupled frames, excluding rendering."""
 
 import argparse
 from dataclasses import asdict
@@ -16,13 +16,14 @@ def main():
     parser.add_argument("--frames", type=int, default=240)
     parser.add_argument("--warmup", type=int, default=60)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--scene", choices=("tank-box", "stairs-rigids"), default="tank-box")
     parser.add_argument("--output", type=Path,
                         default=Path("outputs/pbf-mujoco-coupling/coupled-performance.json"))
     args = parser.parse_args()
     if args.frames < 1 or args.warmup < 0:
         parser.error("frames must be positive and warmup nonnegative")
     with wp.ScopedDevice(args.device):
-        sim = Simulation(scene="tank-box")
+        sim = Simulation(scene=args.scene)
         sim.capture_graph()
         for _ in range(args.warmup):
             sim.launch_graph()
@@ -37,7 +38,7 @@ def main():
         bodies, body_velocities = sim.state.body_q.numpy(), sim.state.body_qd.numpy()
         if not all(np.isfinite(values).all() for values in (positions, velocities, bodies, body_velocities)):
             raise RuntimeError("Non-finite simulation state")
-        result = dict(device=sim.model.device.name, config=asdict(sim.config), particles=sim.n,
+        result = dict(scene=args.scene, device=sim.model.device.name, config=asdict(sim.config), particles=sim.n,
             bodies=sim.model.body_count, frames=args.frames, warmup=args.warmup,
             timing="CUDA events around complete coupled frame graphs; rendering and capture excluded",
             median_frame_ms=float(np.median(times)),
