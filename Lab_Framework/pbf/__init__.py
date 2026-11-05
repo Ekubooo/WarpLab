@@ -1,1 +1,0 @@
-"""Independent lab framework components."""
