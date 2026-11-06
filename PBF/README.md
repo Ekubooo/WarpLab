@@ -3,19 +3,19 @@
 在仓库根目录运行，默认已经激活安装了 Newton 的 Conda 环境：
 
 ```powershell
-python -m PBF.render_opengl --particle-radius 0.0125 --substeps 3 --pressure-iterations 3
+python -m PBF.app --particle-radius 0.0125 --substeps 3 --pressure-iterations 3
 ```
 
 使用 CUDA Graph 时，在同一命令后加 `--cuda-graph`：
 
 ```powershell
-python -m PBF.render_opengl --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
+python -m PBF.app --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
 ```
 
 原阶梯兔子场景加入两个盒子与一个球：
 
 ```powershell
-python -m PBF.render_opengl --scene stairs-rigids --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
+python -m PBF.app --scene stairs-rigids --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
 python -m PBF.PBF --scene stairs-rigids --num-frames 30 --stage-path outputs/pbf-newton/stairs-rigids.usd
 ```
 
@@ -31,10 +31,10 @@ The archived `demos/PBF_Rigid` is not a runtime or test dependency.
 From the repository root, in the existing WarpSim environment:
 
 ```powershell
-python -m PBF.render_opengl
-python -m PBF.render_opengl --cuda-graph
+python -m PBF.app
+python -m PBF.app --cuda-graph
 python -m PBF.PBF --num-frames 30 --stage-path outputs/pbf-newton/static.usd
-python -m PBF.render_opengl --config PBF/config/default_para.json
+python -m PBF.app --config PBF/config/default_para.json
 ```
 
 No-argument defaults remain **195,525 particles**, a `55×79×45` lattice,
@@ -49,7 +49,7 @@ retained: Space pauses, G reverses gravity, Q/E select horizontal gravity (repea
 to restore vertical gravity), X changes speed, R resets and pauses, P toggles
 the grid. Newton Viewer/UI is not used.
 
-Direct `python PBF/render_opengl.py` and `python PBF/PBF.py` entrypoints also work.
+Direct `python PBF/app.py` and `python PBF/PBF.py` entrypoints also work.
 Configuration export remains local to `PBF/config` via `--export-config NAME`.
 
 ## CLI 参数速查
@@ -57,7 +57,7 @@ Configuration export remains local to `PBF/config` via `--export-config NAME`.
 两个入口的参数并不完全相同。完整帮助：
 
 ```powershell
-python -m PBF.render_opengl --help
+python -m PBF.app --help
 python -m PBF.PBF --help
 ```
 
@@ -76,7 +76,7 @@ python -m PBF.PBF --help
 
 ### OpenGL 入口的流体参数
 
-以下参数用于 `python -m PBF.render_opengl`。默认值指**无参数启动**，不是已保存 JSON 中的值。
+以下参数用于 `python -m PBF.app`。默认值指**无参数启动**，不是已保存 JSON 中的值。
 
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
@@ -109,14 +109,32 @@ USD 入口 `python -m PBF.PBF` 不支持上面的粒子半径、子步数等 Ope
   advances exactly one substep; no frame clock, renderer or asset discovery.
 - `pbf_helper.py`: original parameter calculations and math, with separate scene,
   model, particle initialization and solver work-buffer helpers.
-- `simulation.py`: scene assembly, Model/two States, frame loop, Graph, reset and
-  USD rendering. `render_opengl.py` retains the existing independent frontend.
+- `app.py`: standalone CLI, initial camera, playback loop and demo commands.
+  The OpenGL and USD entrypoints retain their separate argument sets.
+- `simulation.py`: the Newton application runtime owns scene assembly,
+  Model/two States, Control, solvers, substeps, Graph, reset and a renderer.
+  `set_renderer()` initializes/replaces it; `render()` delegates display/export;
+  `close()` releases it. Rendering never advances physical state.
+- `renderers/opengl.py`: existing billboard implementation, mesh registration,
+  velocity coloring, window events and native key translation.
+  `renderers/usd.py`: existing USD frame output and save-on-close behavior.
+  Both implement `initialize(simulation)`, `render(simulation)` and `close()`;
+  there is no renderer registry or common abstract base class.
+- `app.py` is the OpenGL module/direct-script entrypoint; the old
+  `render_opengl.py` forwarding file has been removed. The tail of `PBF.py`
+  retains the USD entrypoint, forwarding to `app.main_usd()`. CLI parameters
+  and defaults are unchanged.
 - `boundary_model.py`: SDF/VM loading and caching, shared asset instances,
   body mapping, local transforms and GPU boundary/COM synchronization.
 - `scene.py`: explicit published stairs collision and three rigid instances.
   `coupling.py`: one PBF → pressure reaction → MuJoCo substep.
 
 ```text
+app.main (OpenGL) / app.main_usd (USD)
+  create Simulation → attach renderer → register demo commands (OpenGL)
+  loop: pending reset → Simulation.render → step / launch_graph if playing
+  finally: Simulation.close
+
 Simulation initialization
   load static boundary → allocate Model → initialize solver/grid constants
   → original GPU particle initialization → create two States
@@ -130,6 +148,22 @@ Simulation.step
     swap States
   advance frame time once
 ```
+
+The application defines what G/Q/E/X/R/P do and registers callbacks through
+`Simulation.register_keyboard_callback()`. OpenGL handles key codes, repeat
+suppression, release and focus loss. Pause/grid/window state remains in the
+renderer; reset requests remain deferred to the application loop. The first
+frame is drawn before physics, including a paused reset. Each draw reads the
+current State rather than retaining one side of the double buffer.
+
+Help/config export imports no display component. A `Simulation` without
+`stage_path` starts with no renderer; `stage_path` still attaches USD output.
+Replacing a renderer closes the old one, and repeated close is safe. USD has
+no keyboard interface. Future Newton GL/RTX components can use the same runtime;
+MimicKit and additional viewers are not introduced by this refactor.
+
+Application/rendering regression artifacts and before/after timings:
+`outputs/pbf-newton/app-render-refactor/REPORT.md`.
 
 Warp compiles the helper module as a unit, including reorder. Its grid constant
 therefore must exist before launching the particle initialization kernel. Initial

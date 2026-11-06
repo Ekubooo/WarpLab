@@ -50,9 +50,10 @@ class Simulation:
         if self.is_coupled:
             self.BoundarySys.sync_body_poses(self.state)
 
-        from warp.render import UsdRenderer
-        self.renderer = UsdRenderer(stage_path) if stage_path else None
-        self._usd_meshes = None
+        self.renderer = None
+        if stage_path:
+            from .renderers.usd import PBFUsdRenderer
+            self.set_renderer(PBFUsdRenderer(stage_path))
 
     @property
     def state(self):
@@ -181,25 +182,30 @@ class Simulation:
             self.solver.rigid._step += self.substep
         self.sim_time += self.frame_dt
 
-    def render(self):
-        if self.renderer is None:
+    def set_renderer(self, renderer):
+        """Attach a display/export component without changing physical state."""
+        if renderer is self.renderer:
             return
-        with wp.ScopedTimer("render"):
-            self.renderer.begin_frame(self.sim_time)
-            self.renderer.render_points(
-                points=self.pos.numpy(), radius=self.particle_radius, name="points", colors=(0.8, 0.3, 0.2)
-            )
-            if self.is_coupled:
-                if self._usd_meshes is None:
-                    from .scene import load_render_meshes
-                    self._usd_meshes = load_render_meshes(self.BoundarySys)
-                poses = self.BoundarySys.device_data.transforms.numpy()
-                for index, (points, faces) in enumerate(self._usd_meshes):
-                    pose = poses[index]
-                    self.renderer.render_mesh(f"boundary_{index}", points, faces,
-                        pos=tuple(pose[:3]), rot=tuple(pose[3:]),
-                        colors=(.55, .55, .55) if index == 0 else (.85, .45, .15))
-            self.renderer.end_frame()
+        self.close()
+        self.renderer = renderer
+        if renderer is not None:
+            try:
+                renderer.initialize(self)
+            except Exception:
+                self.close()
+                raise
+
+    def register_keyboard_callback(self, key, callback, *, repeat=True):
+        self.renderer.register_keyboard_callback(key, callback, repeat=repeat)
+
+    def render(self):
+        if self.renderer is not None:
+            self.renderer.render(self)
+
+    def close(self):
+        renderer, self.renderer = self.renderer, None
+        if renderer is not None:
+            renderer.close()
 
 
 def create_pbf_simulation(verbose=False, config=None, scene="static"):

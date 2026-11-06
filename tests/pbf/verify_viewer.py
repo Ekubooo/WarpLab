@@ -11,7 +11,9 @@ from PIL import Image
 import warp as wp
 from pyglet.window import key
 
-from PBF import render_opengl as app
+from PBF import app
+from PBF.renderers import opengl
+from PBF.renderers.usd import PBFUsdRenderer
 
 
 def main():
@@ -19,6 +21,7 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Use a hidden real OpenGL context")
     parser.add_argument("--scene", choices=("static", "stairs-rigids"), default="static")
     parser.add_argument("--cpu", action="store_true", help="Test the code-selected CPU backend")
+    parser.add_argument("--eager", action="store_true", help="Run without Graph")
     parser.add_argument("--output", type=Path, default=Path("outputs/pbf-newton/viewer"))
     args = parser.parse_args()
     from PBF import coupling
@@ -34,7 +37,7 @@ def main():
             simulation.state.body_q.numpy() if simulation.is_coupled else None)
         return simulation
 
-    class VerifyRenderer(app.PBFRenderer):
+    class VerifyRenderer(opengl.PBFRenderer):
         def __init__(self, *a, **kw):
             super().__init__(*a, headless=args.headless, **kw)
             self.frame = 0
@@ -62,6 +65,17 @@ def main():
                 expected = {60: (0., 9.81, 0.), 75: (-9.81, 0., 0.), 90: (9.81, 0., 0.)}[frame]
                 np.testing.assert_allclose(tuple(simulation.gravity), expected, atol=1e-6)
                 np.testing.assert_allclose(simulation.model.gravity.numpy()[-1], expected, atol=1e-6)
+                # Holding a key must not repeatedly toggle a simulation command.
+                self._key_press_callback(keys[frame], 0)
+                np.testing.assert_allclose(tuple(simulation.gravity), expected, atol=1e-6)
+                self._release_key(keys[frame], 0)
+            if frame == 76:
+                self._key_press_callback(key.Q, 0)
+                np.testing.assert_allclose(tuple(simulation.gravity), (0., -9.81, 0.), atol=1e-6)
+                self._release_keys()  # Focus loss permits the next press again.
+                self._key_press_callback(key.Q, 0)
+                np.testing.assert_allclose(tuple(simulation.gravity), (-9.81, 0., 0.), atol=1e-6)
+                self._release_key(key.Q, 0)
             if frame == 105:
                 assert simulation.frame_dt == simulation.config.frame_dt / 2
             if frame == 121:
@@ -73,20 +87,36 @@ def main():
                     np.testing.assert_array_equal(simulation.solver.boundary_forces.numpy(), 0.)
             if frame == 122:
                 self.paused = False
+            if frame == 125:
+                grid = self.draw_grid
+                self._key_press_callback(key.P, 0)
+                assert self.draw_grid != grid
+                self._key_press_callback(key.P, 0)
+                assert self.draw_grid == grid
+                self._key_press_callback(key.SPACE, 0)
+                assert self.paused
+                self._key_press_callback(key.SPACE, 0)
+                assert not self.paused
+            if frame == 150:
+                self._key_press_callback(key.ESCAPE, 0)
+                assert not self.is_running()
 
-    argv = [sys.argv[0], "--num-frames", "150", "--cuda-graph", "--scene", args.scene]
-    with patch.object(app, "PBFRenderer", VerifyRenderer), \
+    argv = [sys.argv[0], "--num-frames", "150", "--scene", args.scene]
+    if not args.eager:
+        argv.append("--cuda-graph")
+    with patch.object(opengl, "PBFRenderer", VerifyRenderer), \
             patch.object(app, "create_pbf_simulation", create_simulation), patch.object(sys, "argv", argv):
         app.main()
-    from warp.render import UsdRenderer
     simulation.reset()
-    simulation.renderer = UsdRenderer(str(args.output / "static.usd"))
+    assert simulation.renderer is None
+    simulation.set_renderer(PBFUsdRenderer(str(args.output / "static.usd")))
     times = []
     for _ in range(10):
         times.append(round(simulation.sim_time * simulation.renderer.fps))
         simulation.render()
         simulation.step()
-    simulation.renderer.save()
+    simulation.close()
+    simulation.close()
     from pxr import Usd
     stage = Usd.Stage.Open(str(args.output / "static.usd"))
     particles = [p for p in stage.Traverse() if p.GetTypeName() == "PointInstancer"]
@@ -101,6 +131,7 @@ def main():
     result = dict(particles=simulation.n, frames=150, first_frame_unadvanced=True,
                   scene=args.scene, bodies=simulation.model.body_count,
                   paused_reset=True, controls="G/Q/E/X/R/P", gl_errors=0,
+                  cpu=args.cpu, graph=not args.eager, repeat_and_focus=True, escape=True,
                   usd_render_calls=10, usd_time_samples=samples)
     (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print("PASS: billboard, first frame, controls, paused reset and USD", flush=True)
