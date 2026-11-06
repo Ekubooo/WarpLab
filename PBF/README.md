@@ -307,3 +307,36 @@ Detailed reports are under `outputs/pbf-newton/`: `parity.json`, `performance.js
 `static-tests.log`, `entry-tests.log`, `integrity.json`, `forward-only.json` and
 viewer outputs. The module USD CLI also completed 30 frames; the copied JSON
 preset completed a separate direct-script smoke run.
+
+### Dynamic boundary query optimization
+
+The three dynamic-body loops use the runtime body count, retaining the compiled
+zero-body static path. Dynamic pressure and projection queries first test finite
+mesh bounds in asset coordinates; surviving points continue through the original
+SDF/volume-map equations. Projection tests the position after each preceding
+body correction. No pressure-query cache or force-reduction changes are included;
+the two-level delta-position prefetch remains unchanged.
+
+`BOUNDARY_CULLING` near the top of `boundary_model.py` selects `"box"` (default)
+or `"sphere"` for **all** dynamic assets. This is a compile-time code choice:
+edit it and restart. There is no CLI/config/Simulation option, disabled mode or
+asset-type dispatch. Both bounds come from each complete asset mesh, read once
+and shared with rendering. Bounds expand by the query reach plus one SDF voxel
+diagonal. No particle-by-body buffers or per-step host updates are added.
+
+Reproduce the paired comparisons without changing production choices:
+
+```powershell
+python -m tests.pbf.benchmark_boundary --warmup 30 --trials 60
+python -m tests.pbf.benchmark_boundary --warmup 180 --trials 60
+python -m unittest tests.pbf.test_boundary_culling tests.pbf.test_static tests.pbf.test_coupled_lifecycle tests.pbf.test_pressure
+python -m tests.pbf.benchmark --trials 60 --output outputs/pbf-newton/optimization-round1/static-performance.json
+```
+
+The test-only reference retains the pre-optimization query kernels. Frozen-state
+timings restore both States, fluid scratch and full MuJoCo history outside CUDA
+events; all variants start from the reference trajectory. Continuous timings use
+three 60-frame runs per variant. Run these measurements without concurrent GPU
+tests or rendering. Results and generated test variants are saved under
+`outputs/pbf-newton/optimization-round1/`; see its `REPORT.md` for numerical
+checks, timing variability and the default-selection evidence.

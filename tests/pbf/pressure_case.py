@@ -7,6 +7,7 @@ checking the pressure impulse itself.
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import newton
 import numpy as np
@@ -44,9 +45,12 @@ def main():
             boundary.BoundaryAsset(Path("empty.nvdb"), Path("empty.obj"), empty_sdf, empty_volume),
             boundary.BoundaryAsset(Path("plane.nvdb"), Path("plane.obj"), sdf, volume),
         )
-        boundaries = boundary.BoundarySystem(assets, (
-            boundary.BoundaryInstance(0), boundary.BoundaryInstance(1, 0),
-            boundary.BoundaryInstance(1, 1)), "cuda:0")
+        # This analytic fixture represents a finite patch of a plane, not an OBJ.
+        mesh = (np.array([[-.2, -.2, -.2], [.6, .6, .6]]), np.empty((0, 3), dtype=int))
+        with patch.object(boundary.BoundarySystem, "mesh_data", return_value=mesh):
+            boundaries = boundary.BoundarySystem(assets, (
+                boundary.BoundaryInstance(0), boundary.BoundaryInstance(1, 0),
+                boundary.BoundaryInstance(1, 1)), "cuda:0")
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         SolverMuJoCo.register_custom_attributes(builder)
         builder.gravity = (0., 0., 0.)

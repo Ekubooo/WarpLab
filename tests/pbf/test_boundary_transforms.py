@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -15,8 +16,10 @@ class BoundaryTransformTests(unittest.TestCase):
             tiles = wp.array([[0, 0, 0]], dtype=wp.vec3i)
             volume = wp.Volume.allocate_by_tiles(tiles, voxel_size=.01, bg_value=1.)
             asset = SimpleNamespace(sdf=volume, volume_map=volume)
-            boundaries = BoundarySystem([asset], [BoundaryInstance(0), BoundaryInstance(0, 0),
-                                                  BoundaryInstance(0, 1)], wp.get_device())
+            mesh = (np.array([[-1., -1., -1.], [1., 1., 1.]]), np.empty((0, 3), dtype=int))
+            with patch.object(BoundarySystem, "mesh_data", return_value=mesh):
+                boundaries = BoundarySystem([asset], [BoundaryInstance(0), BoundaryInstance(0, 0),
+                                                      BoundaryInstance(0, 1)], wp.get_device())
             model = SimpleNamespace(device=wp.get_device(), body_count=2,
                 body_com=wp.array([[.1, .2, .3], [-.1, .2, 0.]], dtype=wp.vec3))
             q = np.sqrt(.5)

@@ -28,6 +28,8 @@ SDF_FILENAME = "stairs_scene.nvdb"
 DEFAULT_RIGID_COUNT = 1
 RIGID_COUNTS = {}
 VOLUME_MAP_ALGORITHM_VERSION = 1
+# Compile-time choice for all dynamic assets: "sphere" or "box".
+BOUNDARY_CULLING = "box"
 
 
 # =============================================================================
@@ -90,6 +92,10 @@ class BoundaryDeviceData:
     sdf_ids: wp.array(dtype=wp.uint64)
     volume_map_ids: wp.array(dtype=wp.uint64)
     inverse_voxel_sizes: wp.array(dtype=wp.vec3)
+    bounds_center: wp.array(dtype=wp.vec3)
+    bounds_half: wp.array(dtype=wp.vec3)
+    bounds_radius: wp.array(dtype=float)
+    bounds_padding: wp.array(dtype=float)
     asset_ids: wp.array(dtype=int)
     rigid_ids: wp.array(dtype=int)
     transforms: wp.array(dtype=wp.transform)
@@ -124,15 +130,19 @@ def sample_boundary_sdf(boundary: SDFDeviceData, position: wp.vec3):
 
 
 @wp.func
-def sample_instance_sdf(data: BoundaryDeviceData, instance_id: int, position: wp.vec3):
-    """Sample in asset coordinates; return distance and world-space gradient."""
-    transform = data.transforms[instance_id]
-    local = wp.transform_point(wp.transform_inverse(transform), position)
-    asset_id = data.asset_ids[instance_id]
+def sample_local_sdf(data: BoundaryDeviceData, asset_id: int, local: wp.vec3):
     boundary = SDFDeviceData()
     boundary.volume_id = data.sdf_ids[asset_id]
     boundary.inverse_voxel_size = data.inverse_voxel_sizes[asset_id]
-    distance, gradient = sample_boundary_sdf(boundary, local)
+    return sample_boundary_sdf(boundary, local)
+
+
+@wp.func
+def sample_instance_sdf(data: BoundaryDeviceData, instance_id: int, position: wp.vec3):
+    """Unfiltered sampling, independent of the finite mesh bounds."""
+    transform = data.transforms[instance_id]
+    local = wp.transform_point(wp.transform_inverse(transform), position)
+    distance, gradient = sample_local_sdf(data, data.asset_ids[instance_id], local)
     return distance, wp.transform_vector(transform, gradient)
 
 
@@ -146,8 +156,27 @@ def sample_instance_volume(data: BoundaryDeviceData, instance_id: int, position:
 
 
 @wp.func
-def query_instance_normal(data: BoundaryDeviceData, instance_id: int, position: wp.vec3):
-    distance, gradient = sample_instance_sdf(data, instance_id, position)
+def inside_boundary_bounds(data: BoundaryDeviceData, asset_id: int, local: wp.vec3, margin: float):
+    offset = local - data.bounds_center[asset_id]
+    padding = margin + data.bounds_padding[asset_id]
+    if wp.static(BOUNDARY_CULLING == "sphere"):
+        radius = data.bounds_radius[asset_id] + padding
+        return wp.dot(offset, offset) <= radius * radius
+    else:
+        half = data.bounds_half[asset_id] + wp.vec3(padding)
+        return (wp.abs(offset[0]) <= half[0] and wp.abs(offset[1]) <= half[1]
+                and wp.abs(offset[2]) <= half[2])
+
+
+@wp.func
+def query_instance_normal(data: BoundaryDeviceData, instance_id: int, position: wp.vec3, margin: float):
+    transform = data.transforms[instance_id]
+    local = wp.transform_point(wp.transform_inverse(transform), position)
+    asset_id = data.asset_ids[instance_id]
+    if not inside_boundary_bounds(data, asset_id, local, margin):
+        return False, 0.0, wp.vec3(0.0)
+    distance, local_gradient = sample_local_sdf(data, asset_id, local)
+    gradient = wp.transform_vector(transform, local_gradient)
     length_squared = wp.dot(gradient, gradient)
     if not wp.isfinite(distance) or not wp.isfinite(length_squared) or length_squared <= 1.0e-12:
         return False, 0.0, wp.vec3(0.0)
@@ -157,7 +186,7 @@ def query_instance_normal(data: BoundaryDeviceData, instance_id: int, position: 
 @wp.func
 def query_instance_boundary(data: BoundaryDeviceData, instance_id: int,
                             position: wp.vec3, support_radius: float):
-    valid, distance, normal = query_instance_normal(data, instance_id, position)
+    valid, distance, normal = query_instance_normal(data, instance_id, position, support_radius)
     if not valid or distance <= 0.0 or distance >= support_radius:
         return False, 0.0, wp.vec3(0.0)
     pressure_distance = wp.max(distance + 0.125 * support_radius, 0.5 * support_radius)
@@ -190,7 +219,8 @@ def _sync_body_poses(data: BoundaryDeviceData, body_q: wp.array(dtype=wp.transfo
 class BoundarySystem:
     """Shared Volumes plus a fixed-size instance table on one CUDA device.
 
-    Mesh paths are recorded, not read. Transforms map asset-local coordinates
+    Dynamic meshes are read once for bounds and reused by rendering.
+    Transforms map asset-local coordinates
     to world coordinates and initially equal identity. GPU pose inputs must
     contain finite translations and normalized XYZW quaternions.
     """
@@ -202,11 +232,26 @@ class BoundarySystem:
         rigid_indices = [i for i, instance in enumerate(self.instances) if instance.is_dynamic]
         self.rigid_count = len(rigid_indices)
         self.static_count = len(self.instances) - self.rigid_count
+        self._meshes = {}
         data = BoundaryDeviceData()
         data.sdf_ids = wp.array([a.sdf.id for a in self.assets], dtype=wp.uint64, device=self.device)
         data.volume_map_ids = wp.array([a.volume_map.id for a in self.assets], dtype=wp.uint64, device=self.device)
         spacing = np.array([a.sdf.get_voxel_size() for a in self.assets], dtype=np.float32).reshape(-1, 3)
         data.inverse_voxel_sizes = wp.array(1.0 / spacing, dtype=wp.vec3, device=self.device)
+        centers = np.zeros((len(self.assets), 3), dtype=np.float32)
+        halves = np.zeros_like(centers)
+        radii = np.zeros(len(self.assets), dtype=np.float32)
+        for asset_id in sorted({self.instances[i].asset_id for i in rigid_indices}):
+            vertices, _ = self.mesh_data(asset_id)
+            low, high = vertices.min(axis=0), vertices.max(axis=0)
+            centers[asset_id] = (low + high) * .5
+            halves[asset_id] = np.maximum(high - centers[asset_id], centers[asset_id] - low)
+            radii[asset_id] = np.linalg.norm(vertices - centers[asset_id], axis=1).max()
+        data.bounds_center = wp.array(centers, dtype=wp.vec3, device=self.device)
+        data.bounds_half = wp.array(halves, dtype=wp.vec3, device=self.device)
+        data.bounds_radius = wp.array(radii, dtype=float, device=self.device)
+        # One interpolation-cell diagonal, in addition to each query's reach.
+        data.bounds_padding = wp.array(np.linalg.norm(spacing, axis=1), dtype=float, device=self.device)
         data.asset_ids = wp.array([i.asset_id for i in self.instances], dtype=int, device=self.device)
         data.rigid_ids = wp.array([i.rigid_id for i in self.instances], dtype=int, device=self.device)
         data.rigid_instance_ids = wp.array(rigid_indices, dtype=int, device=self.device)
@@ -220,6 +265,14 @@ class BoundarySystem:
         self.device_data = data
         self.bound_model = None
         self.reset()
+
+    def mesh_data(self, asset_id):
+        """Share one host mesh between bounds and all rendered instances."""
+        if asset_id not in self._meshes:
+            import trimesh
+            mesh = trimesh.load(self.assets[asset_id].mesh_path, force="mesh", process=False)
+            self._meshes[asset_id] = (np.asarray(mesh.vertices), np.asarray(mesh.faces))
+        return self._meshes[asset_id]
 
     def bind_bodies(self, model, body_ids, local_transforms=None):
         """Bind asset instances to Newton bodies once during scene assembly.

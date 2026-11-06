@@ -77,15 +77,16 @@ def volume_query(
         volumeRho = vmapValue * fn.Rho_0 * fn.Poly6(wp.vec3(0.0), boundaryOffset)
         gradVMap = vmapValue * fn.GradPow3(wp.vec3(0.0), boundaryOffset)
 
-    for rigid in range(Rigid_Count):
-        instance = boundaries.instances.rigid_instance_ids[rigid]
-        valid, distance, direction = boundary.query_instance_boundary(
-            boundaries.instances, instance, currPos, fn.Smoothing_Radius)
-        if valid:
-            volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
-            offset = direction * distance
-            volumeRho += volume * fn.Rho_0 * fn.Poly6(wp.vec3(0.0), offset)
-            gradVMap += volume * fn.GradPow3(wp.vec3(0.0), offset)
+    if wp.static(Rigid_Count > 0):
+        for rigid in range(boundaries.instances.rigid_count):
+            instance = boundaries.instances.rigid_instance_ids[rigid]
+            valid, distance, direction = boundary.query_instance_boundary(
+                boundaries.instances, instance, currPos, fn.Smoothing_Radius)
+            if valid:
+                volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
+                offset = direction * distance
+                volumeRho += volume * fn.Rho_0 * fn.Poly6(wp.vec3(0.0), offset)
+                gradVMap += volume * fn.GradPow3(wp.vec3(0.0), offset)
 
     volume_Rho[i] = volumeRho
     volume_Grad[i] = gradVMap
@@ -193,18 +194,19 @@ def calc_deltaPos(
 
     # Each pressure correction contributes -m*delta_x/dt^2 to its rigid body.
     # Requery each contribution; no particle-by-body cache is needed.
-    for rigid in range(Rigid_Count):
-        instance = boundaries.instances.rigid_instance_ids[rigid]
-        valid, distance, direction = boundary.query_instance_boundary(
-            boundaries.instances, instance, currPos, fn.Smoothing_Radius)
-        if valid:
-            volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
-            offset = direction * distance
-            grad = volume * fn.GradPow3(wp.vec3(0.0), offset)
-            force = (fn.Fluid_Mass * lambda_i / (dt * dt)) * grad
-            arm = currPos + offset - boundaries.instances.world_com[rigid]
-            wrench = wp.spatial_vector(force, wp.cross(arm, force))
-            wp.atomic_add(boundaries.forces, boundaries.instances.body_ids[rigid], wrench)
+    if wp.static(Rigid_Count > 0):
+        for rigid in range(boundaries.instances.rigid_count):
+            instance = boundaries.instances.rigid_instance_ids[rigid]
+            valid, distance, direction = boundary.query_instance_boundary(
+                boundaries.instances, instance, currPos, fn.Smoothing_Radius)
+            if valid:
+                volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
+                offset = direction * distance
+                grad = volume * fn.GradPow3(wp.vec3(0.0), offset)
+                force = (fn.Fluid_Mass * lambda_i / (dt * dt)) * grad
+                arm = currPos + offset - boundaries.instances.world_com[rigid]
+                wrench = wp.spatial_vector(force, wp.cross(arm, force))
+                wp.atomic_add(boundaries.forces, boundaries.instances.body_ids[rigid], wrench)
 
 
 @wp.kernel
@@ -218,11 +220,13 @@ def update_prePos(
     currPos = delta_Pos[tid] + pre_Pos[tid]
     currPos = fn.apply_SDF(SDF_id, currPos, fn.Particle_Radius)
     # Penetration projection remains a numerical correction without feedback.
-    for rigid in range(Rigid_Count):
-        instance = boundaries.instances.rigid_instance_ids[rigid]
-        valid, distance, normal = boundary.query_instance_normal(boundaries.instances, instance, currPos)
-        if valid and distance < fn.Particle_Radius:
-            currPos += normal * (fn.Particle_Radius - distance)
+    if wp.static(Rigid_Count > 0):
+        for rigid in range(boundaries.instances.rigid_count):
+            instance = boundaries.instances.rigid_instance_ids[rigid]
+            valid, distance, normal = boundary.query_instance_normal(
+                boundaries.instances, instance, currPos, fn.Particle_Radius)
+            if valid and distance < fn.Particle_Radius:
+                currPos += normal * (fn.Particle_Radius - distance)
     pre_Pos[tid] = currPos
 
 @wp.kernel

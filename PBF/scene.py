@@ -109,9 +109,4 @@ def load_rigid_boundaries(assets, support_radius, device):
 
 def load_render_meshes(boundaries):
     """Published meshes in instance order; repeated assets share host geometry."""
-    import trimesh
-    meshes = []
-    for asset in boundaries.assets:
-        mesh = trimesh.load(asset.mesh_path, force="mesh", process=False)
-        meshes.append((mesh.vertices, mesh.faces))
-    return [meshes[instance.asset_id] for instance in boundaries.instances]
+    return [boundaries.mesh_data(instance.asset_id) for instance in boundaries.instances]
