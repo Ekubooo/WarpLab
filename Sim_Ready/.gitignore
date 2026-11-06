@@ -1,2 +1,4 @@
-# Source models are supplied manually, not through Git.
-/Assets/
+# Keep only the two reference source models in Git; other assets stay local.
+/Assets/*
+!/Assets/bunny_flat_bottom.obj
+!/Assets/spot_triangulated_good.obj
