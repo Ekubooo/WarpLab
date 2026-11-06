@@ -196,6 +196,18 @@ pressure iterations. SDF penetration projection, velocity clamping and vorticity
 do not generate compensating forces: this is explicit pressure weak coupling,
 not a claim of strict conservation for the entire simulation.
 
+Pressure iteration order is `volume_query → calc_lambda → calc_deltaPos →
+calc_boundaryForce → update_prePos`. The separate reaction kernel reads the
+same uncorrected prediction as delta, uses direct atomic accumulation, and is
+not launched for static scenes. Delta retains its two-level neighbor prefetch.
+The frozen pre-split kernel is kept only in tests for numerical/performance
+comparison (494,100 particles, private asset copy):
+
+```powershell
+python -B -m tests.pbf.benchmark_feedback --warmup 30 --trials 60
+python -B -m tests.pbf.benchmark_feedback --warmup 180 --trials 60
+```
+
 MuJoCo runs on GPU with native contacts, update interval 1 and sleeping disabled.
 Contact/constraint capacities are 2048/8192. Graph capture preserves the MuJoCo
 Python step counter; replay advances it. Full reset also restores backend history

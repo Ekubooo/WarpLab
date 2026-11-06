@@ -147,8 +147,6 @@ def calc_deltaPos(
     lambda_Opt: wp.array[float],
     Neighbor: fn.NeighborCache,
     volume_Grad: wp.array[wp.vec3],
-    dt: float,
-    boundaries: boundary.BoundaryCouplingData,
     delta_Pos: wp.array[wp.vec3]
 ):
     i = wp.tid()
@@ -191,6 +189,17 @@ def calc_deltaPos(
 
     delta_boundary = -lambda_i * volume_Grad[i]
     delta_Pos[i] = delta_Movement * pressure_scale + delta_boundary
+
+@wp.kernel
+def calc_boundaryForce(
+    pre_Pos: wp.array[wp.vec3],
+    lambda_Opt: wp.array[float],
+    dt: float,
+    boundaries: boundary.BoundaryCouplingData
+):
+    i = wp.tid()
+    currPos = pre_Pos[i]
+    lambda_i = lambda_Opt[i]
 
     # Each pressure correction contributes -m*delta_x/dt^2 to its rigid body.
     # Requery each contribution; no particle-by-body cache is needed.
@@ -449,12 +458,21 @@ class PBF(SolverBase):
                             self.pre_Pos, 
                             self.lambda_Opt,
                             self.n_Cache,
-                            self.volume_Grad,
-                            dt,
-                            self.boundary_data
+                            self.volume_Grad
                         ],
                         outputs=[self.delta_Pos]
                     )
+                    if self.BoundarySys.rigid_count > 0:
+                        # Query the same prediction as delta, before position correction.
+                        wp.launch(
+                            kernel=calc_boundaryForce,
+                            dim=self.n,
+                            inputs=[
+                                self.pre_Pos, 
+                                self.lambda_Opt, 
+                                dt, 
+                                self.boundary_data]
+                        )
                     wp.launch(
                         kernel=update_prePos, 
                         dim=self.n,

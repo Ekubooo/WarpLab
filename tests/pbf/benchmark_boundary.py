@@ -2,6 +2,7 @@
 
 Run as python -m tests.pbf.benchmark_boundary --warmup 180 --trials 60.
 Production choices are never changed on disk; test modules live under outputs.
+All query variants use the current split delta/reaction stage.
 """
 import argparse
 import hashlib
@@ -24,11 +25,12 @@ from tests.pbf.coupled_lifecycle_case import checkpoint, restore
 parser = argparse.ArgumentParser()
 parser.add_argument("--warmup", type=int, default=180)
 parser.add_argument("--trials", type=int, default=60)
+parser.add_argument("--output", type=Path)
 args = parser.parse_args()
 from .query_variants import make_variants, install
 from types import SimpleNamespace
 original = SimpleNamespace(**{name: getattr(kernels, name) for name in
-    ("volume_query", "calc_deltaPos", "update_prePos")})
+    ("volume_query", "calc_deltaPos", "calc_boundaryForce", "update_prePos")})
 source_path = ROOT / "PBF/PBF.py"
 digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
 
@@ -79,9 +81,12 @@ with wp.ScopedDevice("cuda:0"):
             wp.launch(kernels.volume_query, sim.n, inputs=[solver.pre_Pos, solver.boundary_data],
                       outputs=[solver.volume_Rho, solver.volume_Grad])
         elif scope == "calc_deltaPos":
+            # Keep the historical stage timing inclusive of pressure feedback.
             wp.launch(kernels.calc_deltaPos, sim.n,
-                      inputs=[solver.pre_Pos, solver.lambda_Opt, solver.n_Cache, solver.volume_Grad, sim.dt, solver.boundary_data],
+                      inputs=[solver.pre_Pos, solver.lambda_Opt, solver.n_Cache, solver.volume_Grad],
                       outputs=[solver.delta_Pos])
+            wp.launch(kernels.calc_boundaryForce, sim.n,
+                      inputs=[solver.pre_Pos, solver.lambda_Opt, sim.dt, solver.boundary_data])
         else:
             wp.launch(kernels.update_prePos, sim.n, inputs=[solver.delta_Pos, solver.boundary_data], outputs=[solver.pre_Pos])
 
@@ -193,6 +198,7 @@ with wp.ScopedDevice("cuda:0"):
                   production_sha256=digest,
                   method="Random-order paired CUDA events over captured graphs, identical frozen inputs and complete MuJoCo history restored outside timing; no clock locking.",
                   results=results, continuous=continuous_report)
-    path = OUT / f"boundary-{args.warmup}.json"
+    path = args.output or OUT / f"boundary-{args.warmup}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print("RESULT", path, flush=True)

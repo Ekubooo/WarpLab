@@ -82,9 +82,13 @@ def main():
             return np.asarray(point)
 
         def pressure(dt):
+            previous = solver.boundary_forces.numpy().copy()
             wp.launch(kernels.calc_deltaPos, 1,
                       inputs=[solver.pre_Pos, solver.lambda_Opt, solver.n_Cache,
-                              solver.volume_Grad, dt, solver.boundary_data], outputs=[solver.delta_Pos])
+                              solver.volume_Grad], outputs=[solver.delta_Pos])
+            np.testing.assert_array_equal(solver.boundary_forces.numpy(), previous)
+            wp.launch(kernels.calc_boundaryForce, 1,
+                      inputs=[solver.pre_Pos, solver.lambda_Opt, dt, solver.boundary_data])
 
         dt = .002
         transforms = (

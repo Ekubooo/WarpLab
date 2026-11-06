@@ -11,7 +11,7 @@ from PBF import PBF as kernels, boundary_model
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "outputs/pbf-newton/optimization-round1"
-NAMES = ("volume_query", "calc_deltaPos", "update_prePos")
+NAMES = ("volume_query", "calc_deltaPos", "calc_boundaryForce", "update_prePos")
 
 
 def load_module(name, source):
@@ -43,6 +43,17 @@ def make_variants():
     source = Path(reference.__file__).read_text()
     source = source.replace("SDF_id = wp.constant(wp.uint64(0))\nVMAP_id = wp.constant(wp.uint64(0))\nRigid_Count = wp.constant(0)",
                             "from PBF.PBF import SDF_id, VMAP_id, Rigid_Count")
+    # Keep the historical queries, adapting only the split kernel interface.
+    source = source.replace("    dt: float,\n    boundaries: boundary.BoundaryCouplingData,\n", "")
+    source = source.replace("    # Each pressure correction", '''@wp.kernel
+def calc_boundaryForce(pre_Pos: wp.array[wp.vec3], lambda_Opt: wp.array[float],
+                       dt: float, boundaries: boundary.BoundaryCouplingData):
+    i = wp.tid()
+    currPos = pre_Pos[i]
+    lambda_i = lambda_Opt[i]
+
+    # Each pressure correction''')
+    original = load_module("pbf_unfiltered_reference", source)
     lines = source.splitlines()
     for first in reversed([i for i, line in enumerate(lines) if line == "    for rigid in range(Rigid_Count):"]):
         last = first + 1
@@ -53,7 +64,7 @@ def make_variants():
     runtime = load_module("pbf_runtime_reference", "\n".join(lines))
     for name in ("SDF_id", "VMAP_id", "Rigid_Count"):
         setattr(runtime, name, getattr(kernels, name))
-    variants = dict(original=reference, runtime=runtime)
+    variants = dict(original=original, runtime=runtime)
     source = Path(kernels.__file__).read_text()
     chunks = []
     for name in NAMES:
