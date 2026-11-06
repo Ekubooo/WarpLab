@@ -19,13 +19,14 @@ SOURCE = ROOT / "Assets" / "bunny_flat_bottom.obj"
 OUTPUT = PROJECT / "PBF" / "Assets"
 CACHE = PROJECT / ".cache" / "sim-ready" / "pbf"
 BUILD_VERSION = 1
+LAYOUT_VERSION = 2
 
 
 def asset_names(scene):
     if scene not in ("static", "stairs-rigids"):
         raise ValueError(f"Unknown PBF scene: {scene}")
-    return ("stairs_scene",) if scene == "static" else (
-        "stairs_scene", "Rigid/stairs_box", "Rigid/stairs_sphere")
+    return ("boundary/stairs_scene",) if scene == "static" else (
+        "boundary/stairs_scene", "rigid/stairs_box", "rigid/stairs_sphere")
 
 
 def build_recipe(scene, config):
@@ -33,11 +34,11 @@ def build_recipe(scene, config):
     from ...collision import COACD_OPTIONS, COACD_VERSION
 
     support = max(.05, 4. * config.particle_radius)
-    geometry = {"stairs_scene": dict(kind="stairs", version=1),
-                "Rigid/stairs_box": dict(kind="box", size=[BOX_SIZE] * 3),
-                "Rigid/stairs_sphere": dict(kind="sphere", radius=SPHERE_RADIUS,
+    geometry = {"boundary/stairs_scene": dict(kind="stairs", version=1),
+                "rigid/stairs_box": dict(kind="box", size=[BOX_SIZE] * 3),
+                "rigid/stairs_sphere": dict(kind="sphere", radius=SPHERE_RADIUS,
                                             subdivisions=SPHERE_SUBDIVISIONS)}
-    recipe = dict(version=BUILD_VERSION, source=file_digest(SOURCE),
+    recipe = dict(version=BUILD_VERSION, layout_version=LAYOUT_VERSION, source=file_digest(SOURCE),
         geometry={name: geometry[name] for name in asset_names(scene)},
         terrain=asdict(GeometryOptions()),
         static_bake=asdict(BakeOptions(max_support_radius=support)),
@@ -53,9 +54,9 @@ def prepare_geometry(recipe):
     from .. import container, rigid
 
     scene, visible, static_boxes = container.prepare(SOURCE, options=GeometryOptions(**recipe["terrain"]))
-    meshes = {"stairs_scene": visible}
+    meshes = {"boundary/stairs_scene": visible}
     for name, description in recipe["geometry"].items():
-        if name != "stairs_scene":
+        if name != "boundary/stairs_scene":
             meshes[name] = rigid.prepare(description)
     if np.asarray(static_boxes).shape != (24, 2, 3):
         raise ValueError("The current stairs recipe requires 24 collision boxes")
@@ -87,7 +88,7 @@ def validate_asset(root, name, description, device):
         _check_volume_map_layout(sdf, vm)
         if not np.array_equal(sdf.get_tiles().numpy(), vm.get_tiles().numpy()):
             raise ValueError(f"VM tile layout differs: {stem}")
-    if name == "stairs_scene":
+    if name == "boundary/stairs_scene":
         path = stem.with_suffix(".collision.npz")
         if file_digest(path) != metadata["collision_sha256"]:
             raise ValueError(f"Collision digest differs: {stem}")
@@ -104,7 +105,7 @@ def validate_asset(root, name, description, device):
 def asset_files(root, names):
     return [root / (name + suffix) for name in names
             for suffix in ((".obj", ".nvdb", ".json", ".collision.npz")
-                           if name == "stairs_scene" else (".obj", ".nvdb", ".json"))]
+                           if name == "boundary/stairs_scene" else (".obj", ".nvdb", ".json"))]
 
 
 def copy_assets(source, destination, names):
@@ -125,20 +126,20 @@ def reuse_published(root, stage, recipe, meshes, static_boxes, device):
     for name, description in recipe["geometry"].items():
         metadata, stored, sdf = validate_asset(root, name, description, device)
         generated = meshes[name]
-        precision = 8 if name == "stairs_scene" else 17
+        precision = 8 if name == "boundary/stairs_scene" else 17
         if (generated.vertices.shape != stored.vertices.shape
                 or not np.allclose(np.round(generated.vertices, precision), stored.vertices,
-                                   rtol=0., atol=0. if name == "stairs_scene" else 1e-15)
+                                   rtol=0., atol=0. if name == "boundary/stairs_scene" else 1e-15)
                 or not np.array_equal(generated.faces, stored.faces)):
             return False
         if metadata["build"].get("dependencies", recipe["dependencies"]) != recipe["dependencies"]:
             return False
         if metadata["build"].get("producer_version", 1) != BUILD_VERSION:
             return False
-        bake = recipe["static_bake" if name == "stairs_scene" else "rigid_bake"]
+        bake = recipe["static_bake" if name == "boundary/stairs_scene" else "rigid_bake"]
         if not np.allclose(sdf.get_voxel_size(), bake["voxel_size"], rtol=1e-6, atol=0.):
             return False
-        if name == "stairs_scene":
+        if name == "boundary/stairs_scene":
             if (metadata["sources"] != {SOURCE.name: recipe["source"]}
                     or metadata["build"]["geometry"] != recipe["terrain"]
                     or metadata["build"]["decomposition"] != recipe["decomposition"]
@@ -160,18 +161,18 @@ def generate_assets(stage, recipe, scene, meshes, static_boxes, device):
     import warp as wp
     from .. import container, rigid
 
-    products = {"stairs_scene": container.build(scene, meshes["stairs_scene"], stage / "stairs_scene",
+    products = {"boundary/stairs_scene": container.build(scene, meshes["boundary/stairs_scene"], stage / "boundary/stairs_scene",
         geometry_options=GeometryOptions(**recipe["terrain"]), bake_options=BakeOptions(**recipe["static_bake"]),
         collision_cache=stage / "collision-cache", collision_name="bunny", device=device)}
     for name, mesh in meshes.items():
-        if name == "stairs_scene":
+        if name == "boundary/stairs_scene":
             continue
         products[name] = rigid.build(mesh, stage / name, bake_options=BakeOptions(**recipe["rigid_bake"]),
                                      device=device)
     # The preset owns the published attachment format and the scene-wide transaction.
     for name, (mesh_path, sdf_path, hulls) in products.items():
         stem = stage / name
-        is_static = name == "stairs_scene"
+        is_static = name == "boundary/stairs_scene"
         bake = BakeOptions(**recipe["static_bake" if is_static else "rigid_bake"])
         with sdf_path.open("rb") as stream:
             volume = wp.Volume.load_from_nvdb(stream, device=device)

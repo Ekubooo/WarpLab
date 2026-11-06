@@ -31,7 +31,7 @@ def main():
     args = parser.parse_args()
     private = ROOT / "outputs/pbf-newton/cpu-backend" / f"assets-{args.radius}"
     if not private.exists():
-        source = ROOT / "outputs/pbf-newton/profiling-500k/Assets" if args.radius == .0092 else ROOT / "PBF/Assets"
+        source = ROOT / "outputs/pbf-newton/profiling-500k/Assets-boundary-rigid" if args.radius == .0092 else ROOT / "PBF/Assets"
         shutil.copytree(source if source.exists() else ROOT / "PBF/Assets", private)
     scene.ASSET_DIR = boundary_model.ASSET_DIR = private
     coupling.USE_MUJOCO_CPU = False

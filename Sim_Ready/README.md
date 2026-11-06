@@ -18,9 +18,10 @@ python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids --config PBF/conf
 
 ### 新电脑首次还原
 
-Git 只提供代码、代码中的场景配方、依赖版本和记录，不提供模型或发布资产。
-先安装 `PBF/requirements.txt` 和本包 `requirements.txt` 中的依赖，再手动创建
-`Sim_Ready/Assets`，从自己的备份／网盘放入 **`bunny_flat_bottom.obj`**。
+Git 保留代码、场景配方、依赖记录，以及 `Sim_Ready/Assets` 中的两个源模型：
+`bunny_flat_bottom.obj` 和 `spot_triangulated_good.obj`。其余资产不通过 Git 传递。
+先安装 `PBF/requirements.txt` 和本包 `requirements.txt` 中的依赖，确认
+`Sim_Ready/Assets/bunny_flat_bottom.obj` 存在；若未拉取模型，从备份补齐该文件。
 需要的是现有处理后的兔子，不是任意同名或其他版本的 Stanford Bunny。
 
 源 OBJ 的 SHA-256：
@@ -30,8 +31,8 @@ Git 只提供代码、代码中的场景配方、依赖版本和记录，不提�
 
 ```powershell
 python -m pip install -r PBF/requirements.txt -r Sim_Ready/requirements.txt
-python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids
-python -m PBF.app --scene stairs-rigids --cuda-graph
+python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids --particle-radius 0.0125 --rebuild
+python -m PBF.app --scene stairs-rigids --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
 ```
 
 空资产目录、空缓存也能用普通准备命令完整生成；`--rebuild` 则明确跳过复用。
@@ -88,16 +89,17 @@ pipelines/preset/pbf.py：场景配方、缓存选择与整组发布
 
 ## 产物与运行边界
 
-- `stairs_scene.obj/.nvdb/.json/.collision.npz`：可见阶梯兔子、容器 SDF/VM、
+- `boundary/stairs_scene.obj/.nvdb/.json/.collision.npz`：可见阶梯兔子、容器 SDF/VM、
   24 个静态 boxes 与兔子凸块。静态发布也保留完整静态碰撞附件。
-- `Rigid/stairs_box.*`、`Rigid/stairs_sphere.*`：完整网格、局部 SDF/VM 和元数据；
+- `rigid/stairs_box.*`、`rigid/stairs_sphere.*`：完整网格、局部 SDF/VM 和元数据；
   基础碰撞形状和质量惯量仍由运行时 Newton 原生 shape 产生。
 - 源模型在本包 `Assets`；产物默认在 `PBF/Assets`；缓存不是运行资源。
-- 两个资产目录均从 Git 忽略，包括源 OBJ、生成 OBJ/NVDB、JSON、NPZ；
+- 除上述两个源 OBJ 外，源资产及全部生成 OBJ/NVDB、JSON、NPZ 均从 Git 忽略；
   `PBF/Assets/.gitignore` 自身保留。忽略不等于删除，已跟踪文件仍需用户自行处理。
   资产目录外的代码、依赖、来源记录和 `PBF/config` 中的流体 JSON 不受影响。
 - 缓存包含源内容、几何、采样、生成版本和依赖版本。密度、时间步、压力迭代
   不改变几何缓存。小于已有支持范围的半径变化只影响 VM。
+  目录布局版本也参与缓存键，旧的平铺／`Rigid` 布局不再复用。
 - 默认静态体素 0.0075 m、动态体素 0.005 m，支持半径至少 0.05 m。
   超过时离线重建；运行时仍只允许 VM 失配重算并写回同一个 NVDB。
 - SDF 内容身份排除 NVDB 多 grid 包装字段，不以整个可变 NVDB 的摘要判断几何。
@@ -106,6 +108,22 @@ pipelines/preset/pbf.py：场景配方、缓存选择与整组发布
 
 首次迁移与重新烘焙分开验收：迁移产物要求一致；重烘焙可能因稀疏布局或
 浮点计算产生差异，使用独立输出检查采样误差，不自动替换数值回归基准。
+
+默认发布目录如下；`--output-dir` 指向这棵目录的根，而非其中一个子目录：
+
+```text
+PBF/Assets/
+├─ .gitignore
+├─ boundary/
+│  └─ stairs_scene.obj / .nvdb / .json / .collision.npz
+└─ rigid/
+   ├─ stairs_box.obj / .nvdb / .json
+   └─ stairs_sphere.obj / .nvdb / .json
+```
+
+一次 `stairs-rigids` 发布即包含默认阶梯兔子容器及三个刚体所需资源；
+也可直接用于 `python -m PBF.app --scene static`，无需再次生成静态资产。
+生成 JSON 是管线写出的几何、烘焙、来源摘要及碰撞元数据，不是需要手写的场景配置。
 
 ## 验证
 

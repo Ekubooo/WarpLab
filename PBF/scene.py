@@ -41,13 +41,13 @@ def load_rigid_assets(asset_dir=None):
     """Read the published set once; geometry production stays offline."""
     root = ASSET_DIR if asset_dir is None else Path(asset_dir)
     recipes = (
-        ("stairs_scene", dict(kind="stairs", version=1)),
-        ("Rigid/stairs_box", dict(kind="box", size=[BOX_SIZE] * 3)),
-        ("Rigid/stairs_sphere", dict(kind="sphere", radius=SPHERE_RADIUS, subdivisions=SPHERE_SUBDIVISIONS)),
+        ("boundary/stairs_scene", dict(kind="stairs", version=1)),
+        ("rigid/stairs_box", dict(kind="box", size=[BOX_SIZE] * 3)),
+        ("rigid/stairs_sphere", dict(kind="sphere", radius=SPHERE_RADIUS, subdivisions=SPHERE_SUBDIVISIONS)),
     )
     # Check the complete set before a volume-map cache can be updated.
     paths = [root / (name + suffix) for name, _ in recipes for suffix in (".obj", ".nvdb", ".json")]
-    collision_path = root / "stairs_scene.collision.npz"
+    collision_path = root / "boundary/stairs_scene.collision.npz"
     for path in (*paths, collision_path):
         if not path.is_file():
             raise FileNotFoundError(f"Missing published stairs-rigids asset: {path}. "
@@ -58,7 +58,7 @@ def load_rigid_assets(asset_dir=None):
         if data["version"] != 1 or data["geometry"] != geometry or data["local_frame"] != "asset":
             raise ValueError(f"Published geometry or coordinate frame does not match {name}")
         metadata[name] = data
-    boxes = np.asarray(metadata["stairs_scene"]["static_boxes"], dtype=np.float32)
+    boxes = np.asarray(metadata["boundary/stairs_scene"]["static_boxes"], dtype=np.float32)
     if boxes.shape != (24, 2, 3):
         raise ValueError("Published stairs collision must contain 24 aligned boxes")
     with np.load(collision_path, allow_pickle=False) as saved:
@@ -96,7 +96,7 @@ def add_rigid_scene(builder, assets):
 def load_rigid_boundaries(assets, support_radius, device):
     """Load each volume once; two boxes share one asset but distinct instances."""
     loaded = []
-    for name in ("stairs_scene", "Rigid/stairs_box", "Rigid/stairs_sphere"):
+    for name in ("boundary/stairs_scene", "rigid/stairs_box", "rigid/stairs_sphere"):
         stem = assets.root / name
         sdf, volume_map = boundary_model.load_boundary_volumes(
             stem.with_suffix(".nvdb"), support_radius, device=device)

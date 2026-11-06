@@ -218,10 +218,19 @@ python -m Sim_Ready.pipelines.preset.pbf --scene static
 python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids
 ```
 
-新电脑先手动把同一份 `bunny_flat_bottom.obj` 放入 `Sim_Ready/Assets`；
-源模型和全部生成附件均不通过 Git 传递。所需源文件摘要、依赖安装和完整还原步骤
+新电脑确认 `Sim_Ready/Assets/bunny_flat_bottom.obj` 已拉取；该源模型与
+`spot_triangulated_good.obj` 保留在 Git，全部生成附件忽略。所需源文件摘要、依赖安装和完整还原步骤
 见 `Sim_Ready/README.md`。当前场景无需 Spot；盒子、球与地形由代码生成。
 场景配方仍在代码中，流体参数 JSON 保留为副本／记录，不默认读取。
+
+发布目录分为 `PBF/Assets/boundary/stairs_scene.*`（静态容器与碰撞附件）和
+`PBF/Assets/rigid/stairs_box.*`、`stairs_sphere.*`（动态边界）。
+一次 `stairs-rigids` 准备即可同时供静态、耦合场景使用。仅从源模型验证完整生成时：
+
+```powershell
+python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids --particle-radius 0.0125 --rebuild
+python -m PBF.app --scene stairs-rigids --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
+```
 
 `preset/pbf.py` 统一管理场景、缓存和发布，分别调用 `container.py` 与 `rigid.py`
 完成两类边界资产的处理；底层不创建 Simulation，也不自行发布到运行目录。
@@ -306,10 +315,10 @@ This initial CPU path uses Newton's existing bridge, including its temporary
 allocations and synchronous transfers. It is not assumed faster for few bodies;
 measure the complete coupled frame, not only native `mj_step`.
 
-Assets under `Assets/Rigid/stairs_box.*`, `stairs_sphere.*`, and static collision
-attachments are independent copies of the previously verified published assets.
+Assets under `Assets/rigid/stairs_box.*`, `stairs_sphere.*`, and
+`Assets/boundary/stairs_scene.*` are independently published by Sim_Ready.
 There is no runtime archive import, geometry baking, CoACD invocation or mass
-integration. The original static OBJ/NVDB were not replaced. Asset/SDF identity,
+integration. Asset/SDF identity,
 convexity and complete tile equality are checked in tests, not per startup.
 Dynamic SDFs have 0.005 m voxels and support `h <= 0.05 m` (`r <= 0.0125 m`).
 Changing particle radius refreshes VM in this package only; exceeding SDF support

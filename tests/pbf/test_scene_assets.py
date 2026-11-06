@@ -28,16 +28,16 @@ class SceneAssetTests(unittest.TestCase):
         cls.assets = scene.load_rigid_assets()
 
     def test_published_meshes_and_collision(self):
-        for name in ("stairs_scene", "Rigid/stairs_box", "Rigid/stairs_sphere"):
+        for name in ("boundary/stairs_scene", "rigid/stairs_box", "rigid/stairs_sphere"):
             stem = self.assets.root / name
             metadata = json.loads(stem.with_suffix(".json").read_text())
             self.assertEqual(digest(stem.with_suffix(".obj")), metadata["mesh_sha256"])
             mesh = trimesh.load(stem.with_suffix(".obj"), force="mesh", process=False)
             self.assertTrue(np.isfinite(mesh.vertices).all())
-            if name.startswith("Rigid/"):
+            if name.startswith("rigid/"):
                 np.testing.assert_allclose(mesh.bounds, [[-.15] * 3, [.15] * 3], atol=1e-7)
-        metadata = json.loads((self.assets.root / "stairs_scene.json").read_text())
-        self.assertEqual(digest(self.assets.root / "stairs_scene.collision.npz"), metadata["collision_sha256"])
+        metadata = json.loads((self.assets.root / "boundary/stairs_scene.json").read_text())
+        self.assertEqual(digest(self.assets.root / "boundary/stairs_scene.collision.npz"), metadata["collision_sha256"])
         self.assertEqual(metadata["build"]["geometry"]["step_width"], .15)
         self.assertTrue(np.isfinite(self.assets.static_boxes).all())
         self.assertTrue(np.all(self.assets.static_boxes[:, 1] > 0))
@@ -70,7 +70,7 @@ class SceneAssetTests(unittest.TestCase):
         # NVDB's second grid is mutable; normalize only the first grid's
         # checksum, flags/index/count before comparing its published identity.
         with wp.ScopedDevice("cuda:0"):
-            for name in ("stairs_scene", "Rigid/stairs_box", "Rigid/stairs_sphere"):
+            for name in ("boundary/stairs_scene", "rigid/stairs_box", "rigid/stairs_sphere"):
                 stem = self.assets.root / name
                 metadata = json.loads(stem.with_suffix(".json").read_text())
                 with stem.with_suffix(".nvdb").open("rb") as stream:

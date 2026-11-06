@@ -33,7 +33,7 @@ def compare_generated(reference, generated, scene="stairs-rigids"):
             old_sdf = wp.Volume.load_from_nvdb(stream)
         # Compare in the fluid-accessible scene and around all primitive surfaces.
         bounds = np.array([[0., 0., 0.], [3.1, 4.5, 1.6]])
-        if name != "stairs_scene":
+        if name != "boundary/stairs_scene":
             bounds = old_mesh.bounds + np.array([[-.06] * 3, [.06] * 3])
         points = wp.array(rng.uniform(bounds[0], bounds[1], (20000, 3)), dtype=wp.vec3)
         values = []
@@ -52,7 +52,7 @@ def compare_generated(reference, generated, scene="stairs-rigids"):
             samples=len(points), query_band_samples=int(band.sum()),
             query_band_max_error_m=float(error.max()), query_band_mean_error_m=float(error.mean()),
             tolerance_m=float(np.sqrt(3.) * voxel))
-        if name == "stairs_scene":
+        if name == "boundary/stairs_scene":
             np.testing.assert_array_equal(old_meta["static_boxes"], new_meta["static_boxes"])
             with np.load(stem.with_suffix(".collision.npz")) as old, np.load(fresh.with_suffix(".collision.npz")) as new:
                 results[name]["collision_arrays_equal"] = old.files == new.files and all(

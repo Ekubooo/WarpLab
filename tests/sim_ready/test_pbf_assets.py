@@ -43,7 +43,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_corrupt_cache_does_not_replace_published_assets(self):
         directory = next(self.cache.glob("stairs-rigids-*"))
-        mesh = directory / "Rigid/stairs_box.obj"
+        mesh = directory / "rigid/stairs_box.obj"
         original = mesh.read_bytes()
         published = {str(p): file_digest(p) for p in pbf.asset_files(self.assets, pbf.asset_names("stairs-rigids"))}
         try:
@@ -55,10 +55,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(published, {name: file_digest(name) for name in published})
 
     def test_static_publication_keeps_collision_and_dynamic_assets(self):
-        before = {p.name: file_digest(p) for p in (self.assets / "Rigid").iterdir()}
+        before = {p.name: file_digest(p) for p in (self.assets / "rigid").iterdir()}
         pbf.build_scene_assets("static", output_dir=self.assets, cache_dir=self.cache)
-        self.assertTrue((self.assets / "stairs_scene.collision.npz").is_file())
-        self.assertEqual(before, {p.name: file_digest(p) for p in (self.assets / "Rigid").iterdir()})
+        self.assertTrue((self.assets / "boundary/stairs_scene.collision.npz").is_file())
+        self.assertEqual(before, {p.name: file_digest(p) for p in (self.assets / "rigid").iterdir()})
 
     def test_recipe_ignores_fluid_only_parameters(self):
         base = PBFConfig()
@@ -75,21 +75,21 @@ class PipelineTests(unittest.TestCase):
 
     def test_missing_attachment_rejected_offline_and_runtime(self):
         from PBF.scene import load_rigid_assets
-        collision = self.assets / "stairs_scene.collision.npz"
+        collision = self.assets / "boundary/stairs_scene.collision.npz"
         backup = collision.with_suffix(".saved")
         collision.rename(backup)
         try:
             with self.assertRaises(FileNotFoundError):
                 load_rigid_assets(self.assets)
             with self.assertRaises(FileNotFoundError):
-                pbf.validate_asset(self.assets, "stairs_scene", dict(kind="stairs", version=1), "cuda:0")
+                pbf.validate_asset(self.assets, "boundary/stairs_scene", dict(kind="stairs", version=1), "cuda:0")
         finally:
             backup.rename(collision)
 
     def test_volume_map_repair_and_support_limit(self):
         import shutil
         path = self.root / "vm-test.nvdb"
-        shutil.copy2(self.assets / "Rigid/stairs_box.nvdb", path)
+        shutil.copy2(self.assets / "rigid/stairs_box.nvdb", path)
         sdf, _ = boundary_model.load_boundary_volumes(path, .05)
         identity = sdf_digest(sdf)
         sdf, _ = boundary_model.load_boundary_volumes(path, .04, quadrature_points=8)
@@ -156,10 +156,11 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(hulls, (mesh,))
 
     def test_asset_ignore_rules_preserve_code_and_records(self):
-        ignored = ("Sim_Ready/Assets/bunny_flat_bottom.obj", "Sim_Ready/Assets/spot.obj",
-                   "PBF/Assets/stairs_scene.json", "PBF/Assets/stairs_scene.collision.npz",
-                   "PBF/Assets/stairs_scene.nvdb", "PBF/Assets/Rigid/stairs_box.json")
-        kept = ("PBF/Assets/.gitignore", "PBF/config/default_para.json", "PBF/scene_data.py",
+        ignored = ("Sim_Ready/Assets/other.obj", "Sim_Ready/Assets/spot.obj",
+                   "PBF/Assets/boundary/stairs_scene.json", "PBF/Assets/boundary/stairs_scene.collision.npz",
+                   "PBF/Assets/boundary/stairs_scene.nvdb", "PBF/Assets/rigid/stairs_box.json")
+        kept = ("Sim_Ready/Assets/bunny_flat_bottom.obj", "Sim_Ready/Assets/spot_triangulated_good.obj",
+                "PBF/Assets/.gitignore", "PBF/config/default_para.json", "PBF/scene_data.py",
                 "Sim_Ready/README.md", "Sim_Ready/PROVENANCE.md", "Sim_Ready/pipelines/preset/pbf.py")
         for expected, paths in ((0, ignored), (1, kept)):
             for path in paths:

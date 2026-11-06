@@ -39,12 +39,15 @@ def main():
     manifest = json.loads(Path(__file__).with_name("source_manifest.json").read_text())
     original = ROOT / "demos/fluid/PBF"
     for name, value in manifest["source_files"].items():
+        current = ROOT / "PBF" / name
+        if name.startswith("Assets/"):
+            current = ROOT / "PBF/Assets/boundary" / Path(name).name
         if name.endswith(".nvdb"):
-            assert sdf_digest(original / name) == sdf_digest(ROOT / "PBF" / name), name
+            assert sdf_digest(original / name) == sdf_digest(current), name
             continue
         assert digest(original / name) == value, name
         if name.startswith(("config/", "Assets/")):
-            assert digest(ROOT / "PBF" / name) == value, name
+            assert digest(current) == value, name
     for path in (ROOT / "PBF").glob("*.py"):
         assert "PBF_Rigid" not in path.read_text(), path
     result = dict(protected_demo_files=len(protected), unchanged=True,

@@ -40,7 +40,7 @@ BOUNDARY_CULLING = "box"
 
 @dataclass(frozen=True)
 class BoundaryScene:
-    """Static filenames and per-asset instance counts under Assets/Rigid."""
+    """Static filenames and per-asset instance counts under Assets/rigid."""
 
     static_assets: tuple[str, ...] = ()
     default_rigid_count: int = 1
@@ -357,7 +357,7 @@ def resolve_sdf_path(filename):
             or any(character in filename for character in "/\\:\x00")
             or Path(filename).suffix.lower() != ".nvdb"):
         raise ValueError("SDF must be a bare .nvdb filename without a directory or drive")
-    return (Path(ASSET_DIR) / filename).resolve()
+    return (Path(ASSET_DIR) / "boundary" / filename).resolve()
 
 
 def resolve_scene_path(filename):
@@ -395,7 +395,7 @@ def _resolve_boundary_requests(scene):
             raise FileNotFoundError(f"Static SDF not found: {path}. "
                                     "Prepare assets offline with Sim_Ready; see Sim_Ready/README.md.")
         requests.append(_BoundaryRequest(path, path.with_suffix(".obj"), 1, False))
-    directory = Path(ASSET_DIR) / "Rigid"
+    directory = Path(ASSET_DIR) / "rigid"
     meshes = {}
     if directory.exists():
         if not directory.is_dir():
@@ -552,7 +552,7 @@ def _nvdb_io():
 
 
 def load_static_sdf(filename, *, device=None) -> wp.Volume:
-    """Read an offline SDF from ASSET_DIR; the caller must retain the Volume.
+    """Read an offline SDF from Assets/boundary; the caller must retain the Volume.
 
     This startup operation neither reads an OBJ nor invokes the offline baker.
     """
@@ -675,7 +675,7 @@ def _load_boundary_volumes(path, support_radius, quadrature_points, selected):
 def load_boundaries(scene: BoundaryScene, options: BoundaryLoadOptions) -> BoundarySystem:
     """Load a scene once per asset, returning owned resources and device data.
 
-    Rigid OBJ/NVDB pairs are discovered only under Assets/Rigid. A missing or
+    Rigid OBJ/NVDB pairs are discovered only under Assets/rigid. A missing or
     empty rigid directory is valid. Geometry is not loaded or baked here.
     """
     requests = _resolve_boundary_requests(scene)

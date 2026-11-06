@@ -37,7 +37,7 @@ class ConfigurationTests(unittest.TestCase):
 class VolumeCacheTests(unittest.TestCase):
     def test_rebuild_hit_support_limit_and_pair_layout(self):
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cuda:0"):
-            path = Path(directory) / "boundary.nvdb"
+            path = Path(directory) / "boundary" / "boundary.nvdb"
             tiles = wp.array([[0, 0, 0]], dtype=wp.vec3i)
             sdf = wp.Volume.allocate_by_tiles(tiles, voxel_size=.01, bg_value=1.)
             name = f"PBF_SDF|v=1|hmax={float(.05).hex()}"

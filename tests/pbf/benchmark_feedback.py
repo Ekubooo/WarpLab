@@ -34,7 +34,7 @@ args = parser.parse_args()
 
 source_paths = [p for p in (ROOT / "PBF").rglob("*") if p.is_file() and "__pycache__" not in p.parts]
 before = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths}
-private = ROOT / "outputs/pbf-newton/profiling-500k/Assets"
+private = ROOT / "outputs/pbf-newton/profiling-500k/Assets-boundary-rigid"
 if not private.exists():
     shutil.copytree(ROOT / "PBF/Assets", private)
 scene.ASSET_DIR = boundary_model.ASSET_DIR = private
