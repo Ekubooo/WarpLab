@@ -18,6 +18,7 @@ class EntrypointTests(unittest.TestCase):
                                         cwd=ROOT, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("--config", result.stdout)
+                self.assertIn("--scene", result.stdout)
                 self.assertNotIn("Boundary cache", result.stdout)
 
     def test_config_export_and_import_do_not_initialize_cuda(self):

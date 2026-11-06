@@ -1,4 +1,4 @@
-# PBF — minimal static Newton adaptation
+# PBF — minimal Newton adaptation and pressure-coupled rigid bodies
 
 在仓库根目录运行，默认已经激活安装了 Newton 的 Conda 环境：
 
@@ -12,9 +12,17 @@ python -m PBF.render_opengl --particle-radius 0.0125 --substeps 3 --pressure-ite
 python -m PBF.render_opengl --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
 ```
 
+原阶梯兔子场景加入两个盒子与一个球：
+
+```powershell
+python -m PBF.render_opengl --scene stairs-rigids --particle-radius 0.0125 --substeps 3 --pressure-iterations 3 --cuda-graph
+python -m PBF.PBF --scene stairs-rigids --num-frames 30 --stage-path outputs/pbf-newton/stairs-rigids.usd
+```
+
 This independent package starts from `demos/fluid/PBF`, retaining its major
 kernels and `Prologue → Solver → Epilogue` flow. It uses Newton 1.7.0 Model/State
-and SolverBase, with no MuJoCo or dynamic rigid-body coupling in this stage.
+and SolverBase. The optional stairs-rigids scene uses MuJoCo Warp 3.15.0 for
+native rigid contacts and explicit pressure-feedback coupling.
 `tests/pbf/source_manifest.json` (repository root) records the source commit and original file hashes.
 The archived `demos/PBF_Rigid` is not a runtime or test dependency.
 
@@ -59,6 +67,7 @@ python -m PBF.PBF --help
 | --- | --- | --- |
 | `-h`, `--help` | — | 显示帮助并退出 |
 | `--device DEVICE` | Warp 自动选择 | 设备，例如 `cuda:0`；当前体积图路径需要 CUDA |
+| `--scene static\|stairs-rigids` | `static` | 原静态场景，或同规模流体加三个自由刚体；两个入口均支持 |
 | `--num-frames N` | OpenGL：`0`；USD：`480` | OpenGL 的 `0` 表示直到关闭窗口；USD 入口推进 N 帧，`0` 不推进 |
 | `--verbose` | 关闭 | 输出更详细的计时信息 |
 | `--config PATH` | 不加载 JSON | 从指定 JSON 文件读取流体配置 |
@@ -100,10 +109,12 @@ USD 入口 `python -m PBF.PBF` 不支持上面的粒子半径、子步数等 Ope
   advances exactly one substep; no frame clock, renderer or asset discovery.
 - `pbf_helper.py`: original parameter calculations and math, with separate scene,
   model, particle initialization and solver work-buffer helpers.
-- `simulation.py`: static assets, Model/two States, frame loop, Graph, reset and
+- `simulation.py`: scene assembly, Model/two States, frame loop, Graph, reset and
   USD rendering. `render_opengl.py` retains the existing independent frontend.
-- `boundary_model.py`: the original boundary/volume-map implementation, pointed
-  at this package's own `Assets`. Only the static stairs asset is loaded.
+- `boundary_model.py`: SDF/VM loading and caching, shared asset instances,
+  body mapping, local transforms and GPU boundary/COM synchronization.
+- `scene.py`: explicit published stairs collision and three rigid instances.
+  `coupling.py`: one PBF → pressure reaction → MuJoCo substep.
 
 ```text
 Simulation initialization
@@ -129,7 +140,8 @@ motion arrays are read-only. Reorder writes sorted old positions directly into
 `out.particle_q`; reconstruction then updates that buffer and `out.particle_qd`.
 State array bindings stay fixed; slots follow spatial ordering, with no stable ID
 restoration or per-step full-particle copying. `Simulation.state/pos/v` always
-refer to the current State. Read pressure scratch through `simulation.solver`.
+refer to the current State. Read pressure scratch through `simulation.fluid_solver`
+(the same object as `simulation.solver` for the static scene).
 
 Graph capture handles both State and prediction-buffer parities and does not
 advance physical state/time. Replay automatically recaptures after changes to
@@ -148,7 +160,7 @@ Input/output States must be distinct with non-aliasing arrays. The solver update
 only particle positions/velocities, leaving unrelated fields untouched. Complete
 particle reset and gravity notification are supported. Selective reset masks or
 flags, observables, differentiation, generic particle forces and Newton collision
-contacts are outside this static adapter's contract. Unsupported optional reset
+contacts are outside the fluid solver's contract. Unsupported optional reset
 and observable requests fail explicitly. This is not full Newton feature coverage.
 
 Production dependencies on existing demos are limited to the unchanged public
@@ -156,11 +168,55 @@ Production dependencies on existing demos are limited to the unchanged public
 packages alongside this one. Own simulation modules disable backward generation;
 shared and third-party source/configuration is not modified.
 
-Static OBJ/NVDB assets were copied and verified locally. They remain local ignored
+Published assets were copied and verified locally; NVDB files remain local ignored
 resources, following repository conventions. Runtime volume-map refresh may write
 only the new package's NVDB. No offline producer is added in this stage; future
 geometry work must publish/copy explicitly into this package rather than change
 the original demo's resources.
+
+## Rigid scene and coupling
+
+The original 195,525 particles, overlaps, camera and fluid settings are unchanged.
+Two 0.30 m boxes (500/1200 kg/m³) start at `(2.10,1.15,0.55)` and
+`(2.45,1.50,0.55)`; a 0.30 m sphere (750 kg/m³) starts at `(2.45,1.15,1.02)`.
+Both boxes share one SDF/VM and mesh, but have independent bodies and forces.
+Static collision uses 24 aligned boxes plus published bunny convex pieces;
+the original boolean mesh remains the rendered and fluid boundary geometry.
+
+Each coupled substep clears external forces in Simulation, freezes input rigid
+poses during PBF, adds accumulated pressure forces to input `body_f`, advances
+MuJoCo into the same output State, synchronizes boundaries, and swaps States.
+Direct users of the composed solver clear external forces before adding their
+own force inputs; the solver adds reactions without discarding those inputs.
+`Simulation(..., feedback=False)` provides the one-way validation mode.
+
+For each iteration, the reaction is `-mass * boundary_delta_x / dt²`; torque is
+about the world COM at the equivalent boundary point. Reactions sum across all
+pressure iterations. SDF penetration projection, velocity clamping and vorticity
+do not generate compensating forces: this is explicit pressure weak coupling,
+not a claim of strict conservation for the entire simulation.
+
+MuJoCo runs on GPU with native contacts, update interval 1 and sleeping disabled.
+Contact/constraint capacities are 2048/8192. Graph capture preserves the MuJoCo
+Python step counter; replay advances it. Full reset also restores backend history
+and FK. Particle fields and rigid/joint fields have separate solver ownership.
+
+Assets under `Assets/Rigid/stairs_box.*`, `stairs_sphere.*`, and static collision
+attachments are independent copies of the previously verified published assets.
+There is no runtime archive import, geometry baking, CoACD invocation or mass
+integration. The original static OBJ/NVDB were not replaced. Asset/SDF identity,
+convexity and complete tile equality are checked in tests, not per startup.
+Dynamic SDFs have 0.005 m voxels and support `h <= 0.05 m` (`r <= 0.0125 m`).
+Changing particle radius refreshes VM in this package only; exceeding SDF support
+requires offline rebaking and replacing the complete matching published asset.
+This version consumes published assets and does not add a general publisher.
+
+Validation responsibilities: PBFConfig owns parameter types/ranges; JSON owns
+parsing and unknown fields; public asset/precompute entries check inputs once.
+The old mode-based validation context and full GPU tile downloads were removed.
+Runtime neighbor capacity, prefetch bounds, SDF validity and numerical branches
+remain. `_substep` was merged into `_advance_frame`; frame timing stays outside
+the shared physics loop.
 
 ## Verification
 
@@ -169,15 +225,63 @@ python -B -m unittest discover -s tests/pbf -t . -v
 python -B -m tests.pbf.benchmark
 python -B -m tests.pbf.verify_viewer
 python -B -m tests.pbf.verify_integrity
+python -B -m tests.pbf.coupled_lifecycle_case
+python -B -m tests.pbf.verify_coupled --seconds 10
+python -B -m tests.pbf.verify_viewer --scene stairs-rigids --output outputs/pbf-newton/viewer-coupled
 ```
+
+### Current acceptance — 2026-11-06, RTX 5070 / WarpSim
+
+- **17 tests passed**, including isolated pressure, rigid-contact and coupled
+  lifecycle processes. Static 30-substep motion/work arrays/neighbors remain
+  bitwise equal to the independent original demo; input arrays and bindings
+  remain unchanged. The original 1,411 initial overlaps are retained.
+- Twelve contact-state Graph combinations (1/2/3 substeps × State parity ×
+  prediction parity), gravity/slow motion and full reset passed. Capture leaves
+  148 GPU arrays unchanged, including nested MuJoCo contact and warmstart arrays.
+  Backend step count and time reset to zero. Dynamic comparison tolerances are
+  position 2e-5 m, velocity 2e-4, relative 2e-4; pressure wrench uses absolute
+  2e-3, relative 2e-4. Observed particle maxima were 2.41e-7 m and 7.16e-5 m/s.
+  Dynamic particle ordering may change near sorting boundaries, so tests use
+  bijective spatial matching; static regression never does.
+- Controlled tests verify body mapping, translated/rotated assets, local offsets,
+  eccentric COM, reaction impulse/torque, iteration accumulation, dt² scaling,
+  field ownership and preserved caller forces. With identical one-substep inputs,
+  feedback leaves the particle result identical and changes rigid velocity.
+- Free fall and box–box, sphere–box, stairs, wall and bunny contacts passed with
+  actual contact pairs and motion responses; capacities are checked every rigid
+  test substep, not inferred from a successful launch.
+- Full-scale coupled run: **1,500 frames / 10 simulated seconds**, finite sampled
+  particle/rigid states, no detected escape or capacity overflow. Peak contacts
+  **55**, constraints **32**, broadphase pairs **68**. Minimum sampled native
+  contact separation was **−0.01143 m**; this is compliant discrete contact, not
+  a zero-penetration guarantee. Peak sampled pressure force was **7395.15 N**.
+- Static paired CUDA events, 60 samples: original **1178.59 µs**, current
+  **1174.98 µs**, ratio **0.9969**, paired bootstrap 95% interval
+  **[0.9943, 1.0120]**. No regression beyond the 5% target. Full coupled-frame
+  median was **7.516 ms**, excluding the first 60 frames and CPU diagnostics.
+- Both real OpenGL scenes completed 150 frames with first-frame, G/Q/E/X/R/P,
+  paused reset and USD verification; coupled USD contains terrain and all three
+  bodies. Screenshots are in `viewer-static-final/` and `viewer-coupled/`.
+- **210 protected demo/archive files unchanged** against this change's snapshot.
+  The earlier snapshot had two already-changed demo VM caches before this task;
+  normalized SDF identity is unchanged. Formal static OBJ/NVDB were not replaced.
+
+Reports in `outputs/pbf-newton/`: `final-tests.log`, `asset-migration.json`,
+`rigid-collisions.json`, `pressure.json`, `coupled-lifecycle.json`,
+`coupled-trajectory.json`, `performance-coupled-static.json` and `integrity.json`.
+Run GPU timing scripts without other concurrent GPU tests or rendering.
 
 The tests require CUDA and the local published assets. Each numerical test
 process creates only one production solver instance. Test-only reference imports
 read the original demo; its assets are privately copied before loading. Integrity
 verification uses the pre-change demo-tree snapshot at
-`outputs/pbf-newton/demos-before.json` (override with `--baseline`).
+`outputs/pbf-newton/coupling-demos-before.json` (override with `--baseline`).
+Older NVDB whole-file hashes may differ because VM caches are mutable; the
+integrity check compares static SDF payload identity separately and verifies
+the protected demo tree against the snapshot taken before this change.
 
-Validation on RTX 5070 / WarpSim, 2026-11-05:
+Historical static-adapter validation on RTX 5070 / WarpSim, 2026-11-05:
 
 - Six full-scale numerical/lifecycle tests and two CLI tests passed. Motion,
   prediction, pressure/velocity scratch and neighbor counts match the original

@@ -71,7 +71,8 @@ def verify_pair(reference, current, steps=30):
         state_in = current.state
         positions, velocities = state_in.particle_q.numpy(), state_in.particle_qd.numpy()
         reference.step()
-        current._substep(reference.dt)
+        current.solver.step(current.state, current.state_out, None, None, reference.dt)
+        current._state_index = 1 - current._state_index
         compare_step(reference, current)
         np.testing.assert_array_equal(state_in.particle_q.numpy(), positions)
         np.testing.assert_array_equal(state_in.particle_qd.numpy(), velocities)

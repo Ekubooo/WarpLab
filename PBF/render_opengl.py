@@ -37,17 +37,34 @@ def load_static_scene(boundary_system):
     if instance is None:
         raise ValueError("Static rendering requires a static boundary instance")
     path = boundary_system.assets[instance.asset_id].mesh_path
-    if not path.is_file():
-        raise FileNotFoundError(f"Static scene not found: {path}; generate the container assets first")
-    try:
-        import trimesh
-
-        mesh = trimesh.load(path, force="mesh", process=False)
-        if not isinstance(mesh, trimesh.Trimesh) or mesh.is_empty or not np.isfinite(mesh.vertices).all():
-            raise ValueError("Static scene must contain a nonempty, finite triangle mesh")
-    except Exception as error:
-        raise RuntimeError(f"Cannot load static scene {path}: {error}") from error
+    import trimesh
+    mesh = trimesh.load(path, force="mesh", process=False)
     return mesh.vertices, mesh.faces
+
+
+def register_rigid_meshes(renderer, simulation):
+    """Upload each asset once, with independent body instances driven on GPU."""
+    from PBF.scene import load_render_meshes
+    boundaries = simulation.BoundarySys
+    meshes = load_render_meshes(boundaries)
+    data = boundaries.device_data
+    body_ids, local = data.body_ids.numpy(), data.local_transforms.numpy()
+    bodies = [renderer.register_body(f"body_{i}") for i in range(simulation.model.body_count)]
+    shapes = {}
+    color = (.85, .45, .15)
+    for index, instance in enumerate(boundaries.instances):
+        if not instance.is_dynamic:
+            continue
+        body = int(body_ids[instance.rigid_id])
+        pose = local[instance.rigid_id]
+        name = f"rigid_{index}"
+        if instance.asset_id not in shapes:
+            shapes[instance.asset_id] = renderer.render_mesh(name, *meshes[index],
+                colors=color, pos=tuple(pose[:3]), rot=tuple(pose[3:]),
+                parent_body=f"body_{body}", smooth_shading=False)
+        else:
+            renderer.add_shape_instance(name, shapes[instance.asset_id], bodies[body],
+                tuple(pose[:3]), tuple(pose[3:]), color1=color, color2=color)
 
 
 class PBFRenderer(BillboardRenderer):
@@ -55,6 +72,7 @@ class PBFRenderer(BillboardRenderer):
 
     def __init__(self, *args, particle_positions: wp.array | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.body_transforms = None
         # Snapshot the initialized array's host metadata without retaining its buffer.
         self._particle_count = None if particle_positions is None else len(particle_positions)
         self._particle_count_label = None
@@ -117,6 +135,8 @@ class PBFRenderer(BillboardRenderer):
             self.allocate_shape_instances()
         if self._update_shape_instances:
             self.update_shape_instances()
+        if self.body_transforms is not None:
+            self.update_body_transforms(self.body_transforms)
         self.update()
 
     def update(self):
@@ -262,6 +282,8 @@ def config_from_args(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--scene", choices=("static", "stairs-rigids"), default="static",
+                        help="Original static stairs or pressure-coupled free rigid bodies.")
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
         "--num-frames",
@@ -367,7 +389,7 @@ def main():
 
     with wp.ScopedDevice(args.device):
         simulation = create_pbf_simulation(
-            verbose=args.verbose, config=args.config,
+            verbose=args.verbose, config=args.config, scene=args.scene,
         )
         scene_points, scene_indices = load_static_scene(simulation.BoundarySys)
         # Focus on the fluid near the floor; distance follows the container footprint.
@@ -415,6 +437,8 @@ def main():
             register_keyboard_controls(
                 renderer, simulation, on_reset=request_reset,
             )
+            if simulation.is_coupled:
+                register_rigid_meshes(renderer, simulation)
             while renderer.is_running() and (args.num_frames == 0 or frame < args.num_frames):
                 if reset_requested:
                     reset_simulation(simulation)
@@ -422,6 +446,7 @@ def main():
                     renderer.paused = True
                 # Render first so the initialized PBF particles are visible.
                 renderer.begin_frame(simulation.sim_time)
+                renderer.body_transforms = simulation.state.body_q
                 renderer.render_billboards(
                     name="points",
                     points=simulation.pos,

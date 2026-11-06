@@ -7,12 +7,14 @@ wp.set_module_options({"enable_backward": False})
 if __package__:
     from . import pbf_helper as fn
     from . import config_io
+    from . import boundary_model as boundary
 else:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from PBF import pbf_helper as fn
     from PBF import config_io
+    from PBF import boundary_model as boundary
 
 @wp.kernel
 def apply_predict(
@@ -56,6 +58,7 @@ def cache_neighbors(
 @wp.kernel
 def volume_query(
     pre_Pos: wp.array[wp.vec3],
+    boundaries: boundary.BoundaryCouplingData,
     volume_Rho: wp.array[float],
     volume_Grad: wp.array[wp.vec3]
 ):
@@ -73,6 +76,16 @@ def volume_query(
         boundaryOffset = dirVM * projDst
         volumeRho = vmapValue * fn.Rho_0 * fn.Poly6(wp.vec3(0.0), boundaryOffset)
         gradVMap = vmapValue * fn.GradPow3(wp.vec3(0.0), boundaryOffset)
+
+    for rigid in range(Rigid_Count):
+        instance = boundaries.instances.rigid_instance_ids[rigid]
+        valid, distance, direction = boundary.query_instance_boundary(
+            boundaries.instances, instance, currPos, fn.Smoothing_Radius)
+        if valid:
+            volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
+            offset = direction * distance
+            volumeRho += volume * fn.Rho_0 * fn.Poly6(wp.vec3(0.0), offset)
+            gradVMap += volume * fn.GradPow3(wp.vec3(0.0), offset)
 
     volume_Rho[i] = volumeRho
     volume_Grad[i] = gradVMap
@@ -133,6 +146,8 @@ def calc_deltaPos(
     lambda_Opt: wp.array[float],
     Neighbor: fn.NeighborCache,
     volume_Grad: wp.array[wp.vec3],
+    dt: float,
+    boundaries: boundary.BoundaryCouplingData,
     delta_Pos: wp.array[wp.vec3]
 ):
     i = wp.tid()
@@ -176,16 +191,39 @@ def calc_deltaPos(
     delta_boundary = -lambda_i * volume_Grad[i]
     delta_Pos[i] = delta_Movement * pressure_scale + delta_boundary
 
+    # Each pressure correction contributes -m*delta_x/dt^2 to its rigid body.
+    # Requery each contribution; no particle-by-body cache is needed.
+    for rigid in range(Rigid_Count):
+        instance = boundaries.instances.rigid_instance_ids[rigid]
+        valid, distance, direction = boundary.query_instance_boundary(
+            boundaries.instances, instance, currPos, fn.Smoothing_Radius)
+        if valid:
+            volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
+            offset = direction * distance
+            grad = volume * fn.GradPow3(wp.vec3(0.0), offset)
+            force = (fn.Fluid_Mass * lambda_i / (dt * dt)) * grad
+            arm = currPos + offset - boundaries.instances.world_com[rigid]
+            wrench = wp.spatial_vector(force, wp.cross(arm, force))
+            wp.atomic_add(boundaries.forces, boundaries.instances.body_ids[rigid], wrench)
+
 
 @wp.kernel
 def update_prePos(
     delta_Pos: wp.array[wp.vec3],
+    boundaries: boundary.BoundaryCouplingData,
     pre_Pos: wp.array[wp.vec3]
 ):
     # can this kernel fusion into last kernel?
     tid = wp.tid()
     currPos = delta_Pos[tid] + pre_Pos[tid]
-    pre_Pos[tid] = fn.apply_SDF(SDF_id, currPos, fn.Particle_Radius)
+    currPos = fn.apply_SDF(SDF_id, currPos, fn.Particle_Radius)
+    # Penetration projection remains a numerical correction without feedback.
+    for rigid in range(Rigid_Count):
+        instance = boundaries.instances.rigid_instance_ids[rigid]
+        valid, distance, normal = boundary.query_instance_normal(boundaries.instances, instance, currPos)
+        if valid and distance < fn.Particle_Radius:
+            currPos += normal * (fn.Particle_Radius - distance)
+    pre_Pos[tid] = currPos
 
 @wp.kernel
 def update_position(
@@ -345,9 +383,14 @@ class PBF(SolverBase):
         self.BoundarySys = boundaries
         self.static_sdf = boundaries.assets[0].sdf
         self.volume_map = boundaries.assets[0].volume_map
-        global SDF_id, VMAP_id
+        self.boundary_forces = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device)
+        self.boundary_data = boundary.BoundaryCouplingData()
+        self.boundary_data.instances = boundaries.device_data
+        self.boundary_data.forces = self.boundary_forces
+        global SDF_id, VMAP_id, Rigid_Count
         SDF_id = wp.constant(wp.uint64(self.static_sdf.id))
         VMAP_id = wp.constant(wp.uint64(self.volume_map.id))
+        Rigid_Count = wp.constant(boundaries.rigid_count)
 
     def step(self, state_in, state_out, control, contacts, dt, *, observables=None):
         if state_in is state_out:
@@ -381,7 +424,7 @@ class PBF(SolverBase):
                     wp.launch(
                         kernel=volume_query,
                         dim=self.n,
-                        inputs=[self.pre_Pos],
+                        inputs=[self.pre_Pos, self.boundary_data],
                         outputs=[self.volume_Rho, self.volume_Grad]
                     )
                     wp.launch(
@@ -402,14 +445,16 @@ class PBF(SolverBase):
                             self.pre_Pos, 
                             self.lambda_Opt,
                             self.n_Cache,
-                            self.volume_Grad
+                            self.volume_Grad,
+                            dt,
+                            self.boundary_data
                         ],
                         outputs=[self.delta_Pos]
                     )
                     wp.launch(
                         kernel=update_prePos, 
                         dim=self.n,
-                        inputs=[self.delta_Pos],
+                        inputs=[self.delta_Pos, self.boundary_data],
                         outputs=[self.pre_Pos]
                     )
 
@@ -457,6 +502,7 @@ class PBF(SolverBase):
             wp.copy(state.particle_q, self.model.particle_q)
             wp.copy(state.particle_qd, self.model.particle_qd)
             fn.clear_work_buffers(self)
+            self.boundary_forces.zero_()
 
     def notify_model_changed(self, flags):
         if flags & newton.ModelFlags.MODEL_PROPERTIES:
@@ -468,6 +514,8 @@ def parse_args(argv=None):
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
+    parser.add_argument("--scene", choices=("static", "stairs-rigids"), default="static",
+                        help="Keep the original static scene or add three coupled rigid bodies.")
     parser.add_argument(
         "--stage-path",
         type=lambda x: None if x == "None" else str(x),
@@ -522,7 +570,7 @@ def main():
     with wp.ScopedDevice(args.device):
         example = Simulation(
             stage_path=args.stage_path, verbose=args.verbose,
-            config=args.config,
+            config=args.config, scene=args.scene,
         )
 
         for _ in range(args.num_frames):

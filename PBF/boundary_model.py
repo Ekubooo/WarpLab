@@ -5,12 +5,10 @@ poses. This module owns boundary resources, not rigid-body dynamics or rendering
 """
 
 from collections.abc import Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 import math
 from numbers import Integral
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
@@ -96,8 +94,19 @@ class BoundaryDeviceData:
     rigid_ids: wp.array(dtype=int)
     transforms: wp.array(dtype=wp.transform)
     rigid_instance_ids: wp.array(dtype=int)
+    body_ids: wp.array(dtype=int)
+    local_transforms: wp.array(dtype=wp.transform)
+    world_com: wp.array(dtype=wp.vec3)
     count: int
     rigid_count: int
+
+
+@wp.struct
+class BoundaryCouplingData:
+    """Boundary queries and solver-owned body-indexed pressure wrenches."""
+
+    instances: BoundaryDeviceData
+    forces: wp.array(dtype=wp.spatial_vector)
 
 
 @wp.func
@@ -136,6 +145,25 @@ def sample_instance_volume(data: BoundaryDeviceData, instance_id: int, position:
     return wp.volume_sample_f(volume_id, index, wp.Volume.LINEAR)
 
 
+@wp.func
+def query_instance_normal(data: BoundaryDeviceData, instance_id: int, position: wp.vec3):
+    distance, gradient = sample_instance_sdf(data, instance_id, position)
+    length_squared = wp.dot(gradient, gradient)
+    if not wp.isfinite(distance) or not wp.isfinite(length_squared) or length_squared <= 1.0e-12:
+        return False, 0.0, wp.vec3(0.0)
+    return True, distance, gradient / wp.sqrt(length_squared)
+
+
+@wp.func
+def query_instance_boundary(data: BoundaryDeviceData, instance_id: int,
+                            position: wp.vec3, support_radius: float):
+    valid, distance, normal = query_instance_normal(data, instance_id, position)
+    if not valid or distance <= 0.0 or distance >= support_radius:
+        return False, 0.0, wp.vec3(0.0)
+    pressure_distance = wp.max(distance + 0.125 * support_radius, 0.5 * support_radius)
+    return True, pressure_distance, -normal
+
+
 # =============================================================================
 # 4. Instance management and pose updates
 # BoundarySystem owns resources and fixed-size device buffers, updates rigid
@@ -147,6 +175,16 @@ def _set_rigid_poses(poses: wp.array(dtype=wp.transform), instance_ids: wp.array
                      transforms: wp.array(dtype=wp.transform)):
     i = wp.tid()
     transforms[instance_ids[i]] = poses[i]
+
+
+@wp.kernel
+def _sync_body_poses(data: BoundaryDeviceData, body_q: wp.array(dtype=wp.transform),
+                     body_com: wp.array(dtype=wp.vec3)):
+    rigid = wp.tid()
+    body = data.body_ids[rigid]
+    transform = body_q[body]
+    data.transforms[data.rigid_instance_ids[rigid]] = transform * data.local_transforms[rigid]
+    data.world_com[rigid] = wp.transform_point(transform, body_com[body])
 
 
 class BoundarySystem:
@@ -172,11 +210,49 @@ class BoundarySystem:
         data.asset_ids = wp.array([i.asset_id for i in self.instances], dtype=int, device=self.device)
         data.rigid_ids = wp.array([i.rigid_id for i in self.instances], dtype=int, device=self.device)
         data.rigid_instance_ids = wp.array(rigid_indices, dtype=int, device=self.device)
+        data.body_ids = wp.full(self.rigid_count, -1, dtype=int, device=self.device)
+        data.local_transforms = wp.empty(self.rigid_count, dtype=wp.transform, device=self.device)
+        data.local_transforms.fill_(wp.transform_identity())
+        data.world_com = wp.zeros(self.rigid_count, dtype=wp.vec3, device=self.device)
         data.transforms = wp.empty(len(self.instances), dtype=wp.transform, device=self.device)
         data.count = len(self.instances)
         data.rigid_count = self.rigid_count
         self.device_data = data
+        self.bound_model = None
         self.reset()
+
+    def bind_bodies(self, model, body_ids, local_transforms=None):
+        """Bind asset instances to Newton bodies once during scene assembly.
+
+        Inputs follow internal rigid order; transforms map asset to body local
+        coordinates. COM may differ from both origins. Per-step sync trusts this
+        mapping and never scans or reallocates the device arrays.
+        """
+        ids = np.asarray(body_ids)
+        if (ids.shape != (self.rigid_count,) or not np.issubdtype(ids.dtype, np.integer)
+                or np.any(ids < 0) or np.any(ids >= model.body_count)):
+            raise ValueError(f"Expected {self.rigid_count} valid integer Newton body IDs")
+        if model.device != self.device:
+            raise ValueError("Boundary and Newton model devices must match")
+        if self.bound_model is not None:
+            raise ValueError("Boundary bodies are already bound")
+        if local_transforms is not None:
+            values = local_transforms.numpy() if isinstance(local_transforms, wp.array) else local_transforms
+            values = np.array(values, dtype=np.float32, copy=True)
+            if values.shape != (self.rigid_count, 7) or not np.isfinite(values).all():
+                raise ValueError(f"Expected finite asset-to-body transforms with shape ({self.rigid_count}, 7)")
+            norms = np.linalg.norm(values[:, 3:].astype(np.float64), axis=1)
+            if np.any(norms == 0):
+                raise ValueError("Asset-to-body quaternions must be nonzero")
+            values[:, 3:] /= norms[:, None]
+            self.device_data.local_transforms.assign(values)
+        self.device_data.body_ids.assign(ids.astype(np.int32))
+        self.bound_model = model
+
+    def sync_body_poses(self, state):
+        """Use the assembly-time mapping to update boundary poses and world COM."""
+        wp.launch(_sync_body_poses, self.rigid_count,
+            inputs=[self.device_data, state.body_q, self.bound_model.body_com], device=self.device)
 
     def set_rigid_poses(self, poses):
         """Update by internal rigid order, preserving every static transform.
@@ -216,82 +292,19 @@ class BoundarySystem:
 # OBJ/NVDB pairs, and determine instance counts before loading.
 # =============================================================================
 
-@contextmanager
-def validate_boundary(
-    mode, *, filename=None, path=None, device=None, sdf=None,
-    support_radius=None, quadrature_points=None,
-):
-    """Check a function's inputs and results through one context-manager call.
-
-    Filename mode yields the name; precompute yields the allocated tile count.
-    Load mode yields a state with the resolved device: assign its ``sdf`` in
-    the body. Quadrature mode yields a state: assign ``offsets`` and
-    ``volume_weights`` in the body. These results are checked on normal exit,
-    including when the body returns. Loading errors retain their path context.
-    """
-    if mode == "filename":
-        if (not isinstance(filename, str) or not filename.strip()
-                or any(character in filename for character in "/\\:\x00")
-                or Path(filename).name != filename
-                or Path(filename).suffix.lower() != ".nvdb"):
-            raise ValueError("SDF must be a bare .nvdb filename without a directory or drive")
-        yield filename
-        return
-
-    if mode == "load":
-        if path is None:
-            raise ValueError("load validation requires a path")
-        if not path.is_file():
-            raise FileNotFoundError(f"Static SDF not found: {path}; generate it with python -m demos.sim_Ready first")
-        selected = wp.get_device(device)
-        if not selected.is_cuda:
-            raise ValueError(f"Static NanoVDB SDF loading requires a CUDA device: {path}")
-        state = SimpleNamespace(device=selected, sdf=None)
-        try:
-            yield state
-            if state.sdf is None:
-                raise TypeError("sdf must be a wp.Volume")
-            if state.sdf.dtype != wp.float32 or state.sdf.is_index:
-                raise ValueError("Static SDF must be a float32 scalar distance grid")
-            wp.synchronize_device(selected)
-        except Exception as error:
-            raise RuntimeError(f"Cannot load static SDF {path}: {error}") from error
-        return
-
-    if mode in ("quadrature", "precompute"):
-        if support_radius is None or not math.isfinite(support_radius) or support_radius <= 0:
-            raise ValueError("support_radius must be finite and positive")
-        if (isinstance(quadrature_points, bool)
-                or not isinstance(quadrature_points, Integral) or quadrature_points < 1):
-            raise ValueError("quadrature_points must be a positive integer")
-
-    if mode == "quadrature":
-        state = SimpleNamespace(offsets=None, volume_weights=None)
-        yield state
-        if state.offsets is None or state.volume_weights is None:
-            raise ValueError("quadrature validation requires offsets and volume_weights")
-        if (not np.isfinite(state.offsets).all() or not np.isfinite(state.volume_weights).all()
-                or np.any(state.volume_weights <= 0)):
-            raise ValueError("Quadrature offsets and weights must be representable as positive finite float32 weights")
-        return
-
-    if mode != "precompute":
-        raise ValueError(f"Unknown boundary validation mode: {mode}")
-    if not isinstance(sdf, wp.Volume):
-        raise TypeError("sdf must be a wp.Volume")
-    if not sdf.device.is_cuda:
-        raise ValueError("Volume-map precomputation requires a CUDA SDF")
-    if sdf.dtype != wp.float32 or sdf.is_index:
-        raise ValueError("SDF must be a float32 scalar distance grid")
-    tile_count = sdf.get_tile_count()
-    if tile_count == 0:
-        raise ValueError("SDF must have at least one allocated tile")
-    yield tile_count
+def _check_volume_options(support_radius, quadrature_points):
+    if not math.isfinite(support_radius) or support_radius <= 0:
+        raise ValueError("support_radius must be finite and positive")
+    if isinstance(quadrature_points, bool) or not isinstance(quadrature_points, Integral) or quadrature_points < 1:
+        raise ValueError("quadrature_points must be a positive integer")
 
 
 def resolve_sdf_path(filename):
-    with validate_boundary("filename", filename=filename) as name:
-        return (Path(ASSET_DIR) / name).resolve()
+    if (not isinstance(filename, str) or not filename.strip()
+            or any(character in filename for character in "/\\:\x00")
+            or Path(filename).suffix.lower() != ".nvdb"):
+        raise ValueError("SDF must be a bare .nvdb filename without a directory or drive")
+    return (Path(ASSET_DIR) / filename).resolve()
 
 
 def resolve_scene_path(filename):
@@ -365,16 +378,16 @@ def _build_volume_quadrature(support_radius, quadrature_points):
     not the polynomial order. The cube-to-ball cutoff is deliberately not
     renormalized, matching SPlisHSPlasH's volume-map quadrature.
     """
-    with validate_boundary(
-        "quadrature", support_radius=support_radius, quadrature_points=quadrature_points,
-    ) as checked:
-        nodes, weights = np.polynomial.legendre.leggauss(int(quadrature_points))
-        points = np.stack(np.meshgrid(nodes, nodes, nodes, indexing="ij"), axis=-1).reshape(-1, 3)
-        products = (weights[:, None, None] * weights[None, :, None] * weights[None, None, :]).reshape(-1)
-        inside = np.sum(points * points, axis=1) <= 1.0
-        checked.offsets = np.asarray(points[inside] * support_radius, dtype=np.float32)
-        checked.volume_weights = np.asarray(products[inside] * support_radius**3, dtype=np.float32)
-        return checked.offsets, checked.volume_weights
+    nodes, weights = np.polynomial.legendre.leggauss(int(quadrature_points))
+    points = np.stack(np.meshgrid(nodes, nodes, nodes, indexing="ij"), axis=-1).reshape(-1, 3)
+    products = (weights[:, None, None] * weights[None, :, None] * weights[None, None, :]).reshape(-1)
+    inside = np.sum(points * points, axis=1) <= 1.0
+    offsets = np.asarray(points[inside] * support_radius, dtype=np.float32)
+    volume_weights = np.asarray(products[inside] * support_radius**3, dtype=np.float32)
+    if (not np.isfinite(offsets).all() or not np.isfinite(volume_weights).all()
+            or np.any(volume_weights <= 0)):
+        raise ValueError("Quadrature offsets and weights must be representable as positive finite float32 weights")
+    return offsets, volume_weights
 
 
 @wp.func
@@ -430,29 +443,41 @@ def precompute_volumeMap(
     ball plus the trilinear interpolation stencil at each queried map node.
     No mesh reconstruction, padding, file IO, or solver integration is done.
     """
-    with validate_boundary(
-        "precompute", sdf=sdf, support_radius=support_radius, quadrature_points=quadrature_points,
-    ) as tile_count:
-        offsets, volume_weights = _build_volume_quadrature(support_radius, quadrature_points)
+    _check_volume_options(support_radius, quadrature_points)
+    if not isinstance(sdf, wp.Volume):
+        raise TypeError("sdf must be a wp.Volume")
+    if not sdf.device.is_cuda:
+        raise ValueError("Volume-map precomputation requires a CUDA SDF")
+    if sdf.dtype != wp.float32 or sdf.is_index:
+        raise ValueError("SDF must be a float32 scalar distance grid")
+    return _precompute_volume_map(sdf, support_radius, quadrature_points)
 
-        device = sdf.device
-        tiles = wp.empty(tile_count, dtype=wp.vec3i, device=device)
-        sdf.get_tiles(out=tiles)
-        info = sdf.get_grid_info()
-        volume_map = wp.Volume.allocate_by_tiles(
-            tiles, transform=info.transform_matrix, translation=info.translation,
-            bg_value=0.0, device=device,
-        )
-        gpu_offsets = wp.array(offsets, dtype=wp.vec3, device=device)
-        gpu_weights = wp.array(volume_weights, dtype=float, device=device)
-        wp.launch(
-            precompute_VM,
-            dim=tile_count * 512,
-            inputs=[sdf.id, volume_map.id, tiles, gpu_offsets, gpu_weights, float(support_radius)],
-            device=device,
-        )
-        wp.synchronize_device(device)
-        return volume_map
+
+def _precompute_volume_map(sdf, support_radius, quadrature_points):
+    # Loading and the standalone entry point have already checked the inputs.
+    tile_count = sdf.get_tile_count()
+    if tile_count == 0:
+        raise ValueError("SDF must have at least one allocated tile")
+    offsets, volume_weights = _build_volume_quadrature(support_radius, quadrature_points)
+
+    device = sdf.device
+    tiles = wp.empty(tile_count, dtype=wp.vec3i, device=device)
+    sdf.get_tiles(out=tiles)
+    info = sdf.get_grid_info()
+    volume_map = wp.Volume.allocate_by_tiles(
+        tiles, transform=info.transform_matrix, translation=info.translation,
+        bg_value=0.0, device=device,
+    )
+    gpu_offsets = wp.array(offsets, dtype=wp.vec3, device=device)
+    gpu_weights = wp.array(volume_weights, dtype=float, device=device)
+    wp.launch(
+        precompute_VM,
+        dim=tile_count * 512,
+        inputs=[sdf.id, volume_map.id, tiles, gpu_offsets, gpu_weights, float(support_radius)],
+        device=device,
+    )
+    wp.synchronize_device(device)
+    return volume_map
 
 
 # =============================================================================
@@ -478,10 +503,14 @@ def load_static_sdf(filename, *, device=None) -> wp.Volume:
     This startup operation neither reads an OBJ nor invokes the offline baker.
     """
     path = resolve_sdf_path(filename)
-    with validate_boundary("load", path=path, device=device) as checked:
-        with path.open("rb") as stream:
-            volume = wp.Volume.load_from_nvdb(stream, device=checked.device)
-        checked.sdf = volume
+    selected = wp.get_device(device)
+    if not selected.is_cuda:
+        raise ValueError("Static NanoVDB SDF loading requires a CUDA device")
+    with path.open("rb") as stream:
+        volume = wp.Volume.load_from_nvdb(stream, device=selected)
+    if volume.dtype != wp.float32 or volume.is_index:
+        raise ValueError("Static SDF must be a float32 scalar distance grid")
+    wp.synchronize_device(selected)
     print(f"Static SDF loaded: {path} (voxel size {volume.get_voxel_size()[0]:g} m)")
 
     return volume
@@ -538,9 +567,8 @@ def _check_volume_map_layout(sdf, volume_map):
     a, b = sdf.get_grid_info(), volume_map.get_grid_info()
     if (not np.array_equal(a.transform_matrix, b.transform_matrix)
             or not np.array_equal(a.translation, b.translation)
-            or sdf.get_tile_count() != volume_map.get_tile_count()
-            or not np.array_equal(sdf.get_tiles().numpy(), volume_map.get_tiles().numpy())):
-        raise ValueError("Volume map coordinate transform or allocated tiles differ from SDF")
+            or sdf.get_tile_count() != volume_map.get_tile_count()):
+        raise ValueError("Volume map coordinate transform or tile count differs from SDF")
 
 
 def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=None):
@@ -549,17 +577,14 @@ def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=
     Only the selected NVDB is updated. Geometry baking and asset publication
     remain the responsibility of sim_Ready's standalone pipeline.
     """
-    path = Path(path).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"Static SDF not found: {path}; generate it with python -m demos.sim_Ready first")
-    if not math.isfinite(support_radius) or support_radius <= 0:
-        raise ValueError("support_radius must be finite and positive")
-    if (isinstance(quadrature_points, bool) or not isinstance(quadrature_points, Integral)
-            or quadrature_points < 1):
-        raise ValueError("quadrature_points must be a positive integer")
+    _check_volume_options(support_radius, quadrature_points)
     selected = wp.get_device(device)
     if not selected.is_cuda:
-        raise ValueError(f"Static NanoVDB boundary loading requires a CUDA device: {path}")
+        raise ValueError("Static NanoVDB boundary loading requires a CUDA device")
+    return _load_boundary_volumes(Path(path).expanduser().resolve(), support_radius, quadrature_points, selected)
+
+
+def _load_boundary_volumes(path, support_radius, quadrature_points, selected):
     expected = _volume_map_name(support_radius, quadrature_points)
     try:
         sdf, volume_map = _read_boundary_volumes(path, selected)
@@ -570,7 +595,7 @@ def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=
             return sdf, volume_map
         print(f"Boundary cache rebuild: {path} (h={support_radius:g} m, q={quadrature_points})")
         volume_map = None
-        volume_map = precompute_volumeMap(sdf, support_radius, quadrature_points=quadrature_points)
+        volume_map = _precompute_volume_map(sdf, support_radius, quadrature_points)
         _nvdb_io().save_volumes(
             (sdf, volume_map), path, grid_names=(sdf.get_grid_info().name, expected),
         )
@@ -580,7 +605,6 @@ def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=
         sdf, volume_map = _read_boundary_volumes(path, selected)
         if volume_map is None or volume_map.get_grid_info().name != expected:
             raise ValueError("Saved boundary cache metadata does not match requested parameters")
-        _check_sdf_support(sdf, support_radius)
         _check_volume_map_layout(sdf, volume_map)
         return sdf, volume_map
     except Exception as error:
@@ -600,11 +624,7 @@ def load_boundaries(scene: BoundaryScene, options: BoundaryLoadOptions) -> Bound
     empty rigid directory is valid. Geometry is not loaded or baked here.
     """
     requests = _resolve_boundary_requests(scene)
-    if not math.isfinite(options.support_radius) or options.support_radius <= 0:
-        raise ValueError("support_radius must be finite and positive")
-    if (isinstance(options.quadrature_points, bool) or not isinstance(options.quadrature_points, Integral)
-            or options.quadrature_points < 1):
-        raise ValueError("quadrature_points must be a positive integer")
+    _check_volume_options(options.support_radius, options.quadrature_points)
     device = wp.get_device(options.device)
     if not device.is_cuda:
         raise ValueError("Boundary Volume loading requires a CUDA device")
@@ -612,9 +632,8 @@ def load_boundaries(scene: BoundaryScene, options: BoundaryLoadOptions) -> Bound
     rigid_id = 0
     for request in requests:
         if request.path not in asset_ids:
-            sdf, volume_map = load_boundary_volumes(
-                request.path, options.support_radius,
-                quadrature_points=options.quadrature_points, device=device,
+            sdf, volume_map = _load_boundary_volumes(
+                request.path, options.support_radius, options.quadrature_points, device,
             )
             asset_ids[request.path] = len(assets)
             assets.append(BoundaryAsset(request.path, request.mesh_path, sdf, volume_map))

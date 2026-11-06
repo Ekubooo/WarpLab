@@ -6,6 +6,7 @@ for one fixed configuration per process.
 """
 
 from dataclasses import dataclass
+from numbers import Real
 
 import numpy as np
 import warp as wp
@@ -47,7 +48,7 @@ class PBFConfig:
             "particle_radius", "rest_density", "frame_dt", "lambda_regularization", "max_speed"
         ):
             value = getattr(self, name)
-            if not np.isfinite(value) or value <= 0:
+            if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         for name in ("substeps", "pressure_iterations"):
             value = getattr(self, name)
@@ -55,13 +56,16 @@ class PBFConfig:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("viscosity", "vorticity_confinement", "artificial_pressure_strength"):
             value = getattr(self, name)
-            if not np.isfinite(value) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
-        if not np.isfinite(self.artificial_pressure_q) or not 0 < self.artificial_pressure_q < 1:
+        q = self.artificial_pressure_q
+        if isinstance(q, bool) or not isinstance(q, Real) or not np.isfinite(q) or not 0 < q < 1:
             raise ValueError("artificial_pressure_q must be finite and in (0, 1)")
         for name in ("container_size", "block_start", "block_end", "initial_velocity", "gravity"):
-            value = np.asarray(getattr(self, name), dtype=float)
-            if value.shape != (3,) or not np.isfinite(value).all():
+            components = getattr(self, name)
+            value = np.asarray(components)
+            if (value.shape != (3,) or value.dtype.kind not in "iuf" or not np.isfinite(value).all()
+                    or any(isinstance(item, (bool, np.bool_)) for item in components)):
                 raise ValueError(f"{name} must contain three finite components")
         size = np.asarray(self.container_size)
         start = np.asarray(self.block_start)
@@ -117,16 +121,10 @@ def compute_hash_grid_dims(container_min, container_max, cell_width):
     lower = np.asarray(container_min, dtype=np.float32)
     upper = np.asarray(container_max, dtype=np.float32)
     width = np.float32(cell_width)
-    if (
-        lower.shape != (3,)
-        or upper.shape != (3,)
-        or not np.isfinite(lower).all()
-        or not np.isfinite(upper).all()
-        or not np.isfinite(width)
-        or width <= 0
-        or np.any(upper <= lower)
-    ):
-        raise ValueError("Hash grid bounds and cell width must be finite and valid")
+    # PBFConfig checks dimensions/ranges; float32 conversion can still overflow
+    # or underflow, unlike the original Python values.
+    if not np.isfinite(upper).all() or not np.isfinite(width) or width == 0:
+        raise ValueError("Hash grid dimensions must be representable in float32")
 
     query_min = np.floor((lower - width) / width).astype(np.int64)
     query_max = np.floor((upper + width) / width).astype(np.int64)
@@ -256,10 +254,11 @@ def init_device_buffers(sim):
     GRID_id = wp.constant(wp.uint64(sim.grid.id))
 
 
-def init_model(sim):
+def init_model(sim, builder=None):
     """Newton allocates particle storage; the original GPU kernel sets positions."""
     import newton
-    builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+    if builder is None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
     builder.gravity = tuple(sim.config.gravity)
     mass = 0.8 * sim.particle_spacing**3 * sim.config.rest_density
     builder.add_particles(pos=[(0.0, 0.0, 0.0)] * sim.n,

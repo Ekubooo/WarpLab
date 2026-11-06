@@ -29,21 +29,8 @@ def load_config(path):
     for field in config_fields:
         if field.name not in data:
             continue
-        value = data[field.name]
-        if isinstance(field.default, tuple):
-            if not isinstance(value, list) or any(
-                isinstance(item, bool) or not isinstance(item, (int, float)) for item in value
-            ):
-                raise ValueError(f"{field.name} must be a numeric JSON array")
-            data[field.name] = tuple(value)
-        elif isinstance(field.default, bool):
-            if not isinstance(value, bool):
-                raise ValueError(f"{field.name} must be a bool")
-        elif isinstance(field.default, int):
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"{field.name} must be an integer")
-        elif isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"{field.name} must be a number")
+        if isinstance(field.default, tuple) and isinstance(data[field.name], list):
+            data[field.name] = tuple(data[field.name])
     return PBFConfig(**data)
 
 

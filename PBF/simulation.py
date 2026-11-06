@@ -6,27 +6,52 @@ from . import boundary_model
 
 
 class Simulation:
-    def __init__(self, stage_path=None, verbose=False, config=None):
+    def __init__(self, stage_path=None, verbose=False, config=None, scene="static", feedback=True):
         from .PBF import PBF
 
         self.config = config if config is not None else fn.PBFConfig()
         self.verbose = verbose
         self.sim_time = 0.0
+        self.scene = scene
         fn.init_scene_parameters(self)
-        self.BoundarySys = boundary_model.load_boundaries(
-            boundary_model.BoundaryScene(static_assets=(boundary_model.SDF_FILENAME,), default_rigid_count=0),
-            boundary_model.BoundaryLoadOptions(self.smoothing_length, device=wp.get_device()),
-        )
-        self.model = fn.init_model(self)
-        self.solver = PBF(self.model, config=self.config, boundaries=self.BoundarySys, verbose=verbose)
+        if scene == "static":
+            self.BoundarySys = boundary_model.load_boundaries(
+                boundary_model.BoundaryScene(static_assets=(boundary_model.SDF_FILENAME,), default_rigid_count=0),
+                boundary_model.BoundaryLoadOptions(self.smoothing_length, device=wp.get_device()),
+            )
+            self.model = fn.init_model(self)
+        elif scene == "stairs-rigids":
+            import newton
+            from .scene import load_rigid_assets, add_rigid_scene, load_rigid_boundaries
+            assets = load_rigid_assets()
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+            bodies = add_rigid_scene(builder, assets)
+            self.model = fn.init_model(self, builder=builder)
+            self.BoundarySys = load_rigid_boundaries(assets, self.smoothing_length, self.model.device)
+            self.BoundarySys.bind_bodies(self.model, bodies)
+        else:
+            raise ValueError(f"Unknown PBF scene: {scene}")
+        self.is_coupled = self.BoundarySys.rigid_count > 0
+        if self.is_coupled:
+            from .coupling import SolverPBFMuJoCo
+            self.solver = SolverPBFMuJoCo(self.model, config=self.config,
+                boundaries=self.BoundarySys, verbose=verbose, feedback=feedback)
+            self.fluid_solver = self.solver.fluid
+        else:
+            self.solver = self.fluid_solver = PBF(self.model, config=self.config,
+                boundaries=self.BoundarySys, verbose=verbose)
         fn.init_particle_state(self)
         self.states = (self.model.state(), self.model.state())
+        self.control = self.model.control() if self.is_coupled else None
         self._state_index = 0
-        self._initial_predict = (self.solver.pre_Pos, self.solver.temp_pPos)
+        self._initial_predict = (self.fluid_solver.pre_Pos, self.fluid_solver.temp_pPos)
         self.step_graphs = None
+        if self.is_coupled:
+            self.BoundarySys.sync_body_poses(self.state)
 
         from warp.render import UsdRenderer
         self.renderer = UsdRenderer(stage_path) if stage_path else None
+        self._usd_meshes = None
 
     @property
     def state(self):
@@ -50,7 +75,7 @@ class Simulation:
 
     @property
     def gravity(self):
-        return self.solver.gravity
+        return self.fluid_solver.gravity
 
     @gravity.setter
     def gravity(self, value):
@@ -58,13 +83,12 @@ class Simulation:
         self.model.set_gravity(value)
         self.solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
 
-    def _substep(self, dt):
-        self.solver.step(self.state, self.state_out, None, None, dt)
-        self._state_index = 1 - self._state_index
-
     def _advance_frame(self):
         for _ in range(self.substep):
-            self._substep(self.dt)
+            if self.is_coupled:
+                self.state.clear_forces()
+            self.solver.step(self.state, self.state_out, self.control, None, self.dt)
+            self._state_index = 1 - self._state_index
 
     def step(self):
         with wp.ScopedDevice(self.model.device), wp.ScopedTimer("sub-step", synchronize=False):
@@ -76,14 +100,17 @@ class Simulation:
             self.solver.reset(state)
             state.clear_forces()
         self._state_index = 0
-        self.solver.pre_Pos, self.solver.temp_pPos = self._initial_predict
+        self.fluid_solver.pre_Pos, self.fluid_solver.temp_pPos = self._initial_predict
         self.gravity = wp.vec3(*self.config.gravity)
         self.frame_dt = self.config.frame_dt
         self.sim_time = 0.0
-        self.BoundarySys.reset()
+        if self.is_coupled:
+            self.BoundarySys.sync_body_poses(self.state)
+        else:
+            self.BoundarySys.reset()
 
     def _graph_parameters(self):
-        return self.dt, self.substep, tuple(self.gravity)
+        return self.dt, self.substep, tuple(self.gravity), self.solver.feedback if self.is_coupled else False
 
     def graph_needs_recapture(self):
         return self.step_graphs is None or self._graph_settings != self._graph_parameters()
@@ -92,13 +119,18 @@ class Simulation:
         """Capture State and prediction-buffer parities without advancing physics."""
         from . import PBF as kernels
 
-        solver = self.solver
+        solver = self.fluid_solver
         index = self._state_index
+        rigid_step = self.solver.rigid._step if self.is_coupled else None
         prediction = (solver.pre_Pos, solver.temp_pPos)
         graphs = {}
         with wp.ScopedDevice(self.model.device):
             wp.load_module(module=fn.__name__, device=self.model.device)
             wp.load_module(module=kernels.__name__, device=self.model.device)
+            wp.load_module(module=boundary_model.__name__, device=self.model.device)
+            if self.is_coupled:
+                from . import coupling
+                wp.load_module(module=coupling.__name__, device=self.model.device)
             solver.grid.reserve(self.n)
             try:
                 for start_index in (0, 1):
@@ -113,17 +145,21 @@ class Simulation:
             finally:
                 self._state_index = index
                 solver.pre_Pos, solver.temp_pPos = prediction
+                if self.is_coupled:
+                    self.solver.rigid._step = rigid_step
         self.step_graphs = graphs
         self._graph_settings = self._graph_parameters()
 
     def launch_graph(self):
         if self.graph_needs_recapture():
             self.capture_graph()
-        graph, index, prediction, temporary = self.step_graphs[(self._state_index, self.solver.pre_Pos.ptr)]
+        graph, index, prediction, temporary = self.step_graphs[(self._state_index, self.fluid_solver.pre_Pos.ptr)]
         with wp.ScopedDevice(self.model.device):
             wp.capture_launch(graph)
         self._state_index = index
-        self.solver.pre_Pos, self.solver.temp_pPos = prediction, temporary
+        self.fluid_solver.pre_Pos, self.fluid_solver.temp_pPos = prediction, temporary
+        if self.is_coupled:
+            self.solver.rigid._step += self.substep
         self.sim_time += self.frame_dt
 
     def render(self):
@@ -134,11 +170,21 @@ class Simulation:
             self.renderer.render_points(
                 points=self.pos.numpy(), radius=self.particle_radius, name="points", colors=(0.8, 0.3, 0.2)
             )
+            if self.is_coupled:
+                if self._usd_meshes is None:
+                    from .scene import load_render_meshes
+                    self._usd_meshes = load_render_meshes(self.BoundarySys)
+                poses = self.BoundarySys.device_data.transforms.numpy()
+                for index, (points, faces) in enumerate(self._usd_meshes):
+                    pose = poses[index]
+                    self.renderer.render_mesh(f"boundary_{index}", points, faces,
+                        pos=tuple(pose[:3]), rot=tuple(pose[3:]),
+                        colors=(.55, .55, .55) if index == 0 else (.85, .45, .15))
             self.renderer.end_frame()
 
 
-def create_pbf_simulation(verbose=False, config=None):
-    return Simulation(verbose=verbose, config=config)
+def create_pbf_simulation(verbose=False, config=None, scene="static"):
+    return Simulation(verbose=verbose, config=config, scene=scene)
 
 
 def reverse_gravity(sim):

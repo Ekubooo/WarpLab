@@ -110,7 +110,8 @@ class StaticTests(unittest.TestCase):
         state_out.body_q = wp.array([wp.transform_identity()], dtype=wp.transform)
         state_out.joint_q = wp.array([7.], dtype=float)
         try:
-            sim._substep(sim.dt)
+            sim.solver.step(sim.state, sim.state_out, None, None, sim.dt)
+            sim._state_index = 1 - sim._state_index
             np.testing.assert_array_equal(state_out.body_q.numpy(), [[0., 0., 0., 0., 0., 0., 1.]])
             np.testing.assert_array_equal(state_out.joint_q.numpy(), [7.])
         finally:

@@ -31,7 +31,8 @@ def capture_current(sim):
     snapshots = [(a, wp.clone(a)) for a in arrays]
     index, prediction = sim._state_index, (solver.pre_Pos, solver.temp_pPos)
     with wp.ScopedCapture() as capture:
-        sim._substep(sim.dt)
+        sim.solver.step(sim.state, sim.state_out, None, None, sim.dt)
+        sim._state_index = 1 - sim._state_index
     sim._state_index = index
     solver.pre_Pos, solver.temp_pPos = prediction
     return capture.graph, snapshots
@@ -48,7 +49,8 @@ def main():
         sim.reset()
         for _ in range(3):
             reference.step()
-            sim._substep(sim.dt)
+            sim.solver.step(sim.state, sim.state_out, None, None, sim.dt)
+            sim._state_index = 1 - sim._state_index
         cases = capture_reference(reference), capture_current(sim)
         start, end = wp.Event(enable_timing=True), wp.Event(enable_timing=True)
         samples = [[], []]

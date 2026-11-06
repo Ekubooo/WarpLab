@@ -17,6 +17,7 @@ from PBF import render_opengl as app
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--headless", action="store_true", help="Use a hidden real OpenGL context")
+    parser.add_argument("--scene", choices=("static", "stairs-rigids"), default="static")
     parser.add_argument("--output", type=Path, default=Path("outputs/pbf-newton/viewer"))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -26,7 +27,8 @@ def main():
     def create_simulation(*a, **kw):
         nonlocal simulation, initial
         simulation = create(*a, **kw)
-        initial = simulation.pos.numpy(), simulation.v.numpy()
+        initial = simulation.pos.numpy(), simulation.v.numpy(), (
+            simulation.state.body_q.numpy() if simulation.is_coupled else None)
         return simulation
 
     class VerifyRenderer(app.PBFRenderer):
@@ -43,6 +45,8 @@ def main():
                 assert simulation.n == 195525 and simulation.sim_time == 0.
                 np.testing.assert_array_equal(simulation.pos.numpy(), initial[0])
                 np.testing.assert_array_equal(simulation.v.numpy(), initial[1])
+                if simulation.is_coupled:
+                    np.testing.assert_array_equal(simulation.state.body_q.numpy(), initial[2])
             if frame in (1, 60, 121):
                 pixels = wp.empty((self.screen_height, self.screen_width, 3), dtype=wp.uint8)
                 assert self.get_pixels(pixels, split_up_tiles=False, use_uint8=True)
@@ -61,10 +65,13 @@ def main():
                 assert self.paused and simulation.sim_time == 0.
                 np.testing.assert_array_equal(simulation.pos.numpy(), initial[0])
                 np.testing.assert_array_equal(simulation.v.numpy(), initial[1])
+                if simulation.is_coupled:
+                    np.testing.assert_array_equal(simulation.state.body_q.numpy(), initial[2])
+                    np.testing.assert_array_equal(simulation.solver.boundary_forces.numpy(), 0.)
             if frame == 122:
                 self.paused = False
 
-    argv = [sys.argv[0], "--num-frames", "150", "--cuda-graph"]
+    argv = [sys.argv[0], "--num-frames", "150", "--cuda-graph", "--scene", args.scene]
     with patch.object(app, "PBFRenderer", VerifyRenderer), \
             patch.object(app, "create_pbf_simulation", create_simulation), patch.object(sys, "argv", argv):
         app.main()
@@ -84,7 +91,12 @@ def main():
     samples = particles[0].GetAttribute("positions").GetTimeSamples()
     assert samples == sorted(set(times))
     assert len(particles[0].GetAttribute("positions").Get(samples[0])) == simulation.n
+    if simulation.is_coupled:
+        meshes = [p for p in stage.Traverse() if p.GetTypeName() == "Mesh"]
+        assert len(meshes) == 4, [(str(p.GetPath()), p.GetTypeName()) for p in stage.Traverse()]
+        assert all(any(a.GetTimeSamples() for a in mesh.GetAttributes()) for mesh in meshes)
     result = dict(particles=simulation.n, frames=150, first_frame_unadvanced=True,
+                  scene=args.scene, bodies=simulation.model.body_count,
                   paused_reset=True, controls="G/Q/E/X/R/P", gl_errors=0,
                   usd_render_calls=10, usd_time_samples=samples)
     (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
