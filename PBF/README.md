@@ -208,10 +208,36 @@ python -B -m tests.pbf.benchmark_feedback --warmup 30 --trials 60
 python -B -m tests.pbf.benchmark_feedback --warmup 180 --trials 60
 ```
 
-MuJoCo runs on GPU with native contacts, update interval 1 and sleeping disabled.
+MuJoCo defaults to GPU with native contacts, update interval 1 and sleeping disabled.
 Contact/constraint capacities are 2048/8192. Graph capture preserves the MuJoCo
 Python step counter; replay advances it. Full reset also restores backend history
 and FK. Particle fields and rigid/joint fields have separate solver ownership.
+
+To select native MuJoCo CPU, set `USE_MUJOCO_CPU = True` in `PBF/coupling.py`
+**before creating Simulation**. There is no backend CLI option; `False` retains
+the existing GPU path. Model, both States, particles and pressure accumulation
+remain on GPU. Newton transfers rigid state/control/wrenches to CPU and returns
+the integrated rigid state; it does not transfer the fluid particle arrays.
+
+The existing `--cuda-graph` option keeps its meaning: GPU mode captures a complete
+frame; CPU mode captures one fluid substep for each State/prediction binding,
+then performs CPU rigid integration outside capture, synchronizes boundaries,
+swaps State and repeats. Time advances once per frame. Omitting `--cuda-graph` uses
+ordinary stepping with either backend. Changing dt/gravity or feedback rebuilds
+the graphs as before; reset clears native CPU history as well as both States.
+
+CPU/GPU tests and full-frame wall-time comparison (test-only backend options):
+
+```powershell
+python -B -m tests.pbf.coupled_lifecycle_case --cpu --output outputs/pbf-newton/cpu-backend/lifecycle-cpu.json
+python -B -m tests.pbf.verify_viewer --cpu --scene stairs-rigids --headless --output outputs/pbf-newton/cpu-backend/viewer
+python -B -m tests.pbf.benchmark_backends --radius .0125 --warmup 180 --trials 60 --output outputs/pbf-newton/cpu-backend/performance-195k.json
+python -B -m tests.pbf.benchmark_backends --radius .0092 --warmup 180 --trials 60 --output outputs/pbf-newton/cpu-backend/performance-494k.json
+```
+
+This initial CPU path uses Newton's existing bridge, including its temporary
+allocations and synchronous transfers. It is not assumed faster for few bodies;
+measure the complete coupled frame, not only native `mj_step`.
 
 Assets under `Assets/Rigid/stairs_box.*`, `stairs_sphere.*`, and static collision
 attachments are independent copies of the previously verified published assets.

@@ -5,6 +5,8 @@ is used throughout; every eager/Graph pair starts from identical GPU history.
 """
 
 from dataclasses import fields, is_dataclass
+import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -42,7 +44,8 @@ def checkpoint(sim):
     arrays.extend((("neighbors.count", cache.NeighborCount), ("neighbors.cache", cache.CacheBuffer)))
     data = sim.BoundarySys.device_data
     arrays.extend((("boundary.transforms", data.transforms), ("boundary.com", data.world_com)))
-    arrays.extend(nested_arrays(sim.solver.rigid.mjw_data, "mujoco"))
+    if not sim.use_mujoco_cpu:
+        arrays.extend(nested_arrays(sim.solver.rigid.mjw_data, "mujoco"))
     seen = set()
     unique = []
     for name, array in arrays:
@@ -53,7 +56,8 @@ def checkpoint(sim):
     fluid = sim.fluid_solver
     return dict(arrays=unique, index=sim._state_index,
                 prediction=(fluid.pre_Pos, fluid.temp_pPos),
-                time=sim.sim_time, counter=sim.solver.rigid._step)
+                time=sim.sim_time, counter=sim.solver.rigid._step,
+                cpu_data=copy.copy(sim.solver.rigid.mj_data) if sim.use_mujoco_cpu else None)
 
 
 def restore(sim, saved):
@@ -63,6 +67,9 @@ def restore(sim, saved):
     sim.fluid_solver.pre_Pos, sim.fluid_solver.temp_pPos = saved["prediction"]
     sim.sim_time = saved["time"]
     sim.solver.rigid._step = saved["counter"]
+    if saved["cpu_data"] is not None:
+        import mujoco
+        mujoco.mj_copyData(sim.solver.rigid.mj_data, sim.solver.rigid.mj_model, saved["cpu_data"])
 
 
 def assert_capture_unchanged(sim, saved):
@@ -74,6 +81,11 @@ def assert_capture_unchanged(sim, saved):
     for name, array, previous in saved["arrays"]:
         # Compare raw bytes: uninitialized backend scratch may contain NaNs.
         np.testing.assert_array_equal(array.numpy().view(np.uint8), previous.numpy().view(np.uint8), err_msg=name)
+    if sim.use_mujoco_cpu:
+        current, previous = sim.solver.rigid.mj_data, saved["cpu_data"]
+        assert current.time == previous.time and current.ncon == previous.ncon
+        for name in ("qpos", "qvel", "qacc_warmstart", "qfrc_applied", "xfrc_applied", "ctrl", "act"):
+            np.testing.assert_array_equal(getattr(current, name), getattr(previous, name), err_msg=name)
 
 
 def state_values(sim):
@@ -102,6 +114,12 @@ def compare_result(sim, expected):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--output", type=Path, default=Path("outputs/pbf-newton/coupled-lifecycle.json"))
+    args = parser.parse_args()
+    from PBF import coupling
+    coupling.USE_MUJOCO_CPU = args.cpu
     with wp.ScopedDevice("cuda:0"):
         sim = Simulation(scene="stairs-rigids")
         assert sim.n == 195525 and sim.model.body_count == 3
@@ -116,7 +134,8 @@ def main():
         report["initial_capture_unchanged"] = True
         for frame in range(300):
             sim.launch_graph()
-            contacts = int(sim.solver.rigid.mjw_data.nacon.numpy()[0])
+            contacts = (sim.solver.rigid.mj_data.ncon if sim.use_mujoco_cpu else
+                        int(sim.solver.rigid.mjw_data.nacon.numpy()[0]))
             pressure = float(np.linalg.norm(sim.solver.boundary_forces.numpy()))
             if frame >= 60 and contacts > 0 and pressure > 1e-5:
                 break
@@ -124,7 +143,8 @@ def main():
         report["contact_start"] = dict(frame=frame + 1, contacts=contacts, pressure_wrench_norm=pressure)
         contact = checkpoint(sim)
         report["saved_arrays"] = len(contact["arrays"])
-        assert any(name.startswith("mujoco.contact.") for name, _, _ in contact["arrays"])
+        if not sim.use_mujoco_cpu:
+            assert any(name.startswith("mujoco.contact.") for name, _, _ in contact["arrays"])
 
         for substeps in (1, 2, 3):
             for start_index in (0, 1):
@@ -179,7 +199,9 @@ def main():
         sim.frame_dt = sim.config.frame_dt
         sim.gravity = (9.81, 0., 0.)
         assert sim.graph_needs_recapture()
-        np.testing.assert_allclose(sim.solver.rigid.mjw_model.opt.gravity.numpy(), [[9.81, 0., 0.]], atol=1e-6)
+        gravity = (sim.solver.rigid.mj_model.opt.gravity if sim.use_mujoco_cpu else
+                   sim.solver.rigid.mjw_model.opt.gravity.numpy()[0])
+        np.testing.assert_allclose(gravity, [9.81, 0., 0.], atol=1e-6)
         sim.frame_dt *= .5
         saved = checkpoint(sim)
         sim.capture_graph()
@@ -194,7 +216,8 @@ def main():
         sim.reset()
         assert sim.sim_time == 0. and sim.frame_dt == sim.config.frame_dt
         assert sim.solver.rigid._step == 0
-        np.testing.assert_array_equal(sim.solver.rigid.mjw_data.time.numpy(), 0.)
+        backend = sim.solver.rigid.mj_data if sim.use_mujoco_cpu else sim.solver.rigid.mjw_data
+        np.testing.assert_array_equal(backend.time if sim.use_mujoco_cpu else backend.time.numpy(), 0.)
         assert sim.graph_needs_recapture()
         np.testing.assert_allclose(tuple(sim.gravity), sim.config.gravity)
         for state in sim.states:
@@ -203,7 +226,8 @@ def main():
             np.testing.assert_array_equal(state.body_f.numpy(), 0.)
             np.testing.assert_array_equal(state.particle_f.numpy(), 0.)
         np.testing.assert_array_equal(sim.solver.boundary_forces.numpy(), 0.)
-        np.testing.assert_array_equal(sim.solver.rigid.mjw_data.qacc_warmstart.numpy(), 0.)
+        np.testing.assert_array_equal(backend.qacc_warmstart if sim.use_mujoco_cpu else
+                                      backend.qacc_warmstart.numpy(), 0.)
         for name in ("pre_Pos", "temp_pPos", "delta_Pos", "lambda_Opt", "volume_Rho",
                      "volume_Grad", "delta_Vel", "curl"):
             np.testing.assert_array_equal(getattr(sim.fluid_solver, name).numpy(), 0., err_msg=name)
@@ -218,7 +242,9 @@ def main():
         assert sim.sim_time == sim.frame_dt
         assert np.isfinite(sim.pos.numpy()).all() and np.isfinite(sim.state.body_q.numpy()).all()
         report["passed"] = True
-        path = Path(__file__).resolve().parents[2] / "outputs/pbf-newton/coupled-lifecycle.json"
+        report["cpu"] = sim.use_mujoco_cpu
+        path = args.output
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2))
 

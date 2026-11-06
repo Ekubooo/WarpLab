@@ -40,6 +40,7 @@ class Simulation:
         else:
             self.solver = self.fluid_solver = PBF(self.model, config=self.config,
                 boundaries=self.BoundarySys, verbose=verbose)
+        self.use_mujoco_cpu = self.is_coupled and self.solver.rigid.use_mujoco_cpu
         fn.init_particle_state(self)
         self.states = (self.model.state(), self.model.state())
         self.control = self.model.control() if self.is_coupled else None
@@ -138,7 +139,13 @@ class Simulation:
                         self._state_index = start_index
                         solver.pre_Pos, solver.temp_pPos = start
                         with wp.ScopedCapture() as capture:
-                            self._advance_frame()
+                            if self.use_mujoco_cpu:
+                                # CPU integration cannot be captured. Record one GPU substep.
+                                self.state.clear_forces()
+                                self.solver.step_fluid(self.state, self.state_out, self.dt)
+                                self._state_index = 1 - self._state_index
+                            else:
+                                self._advance_frame()
                         graphs[(start_index, start[0].ptr)] = (
                             capture.graph, self._state_index, solver.pre_Pos, solver.temp_pPos,
                         )
@@ -153,6 +160,18 @@ class Simulation:
     def launch_graph(self):
         if self.graph_needs_recapture():
             self.capture_graph()
+        if self.use_mujoco_cpu:
+            with wp.ScopedDevice(self.model.device):
+                for _ in range(self.substep):
+                    graph, index, prediction, temporary = self.step_graphs[
+                        (self._state_index, self.fluid_solver.pre_Pos.ptr)]
+                    wp.capture_launch(graph)
+                    self.fluid_solver.pre_Pos, self.fluid_solver.temp_pPos = prediction, temporary
+                    self.solver.rigid.step(self.state, self.state_out, self.control, None, self.dt)
+                    self.BoundarySys.sync_body_poses(self.state_out)
+                    self._state_index = index
+            self.sim_time += self.frame_dt
+            return
         graph, index, prediction, temporary = self.step_graphs[(self._state_index, self.fluid_solver.pre_Pos.ptr)]
         with wp.ScopedDevice(self.model.device):
             wp.capture_launch(graph)

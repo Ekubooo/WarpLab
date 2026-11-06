@@ -1,5 +1,6 @@
 """Controlled GPU rigid contacts on the published stairs, without fluid kernels."""
 
+import argparse
 import json
 import math
 from pathlib import Path
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RigidCollisionCases:
-    def __init__(self):
+    def __init__(self, use_cpu=False):
         self.dt = 1. / 450.
         self.device = wp.get_device("cuda:0")
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
@@ -29,7 +30,7 @@ class RigidCollisionCases:
         self.model = builder.finalize(device=self.device)
         self.states = (self.model.state(), self.model.state())
         self.control = self.model.control()
-        self.rigid = SolverMuJoCo(self.model, use_mujoco_cpu=False,
+        self.rigid = SolverMuJoCo(self.model, use_mujoco_cpu=use_cpu,
             use_mujoco_contacts=True, update_data_interval=1, enable_sleeping=False,
             nconmax=2048, njmax=8192)
         self.com = self.model.body_com.numpy()
@@ -67,6 +68,8 @@ class RigidCollisionCases:
             newton.eval_fk(self.model, state.joint_q, state.joint_qd, state)
         self.stats = dict(peak_contacts=0, peak_constraints=0, peak_broadphase_pairs=0,
                           overflow_bits=0, minimum_contact_distance=0.)
+        if self.rigid.use_mujoco_cpu:
+            self.stats["peak_broadphase_pairs"] = None
 
     def advance(self):
         self.state.clear_forces()
@@ -76,6 +79,8 @@ class RigidCollisionCases:
     def prepare_graphs(self):
         self.place({0: (1., 2., .8)})
         self.advance()  # Load the rigid backend's kernels outside capture.
+        if self.rigid.use_mujoco_cpu:
+            return
         index, counter = self.index, self.rigid._step
         self.graphs = {}
         for start in (0, 1):
@@ -86,6 +91,12 @@ class RigidCollisionCases:
         self.index, self.rigid._step = index, counter
 
     def contacts(self):
+        if self.rigid.use_mujoco_cpu:
+            data = self.rigid.mj_data
+            assert not np.any(data.warning.number), data.warning.number
+            self.stats["peak_contacts"] = max(self.stats["peak_contacts"], data.ncon)
+            self.stats["peak_constraints"] = max(self.stats["peak_constraints"], data.nefc)
+            return self.contact_pairs(data.contact.geom[:data.ncon], data.contact.dist[:data.ncon])
         data = self.rigid.mjw_data
         count = int(data.nacon.numpy()[0])
         constraints = int(data.nefc.numpy().max())
@@ -98,10 +109,13 @@ class RigidCollisionCases:
         capacity_mask = int(OverflowType.ALL & ~(OverflowType.ITERATIONS | OverflowType.LS_ITERATIONS))
         assert not overflow & capacity_mask, f"MuJoCo capacity overflow: {overflow}"
         assert count < data.naconmax and broadphase < data.naconmax and constraints < data.njmax
-        if not count:
-            return []
         geoms = data.contact.geom.numpy()[:count]
         distances = data.contact.dist.numpy()[:count]
+        return self.contact_pairs(geoms, distances)
+
+    def contact_pairs(self, geoms, distances):
+        if not len(distances):
+            return []
         self.stats["minimum_contact_distance"] = min(self.stats["minimum_contact_distance"], float(distances.min()))
         assert distances.min() > -.02, "Excessive controlled-contact penetration"
         pairs = []
@@ -118,9 +132,12 @@ class RigidCollisionCases:
         pairs = set()
         steps = math.ceil(seconds / self.dt)
         for step in range(steps):
-            wp.capture_launch(self.graphs[self.index])
-            self.index = 1 - self.index
-            self.rigid._step += 1
+            if self.rigid.use_mujoco_cpu:
+                self.advance()
+            else:
+                wp.capture_launch(self.graphs[self.index])
+                self.index = 1 - self.index
+                self.rigid._step += 1
             current = self.contacts()  # Check all capacities after every substep.
             pairs.update(current)
             if observe is not None:
@@ -187,15 +204,20 @@ class RigidCollisionCases:
         result = self.result("platform-bunny", pairs)
         result["max_vertical_response_vs_free_fall"] = max(response)
         results.append(result)
-        return dict(passed=True, backend="MuJoCo Warp GPU", dt=self.dt,
-                    nconmax=self.rigid.mjw_data.naconmax, njmax=self.rigid.mjw_data.njmax,
+        return dict(passed=True, backend="MuJoCo CPU" if self.rigid.use_mujoco_cpu else "MuJoCo Warp GPU", dt=self.dt,
+                    nconmax=None if self.rigid.use_mujoco_cpu else self.rigid.mjw_data.naconmax,
+                    njmax=None if self.rigid.use_mujoco_cpu else self.rigid.mjw_data.njmax,
                     checked_every_substep=True, particle_output_unchanged=True, cases=results)
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--output", type=Path, default=ROOT / "outputs/pbf-newton/rigid-collisions.json")
+    args = parser.parse_args()
     with wp.ScopedDevice("cuda:0"):
-        report = RigidCollisionCases().run()
-    output = ROOT / "outputs/pbf-newton/rigid-collisions.json"
+        report = RigidCollisionCases(use_cpu=args.cpu).run()
+    output = args.output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"passed": True, "cases": [case["name"] for case in report["cases"]]}))

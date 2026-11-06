@@ -147,23 +147,24 @@ def main():
                   inputs=[solver.boundary_forces], outputs=[source.body_f])
         np.testing.assert_allclose(source.body_f.numpy(), external + reaction, rtol=1e-6, atol=1e-7)
         particle_outputs = target.particle_q.numpy().copy(), target.particle_qd.numpy().copy()
-        rigid = SolverMuJoCo(model, use_mujoco_cpu=False, use_mujoco_contacts=True,
-                             disable_contacts=True, enable_sleeping=False,
-                             update_data_interval=1, integrator="euler")
-        rigid.step(source, target, model.control(), None, dt)
-        velocity = target.body_qd.numpy()[1]
-        expected_omega = np.linalg.solve(model.body_inertia.numpy()[1], reaction[1, 3:]) * dt
-        np.testing.assert_allclose(velocity[3:], expected_omega, rtol=2e-4, atol=2e-6)
-        expected_linear = (external[1, :3] + reaction[1, :3]) * dt / model.body_mass.numpy()[1]
-        np.testing.assert_allclose(velocity[:3], expected_linear, rtol=2e-4, atol=2e-6)
-        np.testing.assert_array_equal(target.particle_q.numpy(), particle_outputs[0])
-        np.testing.assert_array_equal(target.particle_qd.numpy(), particle_outputs[1])
+        for use_cpu in (False, True):
+            rigid = SolverMuJoCo(model, use_mujoco_cpu=use_cpu, use_mujoco_contacts=True,
+                                 disable_contacts=True, enable_sleeping=False,
+                                 update_data_interval=1, integrator="euler")
+            rigid.step(source, target, model.control(), None, dt)
+            velocity = target.body_qd.numpy()[1]
+            expected_omega = np.linalg.solve(model.body_inertia.numpy()[1], reaction[1, 3:]) * dt
+            np.testing.assert_allclose(velocity[3:], expected_omega, rtol=2e-4, atol=2e-6)
+            expected_linear = (external[1, :3] + reaction[1, :3]) * dt / model.body_mass.numpy()[1]
+            np.testing.assert_allclose(velocity[:3], expected_linear, rtol=2e-4, atol=2e-6)
+            np.testing.assert_array_equal(target.particle_q.numpy(), particle_outputs[0])
+            np.testing.assert_array_equal(target.particle_qd.numpy(), particle_outputs[1])
 
         report = dict(pressure_impulse_balance=True, translated_rotated_asset=True,
                       nonzero_asset_offset=True, eccentric_com_torque=True, body_mapping=True,
                       shared_asset_independent=True, iteration_accumulation=True, dt_squared=True,
                       projection_without_reaction=True, field_ownership=True,
-                      external_force_preserved=True, mujoco_pressure_rotation=True)
+                      external_force_preserved=True, mujoco_pressure_rotation=True, cpu_pressure_rotation=True)
         output = Path(__file__).resolve().parents[2] / "outputs/pbf-newton/pressure.json"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + "\n")

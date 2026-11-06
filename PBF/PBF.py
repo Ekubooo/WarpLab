@@ -208,14 +208,15 @@ def calc_boundaryForce(
             instance = boundaries.instances.rigid_instance_ids[rigid]
             valid, distance, direction = boundary.query_instance_boundary(
                 boundaries.instances, instance, currPos, fn.Smoothing_Radius)
-            if valid:
-                volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
-                offset = direction * distance
-                grad = volume * fn.GradPow3(wp.vec3(0.0), offset)
-                force = (fn.Fluid_Mass * lambda_i / (dt * dt)) * grad
-                arm = currPos + offset - boundaries.instances.world_com[rigid]
-                wrench = wp.spatial_vector(force, wp.cross(arm, force))
-                wp.atomic_add(boundaries.forces, boundaries.instances.body_ids[rigid], wrench)
+            if not valid:
+                continue
+            volume = boundary.sample_instance_volume(boundaries.instances, instance, currPos)
+            offset = direction * distance
+            grad = volume * fn.GradPow3(wp.vec3(0.0), offset)
+            force = (fn.Fluid_Mass * lambda_i / (dt * dt)) * grad
+            arm = currPos + offset - boundaries.instances.world_com[rigid]
+            wrench = wp.spatial_vector(force, wp.cross(arm, force))
+            wp.atomic_add(boundaries.forces, boundaries.instances.body_ids[rigid], wrench)
 
 
 @wp.kernel

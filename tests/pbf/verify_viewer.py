@@ -18,8 +18,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--headless", action="store_true", help="Use a hidden real OpenGL context")
     parser.add_argument("--scene", choices=("static", "stairs-rigids"), default="static")
+    parser.add_argument("--cpu", action="store_true", help="Test the code-selected CPU backend")
     parser.add_argument("--output", type=Path, default=Path("outputs/pbf-newton/viewer"))
     args = parser.parse_args()
+    from PBF import coupling
+    coupling.USE_MUJOCO_CPU = args.cpu
     args.output.mkdir(parents=True, exist_ok=True)
     simulation, initial = None, None
     create = app.create_pbf_simulation

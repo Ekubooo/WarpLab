@@ -303,7 +303,7 @@ def parse_args(argv=None):
         default=PBFConfig.max_speed,
         help="Particle speed mapped to the white end of the billboard color gradient.",
     )
-    parser.add_argument("--cuda-graph", action="store_true", help="Capture and replay complete frames.")
+    parser.add_argument("--cuda-graph", action="store_true", help="Capture GPU frames, or fluid substeps with CPU rigid bodies.")
     parser.add_argument("--verbose", action="store_true", help="Print additional per-kernel timing information.")
     parser.add_argument(
         "--config", dest="config_path", metavar="PATH",
