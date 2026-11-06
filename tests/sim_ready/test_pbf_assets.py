@@ -16,7 +16,7 @@ from PBF.pbf_helper import PBFConfig
 from PBF import boundary_model
 from Sim_Ready import publish
 from Sim_Ready.asset_io import file_digest, sdf_digest
-from Sim_Ready.pipelines import pbf
+from Sim_Ready.pipelines.preset import pbf
 
 
 class PipelineTests(unittest.TestCase):
@@ -109,7 +109,7 @@ from PBF.simulation import Simulation
 sim = Simulation(scene='stairs-rigids')
 sim.step()
 assert all('Sim_Ready.' + name not in sys.modules for name in
-           ('geometry', 'sdf', 'collision', 'validation', 'pipelines.pbf'))
+           ('geometry', 'sdf', 'collision', 'validation', 'pipelines.preset.pbf', 'pipelines.container', 'pipelines.rigid'))
 sim.close()
 """
         result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
@@ -137,6 +137,35 @@ print(result)
 
 
 class PublicationTests(unittest.TestCase):
+    def test_rigid_pipeline_only_stages_requested_products(self):
+        from Sim_Ready import collision
+        from Sim_Ready.config import BakeOptions
+        from Sim_Ready.pipelines import rigid
+        mesh = rigid.prepare(dict(kind="box", size=[.3] * 3))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(publish, "publish_files", side_effect=AssertionError("preset owns publication")), \
+                    patch.object(collision, "prepare_hulls", side_effect=AssertionError("native shape")):
+                obj, nvdb, hulls = rigid.build(mesh, root / "box", bake_options=BakeOptions(voxel_size=.005))
+            self.assertTrue(obj.is_file() and nvdb.is_file())
+            self.assertEqual(hulls, ())
+            self.assertEqual(sorted(p.suffix for p in root.iterdir()), [".nvdb", ".obj"])
+            with patch.object(collision, "prepare_hulls", return_value=(mesh,)) as decompose:
+                _, _, hulls = rigid.build(mesh, root / "proxy", collision_cache=root / "hulls")
+            decompose.assert_called_once_with(mesh, "proxy", root / "hulls")
+            self.assertEqual(hulls, (mesh,))
+
+    def test_asset_ignore_rules_preserve_code_and_records(self):
+        ignored = ("Sim_Ready/Assets/bunny_flat_bottom.obj", "Sim_Ready/Assets/spot.obj",
+                   "PBF/Assets/stairs_scene.json", "PBF/Assets/stairs_scene.collision.npz",
+                   "PBF/Assets/stairs_scene.nvdb", "PBF/Assets/Rigid/stairs_box.json")
+        kept = ("PBF/Assets/.gitignore", "PBF/config/default_para.json", "PBF/scene_data.py",
+                "Sim_Ready/README.md", "Sim_Ready/PROVENANCE.md", "Sim_Ready/pipelines/preset/pbf.py")
+        for expected, paths in ((0, ignored), (1, kept)):
+            for path in paths:
+                result = subprocess.run(["git", "check-ignore", "--no-index", "-q", path], cwd=pbf.PROJECT)
+                self.assertEqual(result.returncode, expected, path)
+
     def test_rollback_after_partial_group_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -159,7 +188,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_help_and_argument_conflict_do_not_initialize_cuda(self):
         for args in (("--help",), ("--scene", "static", "--config", "missing.json", "--particle-radius", ".01")):
-            result = subprocess.run([sys.executable, "-m", "Sim_Ready.pipelines.pbf", *args],
+            result = subprocess.run([sys.executable, "-m", "Sim_Ready.pipelines.preset.pbf", *args],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0 if args == ("--help",) else 2)
             self.assertNotIn("initialized", result.stdout)
@@ -172,7 +201,7 @@ class PublicationTests(unittest.TestCase):
                 imports = ([node.module or ""] if isinstance(node, ast.ImportFrom) else
                            [n.name for n in node.names] if isinstance(node, ast.Import) else [])
                 self.assertFalse(any(name.startswith("demos") for name in imports), str(path))
-                if path.parent.name != "pipelines":
+                if path.parent.name != "preset":
                     self.assertFalse(any(name.startswith("PBF") for name in imports), str(path))
         from Sim_Ready import geometry, sdf
         self.assertIn("Mesh.create_terrain(", (pbf.ROOT / "geometry.py").read_text())

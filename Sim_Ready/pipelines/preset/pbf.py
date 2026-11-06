@@ -8,12 +8,12 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from ..asset_io import file_digest, sdf_digest
-from ..config import GeometryOptions, BakeOptions
-from ..publish import publish_files, save_mesh_obj
+from ...asset_io import file_digest, sdf_digest
+from ...config import GeometryOptions, BakeOptions
+from ...publish import publish_files
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PROJECT = ROOT.parent
 SOURCE = ROOT / "Assets" / "bunny_flat_bottom.obj"
 OUTPUT = PROJECT / "PBF" / "Assets"
@@ -30,7 +30,7 @@ def asset_names(scene):
 
 def build_recipe(scene, config):
     from PBF.scene_data import BOX_SIZE, SPHERE_RADIUS, SPHERE_SUBDIVISIONS
-    from ..collision import COACD_OPTIONS, COACD_VERSION
+    from ...collision import COACD_OPTIONS, COACD_VERSION
 
     support = max(.05, 4. * config.particle_radius)
     geometry = {"stairs_scene": dict(kind="stairs", version=1),
@@ -50,21 +50,13 @@ def build_recipe(scene, config):
 
 def prepare_geometry(recipe):
     import numpy as np
-    import trimesh
-    from .. import geometry
+    from .. import container, rigid
 
-    options = GeometryOptions(**recipe["terrain"])
-    scene = geometry.prepare_scene(SOURCE, options=options)
-    walls, _ = geometry.container_parts(scene.terrain, options)
-    boxes = geometry.terrain_boxes(options) + walls
-    static_boxes = [(m.bounds.mean(axis=0).tolist(), (m.extents / 2.).tolist()) for m in boxes]
-    meshes = {"stairs_scene": geometry.landscape(scene, options)}
+    scene, visible, static_boxes = container.prepare(SOURCE, options=GeometryOptions(**recipe["terrain"]))
+    meshes = {"stairs_scene": visible}
     for name, description in recipe["geometry"].items():
-        if description["kind"] == "box":
-            meshes[name] = trimesh.creation.box(extents=description["size"])
-        elif description["kind"] == "sphere":
-            meshes[name] = trimesh.creation.icosphere(radius=description["radius"],
-                                                     subdivisions=description["subdivisions"])
+        if name != "stairs_scene":
+            meshes[name] = rigid.prepare(description)
     if np.asarray(static_boxes).shape != (24, 2, 3):
         raise ValueError("The current stairs recipe requires 24 collision boxes")
     return scene, meshes, static_boxes
@@ -75,7 +67,7 @@ def validate_asset(root, name, description, device):
     import warp as wp
     import numpy as np
     import trimesh
-    from ..collision import _validate_hulls
+    from ...collision import _validate_hulls
     from PBF.boundary_model import _read_boundary_volumes, _check_volume_map_layout
 
     stem = root / name
@@ -166,25 +158,25 @@ def reuse_published(root, stage, recipe, meshes, static_boxes, device):
 def generate_assets(stage, recipe, scene, meshes, static_boxes, device):
     import numpy as np
     import warp as wp
-    from .. import geometry, validation, sdf, collision
+    from .. import container, rigid
 
-    options = GeometryOptions(**recipe["terrain"])
-    solid, bounds = geometry.container(scene, options)
-    container = validation.validate_container(solid, bounds, tolerance=options.simplify_tolerance)
-    hulls = collision.prepare_hulls(scene.model, "bunny", stage / "collision-cache")
+    products = {"stairs_scene": container.build(scene, meshes["stairs_scene"], stage / "stairs_scene",
+        geometry_options=GeometryOptions(**recipe["terrain"]), bake_options=BakeOptions(**recipe["static_bake"]),
+        collision_cache=stage / "collision-cache", collision_name="bunny", device=device)}
     for name, mesh in meshes.items():
+        if name == "stairs_scene":
+            continue
+        products[name] = rigid.build(mesh, stage / name, bake_options=BakeOptions(**recipe["rigid_bake"]),
+                                     device=device)
+    # The preset owns the published attachment format and the scene-wide transaction.
+    for name, (mesh_path, sdf_path, hulls) in products.items():
         stem = stage / name
-        stem.parent.mkdir(parents=True, exist_ok=True)
         is_static = name == "stairs_scene"
         bake = BakeOptions(**recipe["static_bake" if is_static else "rigid_bake"])
-        volume = (sdf.bake(container, options=bake, device=device) if is_static else
-                  sdf.bake_rigid(validation.validate_solid(mesh), options=bake, device=device))
-        save_mesh_obj(mesh, stem.with_suffix(".obj"), digits=8 if is_static else 17)
-        sdf.save_volume(volume, stem.with_suffix(".nvdb"))
-        with stem.with_suffix(".nvdb").open("rb") as stream:
+        with sdf_path.open("rb") as stream:
             volume = wp.Volume.load_from_nvdb(stream, device=device)
         metadata = dict(version=1, geometry=recipe["geometry"][name], local_frame="asset",
-            mesh_sha256=file_digest(stem.with_suffix(".obj")), sdf_sha256=sdf_digest(volume),
+            mesh_sha256=file_digest(mesh_path), sdf_sha256=sdf_digest(volume),
             sources={SOURCE.name: recipe["source"]} if is_static else {},
             build=dict(geometry=recipe["terrain"], decomposition=recipe["decomposition"],
                        bake=asdict(bake), dependencies=recipe["dependencies"]) if is_static else
@@ -207,7 +199,7 @@ def build_scene_assets(scene, config=None, *, device="cuda:0", output_dir=None,
     import warp as wp
     from PBF.pbf_helper import PBFConfig
     from PBF.boundary_model import load_boundary_volumes
-    from ..collision import cache_directory
+    from ...collision import cache_directory
 
     config = config or PBFConfig()
     recipe = build_recipe(scene, config)

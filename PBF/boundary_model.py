@@ -392,8 +392,8 @@ def _resolve_boundary_requests(scene):
     for filename in scene.static_assets:
         path = resolve_sdf_path(filename)
         if not path.is_file():
-            raise FileNotFoundError(f"Static SDF not found: {path}; prepare offline with "
-                                    "python -m Sim_Ready.pipelines.pbf --scene static")
+            raise FileNotFoundError(f"Static SDF not found: {path}. "
+                                    "Prepare assets offline with Sim_Ready; see Sim_Ready/README.md.")
         requests.append(_BoundaryRequest(path, path.with_suffix(".obj"), 1, False))
     directory = Path(ASSET_DIR) / "Rigid"
     meshes = {}
@@ -663,8 +663,7 @@ def _load_boundary_volumes(path, support_radius, quadrature_points, selected):
         return sdf, volume_map
     except Exception as error:
         raise RuntimeError(f"Cannot load boundary volumes {path}: {error}. "
-                           "Prepare assets offline with python -m Sim_Ready.pipelines.pbf "
-                           "--scene stairs-rigids using the same particle radius/config") from error
+                           "Prepare assets offline with Sim_Ready; see Sim_Ready/README.md.") from error
 
 
 # =============================================================================

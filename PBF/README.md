@@ -214,18 +214,26 @@ publishes this scene offline; demo and archive resources remain unchanged.
 
 ```powershell
 python -m pip install -r Sim_Ready/requirements.txt
-python -m Sim_Ready.pipelines.pbf --scene static
-python -m Sim_Ready.pipelines.pbf --scene stairs-rigids
+python -m Sim_Ready.pipelines.preset.pbf --scene static
+python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids
 ```
+
+新电脑先手动把同一份 `bunny_flat_bottom.obj` 放入 `Sim_Ready/Assets`；
+源模型和全部生成附件均不通过 Git 传递。所需源文件摘要、依赖安装和完整还原步骤
+见 `Sim_Ready/README.md`。当前场景无需 Spot；盒子、球与地形由代码生成。
+场景配方仍在代码中，流体参数 JSON 保留为副本／记录，不默认读取。
+
+`preset/pbf.py` 统一管理场景、缓存和发布，分别调用 `container.py` 与 `rigid.py`
+完成两类边界资产的处理；底层不创建 Simulation，也不自行发布到运行目录。
 
 默认验证复用现有正式资产或独立缓存；缺少可复用产物时从源模型完整生成。
 需要更大的 SDF 支持半径时，使用与仿真一致的配置或半径：
 
 ```powershell
-python -m Sim_Ready.pipelines.pbf --scene stairs-rigids --particle-radius 0.013
-python -m Sim_Ready.pipelines.pbf --scene stairs-rigids --config PBF/config/default_para.json
+python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids --particle-radius 0.013
+python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids --config PBF/config/default_para.json
 # 完整重建先发布到独立目录，便于和现有基准比较。
-python -m Sim_Ready.pipelines.pbf --scene stairs-rigids --rebuild --output-dir outputs/pbf-newton/rebuilt-assets
+python -m Sim_Ready.pipelines.preset.pbf --scene stairs-rigids --rebuild --output-dir outputs/pbf-newton/rebuilt-assets
 ```
 
 `--config` 与 `--particle-radius` 互斥。现有默认动态资产支持 `h <= 0.05 m`；
@@ -306,7 +314,7 @@ convexity and complete tile equality are checked in tests, not per startup.
 Dynamic SDFs have 0.005 m voxels and support `h <= 0.05 m` (`r <= 0.0125 m`).
 Changing particle radius refreshes VM in this package only; exceeding SDF support
 requires offline rebaking and replacing the complete matching published asset.
-The dedicated offline PBF pipeline is `Sim_Ready.pipelines.pbf`; it is not a
+The dedicated offline PBF pipeline is `Sim_Ready.pipelines.preset.pbf`; it is not a
 general asset registry. Geometry processing never runs during simulation startup.
 
 Validation responsibilities: PBFConfig owns parameter types/ranges; JSON owns

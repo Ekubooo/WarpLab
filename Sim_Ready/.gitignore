@@ -1,1 +1,2 @@
-!Assets/*.obj
+# Source models are supplied manually, not through Git.
+/Assets/

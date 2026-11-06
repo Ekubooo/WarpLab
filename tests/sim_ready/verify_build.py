@@ -10,7 +10,7 @@ import trimesh
 import warp as wp
 
 from Sim_Ready.asset_io import file_digest, sdf_digest
-from Sim_Ready.pipelines import pbf
+from Sim_Ready.pipelines.preset import pbf
 
 
 @wp.kernel(enable_backward=False)

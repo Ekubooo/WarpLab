@@ -50,8 +50,8 @@ def load_rigid_assets(asset_dir=None):
     collision_path = root / "stairs_scene.collision.npz"
     for path in (*paths, collision_path):
         if not path.is_file():
-            raise FileNotFoundError(f"Missing published stairs-rigids asset: {path}; build offline with "
-                                    "python -m Sim_Ready.pipelines.pbf --scene stairs-rigids")
+            raise FileNotFoundError(f"Missing published stairs-rigids asset: {path}. "
+                                    "Prepare assets offline with Sim_Ready; see Sim_Ready/README.md.")
     metadata = {}
     for name, geometry in recipes:
         data = json.loads((root / (name + ".json")).read_text(encoding="utf-8"))
