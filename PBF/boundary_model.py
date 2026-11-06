@@ -392,7 +392,8 @@ def _resolve_boundary_requests(scene):
     for filename in scene.static_assets:
         path = resolve_sdf_path(filename)
         if not path.is_file():
-            raise FileNotFoundError(f"Static SDF not found: {path}")
+            raise FileNotFoundError(f"Static SDF not found: {path}; prepare offline with "
+                                    "python -m Sim_Ready.pipelines.pbf --scene static")
         requests.append(_BoundaryRequest(path, path.with_suffix(".obj"), 1, False))
     directory = Path(ASSET_DIR) / "Rigid"
     meshes = {}
@@ -546,7 +547,7 @@ def _nvdb_io():
         root = str(Path(__file__).resolve().parents[1])
         if root not in sys.path:
             sys.path.insert(0, root)
-    from demos.sim_Ready import nvdb_io
+    from Sim_Ready import nvdb_io
     return nvdb_io
 
 
@@ -628,7 +629,7 @@ def load_boundary_volumes(path, support_radius, *, quadrature_points=16, device=
     """Load a matched grid pair, or compute, atomically cache and reload it.
 
     Only the selected NVDB is updated. Geometry baking and asset publication
-    remain the responsibility of sim_Ready's standalone pipeline.
+    remain the responsibility of Sim_Ready's standalone pipeline.
     """
     _check_volume_options(support_radius, quadrature_points)
     selected = wp.get_device(device)
@@ -661,7 +662,9 @@ def _load_boundary_volumes(path, support_radius, quadrature_points, selected):
         _check_volume_map_layout(sdf, volume_map)
         return sdf, volume_map
     except Exception as error:
-        raise RuntimeError(f"Cannot load boundary volumes {path}: {error}") from error
+        raise RuntimeError(f"Cannot load boundary volumes {path}: {error}. "
+                           "Prepare assets offline with python -m Sim_Ready.pipelines.pbf "
+                           "--scene stairs-rigids using the same particle radius/config") from error
 
 
 # =============================================================================

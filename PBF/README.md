@@ -198,15 +198,40 @@ contacts are outside the fluid solver's contract. Unsupported optional reset
 and observable requests fail explicitly. This is not full Newton feature coverage.
 
 Production dependencies on existing demos are limited to the unchanged public
-`demos.fluid.common.billboard_renderer` and `demos.sim_Ready.nvdb_io`. Keep those
-packages alongside this one. Own simulation modules disable backward generation;
+`demos.fluid.common.billboard_renderer`. NVDB I/O is maintained independently
+in the root `Sim_Ready` package. Own simulation modules disable backward generation;
 shared and third-party source/configuration is not modified.
 
 Published assets were copied and verified locally; NVDB files remain local ignored
 resources, following repository conventions. Runtime volume-map refresh may write
-only the new package's NVDB. No offline producer is added in this stage; future
-geometry work must publish/copy explicitly into this package rather than change
-the original demo's resources.
+only the new package's NVDB. The independent `Sim_Ready` package produces and
+publishes this scene offline; demo and archive resources remain unchanged.
+
+## 离线资产准备
+
+正式离线工具位于根目录 `Sim_Ready`，具体流程与参数见 `Sim_Ready/README.md`。
+首次准备或资源缺失时，在停止仿真后运行：
+
+```powershell
+python -m pip install -r Sim_Ready/requirements.txt
+python -m Sim_Ready.pipelines.pbf --scene static
+python -m Sim_Ready.pipelines.pbf --scene stairs-rigids
+```
+
+默认验证复用现有正式资产或独立缓存；缺少可复用产物时从源模型完整生成。
+需要更大的 SDF 支持半径时，使用与仿真一致的配置或半径：
+
+```powershell
+python -m Sim_Ready.pipelines.pbf --scene stairs-rigids --particle-radius 0.013
+python -m Sim_Ready.pipelines.pbf --scene stairs-rigids --config PBF/config/default_para.json
+# 完整重建先发布到独立目录，便于和现有基准比较。
+python -m Sim_Ready.pipelines.pbf --scene stairs-rigids --rebuild --output-dir outputs/pbf-newton/rebuilt-assets
+```
+
+`--config` 与 `--particle-radius` 互斥。现有默认动态资产支持 `h <= 0.05 m`；
+较小半径仍由运行时检查 VM、必要时重算写回，不需要重烘焙 SDF。
+源几何、SDF、碰撞代理及质量属性的生产留在离线阶段。`scene_data.py`
+提供生产与装配共用的基础尺寸，不改变实例、流体参数或运行配置格式。
 
 ## Rigid scene and coupling
 
@@ -281,7 +306,8 @@ convexity and complete tile equality are checked in tests, not per startup.
 Dynamic SDFs have 0.005 m voxels and support `h <= 0.05 m` (`r <= 0.0125 m`).
 Changing particle radius refreshes VM in this package only; exceeding SDF support
 requires offline rebaking and replacing the complete matching published asset.
-This version consumes published assets and does not add a general publisher.
+The dedicated offline PBF pipeline is `Sim_Ready.pipelines.pbf`; it is not a
+general asset registry. Geometry processing never runs during simulation startup.
 
 Validation responsibilities: PBFConfig owns parameter types/ranges; JSON owns
 parsing and unknown fields; public asset/precompute entries check inputs once.

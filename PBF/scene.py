@@ -9,11 +9,10 @@ import numpy as np
 import warp as wp
 
 from . import boundary_model
+from .scene_data import BOX_SIZE, SPHERE_RADIUS, SPHERE_SUBDIVISIONS
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "Assets"
-BOX_SIZE = .30
-SPHERE_RADIUS = .15
 
 
 @dataclass(frozen=True)
@@ -44,14 +43,15 @@ def load_rigid_assets(asset_dir=None):
     recipes = (
         ("stairs_scene", dict(kind="stairs", version=1)),
         ("Rigid/stairs_box", dict(kind="box", size=[BOX_SIZE] * 3)),
-        ("Rigid/stairs_sphere", dict(kind="sphere", radius=SPHERE_RADIUS, subdivisions=3)),
+        ("Rigid/stairs_sphere", dict(kind="sphere", radius=SPHERE_RADIUS, subdivisions=SPHERE_SUBDIVISIONS)),
     )
     # Check the complete set before a volume-map cache can be updated.
     paths = [root / (name + suffix) for name, _ in recipes for suffix in (".obj", ".nvdb", ".json")]
     collision_path = root / "stairs_scene.collision.npz"
     for path in (*paths, collision_path):
         if not path.is_file():
-            raise FileNotFoundError(f"Missing published stairs-rigids asset: {path}; restore the complete PBF/Assets set")
+            raise FileNotFoundError(f"Missing published stairs-rigids asset: {path}; build offline with "
+                                    "python -m Sim_Ready.pipelines.pbf --scene stairs-rigids")
     metadata = {}
     for name, geometry in recipes:
         data = json.loads((root / (name + ".json")).read_text(encoding="utf-8"))
